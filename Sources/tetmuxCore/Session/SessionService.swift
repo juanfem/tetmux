@@ -22,6 +22,12 @@ public actor SessionService {
     private let resizeDebounce = Duration.milliseconds(100)
     /// Anything larger goes through a paste buffer instead of `send-keys` (§3.2).
     private let pasteThreshold = 512
+    /// Ceiling on one `set-buffer` command line. A clipboard can hold megabytes, and one command line
+    /// that size is a single write the pty has to absorb before anything else moves.
+    private let pasteChunkBytes = 4096
+    /// Names each paste's buffer uniquely.
+    private var pasteSequence = 0
+
 
     public init() {}
 
@@ -57,11 +63,34 @@ public actor SessionService {
         var resizeTask: Task<Void, Never>?
         var topologyRefreshTask: Task<Void, Never>?
 
+        /// Whether a secret has already been written on this channel. One attempt per channel: a
+        /// rejected password answered again is how accounts get locked out, and the retry the user
+        /// really wants is a fresh connection with a fresh prompt.
+        var answeredPrompt = false
+        /// The prompt we have already told the UI about, so the same bytes arriving in a later read
+        /// do not raise it twice.
+        var reportedPrompt: AuthenticationPrompt.Kind?
+
         var pendingKeys: [String: [UInt8]] = [:]
         var repaintedPanes: Set<String> = []
+
         var desiredSize: (cols: Int, rows: Int)?
         var lastSentSize: (cols: Int, rows: Int)?
         var userInitiatedDisconnect = false
+
+        /// Whether this session's windows are sized individually (`window-size manual`) rather than
+        /// from the client's size. Needs tmux 2.9; below that there is one size for everything.
+        var sizesWindowsIndividually = false
+        /// Per-window sizes requested by whichever macOS window is showing each tmux window.
+        var desiredWindowSizes: [String: (cols: Int, rows: Int)] = [:]
+        var lastSentWindowSizes: [String: (cols: Int, rows: Int)] = [:]
+        /// Which view owns each tmux window's size.
+        ///
+        /// One tmux window can be on screen in two macOS windows of different sizes. Letting both
+        /// drive `resize-window` makes them fight: each `%layout-change` prompts the other to ask for
+        /// its own size back, forever. The focused view owns the size; the other letterboxes.
+        var windowSizeOwners: [String: UUID] = [:]
+        var windowResizeTask: Task<Void, Never>?
 
         init(transport: PtyTransport, sessionTarget: String) {
             self.transport = transport
@@ -72,6 +101,7 @@ public actor SessionService {
             rttTask?.cancel()
             keyFlushTask?.cancel()
             resizeTask?.cancel()
+            windowResizeTask?.cancel()
             topologyRefreshTask?.cancel()
         }
     }
@@ -89,12 +119,16 @@ public actor SessionService {
             case listWindows
             case listPanes
             case listClients
-            case capturePane(paneId: String)
+            /// `target` scopes the repaint to a single subscriber. The same pane can be on screen in
+            /// two macOS windows, and the payload begins by clearing the screen *and* the scrollback —
+            /// broadcasting a late joiner's repaint would wipe the history the other window is holding.
+            case capturePane(paneId: String, target: UUID?)
             case roundTrip(sentAt: ContinuousClock.Instant)
         }
     }
 
     private var reconnectAttempts: [String: Int] = [:]
+
     private var outputSubscribers: [String: [String: [UUID: AsyncStream<Data>.Continuation]]] = [:]
     /// The session to reattach to when a channel is re-established, by host.
     ///
@@ -156,6 +190,7 @@ public actor SessionService {
     public func setDiagnosticLogger(_ logger: (@Sendable (String) -> Void)?) {
         diagnosticLogger = logger
     }
+
 
     private func broadcastState() {
         let snapshot = getHosts()
@@ -228,6 +263,7 @@ public actor SessionService {
     public func disconnectHost(hostId: String) {
         guard let connection = connections[hostId] else { return }
         connection.userInitiatedDisconnect = true
+        restoreWindowSizePolicy(hostId: hostId, connection: connection)
         teardown(hostId: hostId, connection: connection)
         reconnectAttempts[hostId] = 0
         withHost(hostId) { $0.connectionState = .disconnected }
@@ -261,7 +297,9 @@ public actor SessionService {
             destination: config.sshDestination,
             port: config.port,
             controlPath: try controlPath(),
-            remoteCommand: remoteCommand
+            remoteCommand: remoteCommand,
+            forwards: config.forwards,
+            expectsPasswordPrompt: config.usesPassword
         ))
     }
 
@@ -306,6 +344,7 @@ public actor SessionService {
             if connection.preHandshakeLog.count > 8192 {
                 connection.preHandshakeLog.removeFirst(connection.preHandshakeLog.count - 8192)
             }
+            detectAuthenticationPrompt(hostId: hostId, connection: connection)
         }
 
         let events = connection.codec.feed(data)
@@ -345,7 +384,7 @@ public actor SessionService {
             connection.current = nil
             let message = (failed?.lines ?? []).map { String(decoding: $0, as: UTF8.self) }.joined(separator: "\n")
             log("[\(hostId)] %error \(number): \(message)")
-            if let failed, case .capturePane(let paneId) = failed.kind {
+            if let failed, case .capturePane(let paneId, _) = failed.kind {
                 // The pane vanished between subscribe and capture; let a later attempt retry.
                 connection.repaintedPanes.remove(paneId)
             }
@@ -366,6 +405,7 @@ public actor SessionService {
             scheduleTopologyRefresh(hostId: hostId)
 
         case .windowClose(let windowId), .unlinkedWindowClose(let windowId):
+            forgetWindowGeometry(hostId: hostId, windowId: windowId)
             withHost(hostId) { host in
                 for index in host.sessions.indices {
                     host.sessions[index].windows.removeAll { $0.id == windowId }
@@ -405,6 +445,8 @@ public actor SessionService {
             // Where a reconnect has to land. `switch-client` arrives here too, so this tracks the
             // session the client is really on rather than the one it originally attached to.
             reconnectTarget[hostId] = name
+            // `window-size` is a session option, so the session we just moved to needs it too.
+            applyWindowSizePolicy(hostId: hostId, connection: connection)
             // The client just moved to a different session. Panes we are already showing belong to
             // the old one and will go silent, and panes in the new one have sent us nothing yet, so
             // everything on screen needs repainting from tmux's scrollback.
@@ -417,6 +459,8 @@ public actor SessionService {
                 guard let target, let index = host.sessions.firstIndex(where: { $0.id == target }) else { return }
                 host.sessions[index].name = name
             }
+            // A rename of the session we are attached to has to move the reconnect target with it.
+            syncReconnectTarget(hostId: hostId)
 
         case .sessionWindowChanged(let sessionId, let windowId):
             withHost(hostId) { host in
@@ -455,12 +499,68 @@ public actor SessionService {
         }
     }
 
+    // MARK: - Authentication prompts
+
+    /// Notices that ssh is sitting on a prompt and publishes it, so something with a keyboard can
+    /// answer. Without this a GUI simply hangs at "Connecting…" until ssh gives up: the prompt is on
+    /// a pty nobody is looking at.
+    private func detectAuthenticationPrompt(hostId: String, connection: Connection) {
+        guard !connection.answeredPrompt else { return }
+        guard let kind = SshPromptDetector.pendingPrompt(in: connection.preHandshakeLog) else { return }
+        guard connection.reportedPrompt != kind else { return }
+        connection.reportedPrompt = kind
+
+        let text = SshPromptDetector.promptText(in: connection.preHandshakeLog) ?? "Password:"
+        log("[\(hostId)] ssh is waiting on a \(kind == .password ? "password" : "key passphrase") prompt")
+        withHost(hostId) { host in
+            host.authenticationPrompt = AuthenticationPrompt(kind: kind, text: text)
+        }
+        // Broadcast here rather than leaving it to `ingest`: a prompt produces no protocol events at
+        // all, and `ingest` returns before its diff when the codec yielded nothing. This fires once
+        // per prompt, so it cannot become the per-`%output` broadcast storm that tears down views.
+        broadcastState()
+    }
+
+    /// Answers the prompt ssh is waiting on.
+    ///
+    /// Written straight to the transport rather than through `send`: this is not a tmux command. It
+    /// must not enter the pending-command FIFO — an entry there would misalign every `%begin` for the
+    /// life of the channel — and it happens before the handshake, where `send` would queue it in the
+    /// outbox and deliver it far too late.
+    ///
+    /// The secret is never logged, never stored on the connection, and never put in
+    /// `preHandshakeLog`, which is surfaced to the user verbatim when a channel dies.
+    public func answerAuthenticationPrompt(hostId: String, secret: String) {
+        guard let connection = connections[hostId], !connection.answeredPrompt else { return }
+        connection.answeredPrompt = true
+        withHost(hostId) { $0.authenticationPrompt = nil }
+        broadcastState()
+
+        // ssh reads a line from the tty. It disables echo itself, so nothing comes back.
+        guard var bytes = secret.data(using: .utf8) else { return }
+        bytes.append(0x0a)
+        let written = connection.transport.write(bytes)
+        log("[\(hostId)] answered ssh prompt (\(written ? "written" : "write failed"))")
+    }
+
+    /// Abandons a prompt: no secret is available, so the connection cannot proceed.
+    public func cancelAuthenticationPrompt(hostId: String) {
+        guard let connection = connections[hostId] else { return }
+        connection.userInitiatedDisconnect = true
+        withHost(hostId) { $0.authenticationPrompt = nil }
+        teardown(hostId: hostId, connection: connection)
+        withHost(hostId) { $0.connectionState = .disconnected }
+        broadcastState()
+    }
+
     // MARK: - Handshake and command results
 
     private func completeHandshakeIfNeeded(hostId: String, connection: Connection) {
         guard !connection.handshakeComplete else { return }
         connection.handshakeComplete = true
         connection.preHandshakeLog.removeAll()
+        // Whatever ssh asked for, it got: the protocol is speaking.
+        withHost(hostId) { $0.authenticationPrompt = nil }
 
         withHost(hostId) { host in
             host.connectionState = .connected
@@ -472,12 +572,9 @@ public actor SessionService {
         connection.outbox.removeAll()
 
         send("display-message -p '#{version}'", kind: .version, hostId: hostId, connection: connection)
-        // §3.3: without this an older or smaller client clamps every window toward 80x24, which is
-        // the classic "all my panes collapsed" failure in applications of this class.
-        send(
-            "set-option -t \(TmuxCommand.quote(connection.sessionTarget)) window-size latest",
-            kind: .ignore, hostId: hostId, connection: connection
-        )
+        // The `window-size` policy waits for that version: which of the two sizing models is available
+        // depends on it, and choosing wrongly either collapses every pane toward 80x24 or leaves a
+        // torn-off window unable to size itself. See `applyWindowSizePolicy`.
         send("list-clients -F \(TmuxCommand.quote(TmuxCommand.clientsFormat))",
              kind: .listClients, hostId: hostId, connection: connection)
         refreshTopology(hostId: hostId, connection: connection)
@@ -514,6 +611,8 @@ public actor SessionService {
             }
             // The size we asked for before knowing the version may have used the wrong syntax.
             connection.lastSentSize = nil
+            applyWindowSizePolicy(hostId: hostId, connection: connection)
+
             flushResize(hostId: hostId)
 
         case .listSessions:
@@ -528,8 +627,8 @@ public actor SessionService {
         case .listClients:
             log("[\(hostId)] clients: \(text().joined(separator: ", "))")
 
-        case .capturePane(let paneId):
-            deliver(Self.repaintPayload(from: command.lines), hostId: hostId, paneId: paneId)
+        case .capturePane(let paneId, let target):
+            deliver(Self.repaintPayload(from: command.lines), hostId: hostId, paneId: paneId, target: target)
 
         case .roundTrip(let sentAt):
             let elapsed = ContinuousClock.now - sentAt
@@ -608,6 +707,26 @@ public actor SessionService {
                 host.activeSessionId = host.sessions.first { $0.isAttached }?.id ?? host.sessions.first?.id
             }
         }
+        // Catches a rename we learned about from `list-sessions` rather than from a notification —
+        // another client renaming the session while our channel was down, for instance.
+        syncReconnectTarget(hostId: hostId)
+    }
+
+    /// Keeps `reconnectTarget` pointing at the *current* name of the session this client is on.
+    ///
+    /// The target is a name rather than a `$id` so it still resolves after a tmux server restart,
+    /// which means a rename invalidates it. A stale name is worse than a failed lookup: the
+    /// reconnect path runs `new-session -A -s <name>`, so it would helpfully create an empty
+    /// session under the old name and strand the user in it, with every real pane elsewhere.
+    ///
+    /// `activeSessionId` is used rather than `isAttached` deliberately — `session_attached` counts
+    /// *any* client, so a user with a plain `tmux attach` open elsewhere would otherwise redirect
+    /// our reconnect to their session.
+    private func syncReconnectTarget(hostId: String) {
+        guard let host = hosts[hostId],
+              let activeId = host.activeSessionId,
+              let session = host.sessions.first(where: { $0.id == activeId }) else { return }
+        reconnectTarget[hostId] = session.name
     }
 
     private func applyWindows(_ lines: [String], hostId: String) {
@@ -747,8 +866,15 @@ public actor SessionService {
 
     // MARK: - Pane output
 
-    private func deliver(_ data: Data, hostId: String, paneId: String) {
+    /// Hands pane bytes to the views showing it. `target` restricts delivery to one subscriber, which
+    /// only a repaint ever does.
+    private func deliver(_ data: Data, hostId: String, paneId: String, target: UUID? = nil) {
         guard let subscribers = outputSubscribers[hostId]?[paneId], !subscribers.isEmpty else { return }
+
+        if let target {
+            subscribers[target]?.yield(data)
+            return
+        }
         for continuation in subscribers.values {
             continuation.yield(data)
         }
@@ -757,14 +883,20 @@ public actor SessionService {
     /// Streams a pane's output. On first subscription the pane is repainted from tmux's own
     /// scrollback, because control mode sends nothing at all for a pane that is merely sitting
     /// there — attaching to an existing session would otherwise show an empty terminal (F4.16).
+    ///
+    /// A *second* subscriber to a pane — the same tmux window open in two macOS windows — gets its own
+    /// repaint, addressed to it alone. Without that it would sit blank until the pane next produced
+    /// output, because `repaintedPanes` remembers that the pane was already captured; broadcasting the
+    /// repaint instead would clear the first window's scrollback.
     public func subscribeToPane(hostId: String, paneId: String) -> AsyncStream<Data> {
         let id = UUID()
         let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
+        let isAdditionalViewer = outputSubscribers[hostId]?[paneId]?.isEmpty == false
         outputSubscribers[hostId, default: [:]][paneId, default: [:]][id] = continuation
         continuation.onTermination = { [weak self] _ in
             Task { await self?.unsubscribe(hostId: hostId, paneId: paneId, id: id) }
         }
-        requestRepaint(hostId: hostId, paneId: paneId)
+        requestRepaint(hostId: hostId, paneId: paneId, target: isAdditionalViewer ? id : nil)
         return stream
     }
 
@@ -775,15 +907,20 @@ public actor SessionService {
             // Next time this pane is displayed it needs a fresh repaint.
             connections[hostId]?.repaintedPanes.remove(paneId)
         }
+
     }
 
-    private func requestRepaint(hostId: String, paneId: String) {
+    private func requestRepaint(hostId: String, paneId: String, target: UUID? = nil) {
         guard let connection = connections[hostId] else { return }
-        guard !connection.repaintedPanes.contains(paneId) else { return }
-        connection.repaintedPanes.insert(paneId)
+        // A repaint for one specific viewer is never suppressed and never marks the pane as painted:
+        // it exists precisely because the pane is already painted somewhere else.
+        if target == nil {
+            guard !connection.repaintedPanes.contains(paneId) else { return }
+            connection.repaintedPanes.insert(paneId)
+        }
         send(
             "capture-pane -p -e -J -t \(paneId) -S -\(captureScrollbackLines)",
-            kind: .capturePane(paneId: paneId), hostId: hostId, connection: connection
+            kind: .capturePane(paneId: paneId, target: target), hostId: hostId, connection: connection
         )
     }
 
@@ -844,15 +981,36 @@ public actor SessionService {
 
     /// Pastes text into a pane. Large content goes through a tmux buffer: a megabyte of
     /// `send-keys -H` is a megabyte of command line and will wedge the channel (§3.2).
+    ///
+    /// The buffer is built with `TmuxCommand.doubleQuoted`, not `quote`. Clipboard text is routinely
+    /// multi-line, and a single-quoted tmux string cannot carry a newline: the command line ends at the
+    /// first one, tmux reports an unterminated string, and every following line of the paste is
+    /// interpreted as a *command*. Under the old encoding a two-line paste over the threshold produced
+    /// two `%error`s and pasted nothing.
+    ///
+    /// Small pastes still go through `send-keys -H`, which is hex and therefore newline-safe already.
     public func paste(hostId: String, paneId: String, text: String) {
         guard !text.isEmpty, let connection = connections[hostId] else { return }
         guard text.utf8.count > pasteThreshold else {
             sendKeys(hostId: hostId, paneId: paneId, text: text)
             return
         }
-        let buffer = "tetmux-paste"
-        send("set-buffer -b \(buffer) -- \(TmuxCommand.quote(text))", kind: .ignore, hostId: hostId, connection: connection)
-        // -p emits bracketed-paste markers when the pane's application asked for them (T5.4).
+
+        // A name per paste. Two panes pasting at once would otherwise append into each other's buffer,
+        // because the chunks below are separate commands and nothing keeps them contiguous.
+        pasteSequence += 1
+        let buffer = "tetmux-paste-\(pasteSequence)"
+
+        for (index, chunk) in TmuxCommand.chunk(text, maxEscapedBytes: pasteChunkBytes).enumerated() {
+            // The first command creates or replaces the buffer; the rest append to it.
+            let mode = index == 0 ? "" : "-a "
+            send(
+                "set-buffer \(mode)-b \(buffer) -- \(TmuxCommand.doubleQuoted(chunk))",
+                kind: .ignore, hostId: hostId, connection: connection
+            )
+        }
+        // -p emits bracketed-paste markers when the pane's application asked for them (T5.4), and -d
+        // drops the buffer afterwards so a clipboard's worth of text does not linger on the server.
         send("paste-buffer -d -p -b \(buffer) -t \(paneId)", kind: .ignore, hostId: hostId, connection: connection)
     }
 
@@ -884,6 +1042,122 @@ public actor SessionService {
         send("refresh-client -C \(argument)", kind: .ignore, hostId: hostId, connection: connection)
         // For ssh this also travels to the remote pty, which is how the far end learns we resized.
         connection.transport.resize(cols: UInt16(clamping: size.cols), rows: UInt16(clamping: size.rows))
+    }
+
+    // MARK: - Per-window geometry (§3.3)
+
+    /// Decides how this session's windows get their size, once the server version is known.
+    ///
+    /// **tmux 2.9 and newer:** `window-size manual`, and one `resize-window` per window that is
+    /// actually on screen. This is what lets a torn-off macOS window size its tmux window
+    /// independently — with a single client there is otherwise exactly one size for every window it
+    /// shows, so the second macOS window would be stuck with the first one's grid.
+    ///
+    /// **Older:** `window-size latest`, which has no per-window equivalent. Without *something* here
+    /// an old or small client clamps every window toward 80x24 and every pane collapses (F4.17).
+    ///
+    /// Set on the attached session rather than globally: it is a session option, and changing it
+    /// server-wide would resize windows for the user's other clients too. `disconnectHost` puts it
+    /// back — see the note there about what an unclean drop leaves behind.
+    private func applyWindowSizePolicy(hostId: String, connection: Connection) {
+        guard let version = connection.version else { return }
+        let target = TmuxCommand.quote(reconnectTarget[hostId] ?? connection.sessionTarget)
+
+        guard version >= TmuxVersion("2.9")! else {
+            connection.sizesWindowsIndividually = false
+            send("set-option -t \(target) window-size latest", kind: .ignore, hostId: hostId, connection: connection)
+            return
+        }
+
+        connection.sizesWindowsIndividually = true
+        send("set-option -t \(target) window-size manual", kind: .ignore, hostId: hostId, connection: connection)
+        // Anything we sent before the option was in place may have been overridden by tmux's own
+        // sizing, so nothing is assumed to have taken effect.
+        connection.lastSentWindowSizes.removeAll()
+        flushWindowResizes(hostId: hostId)
+    }
+
+
+    /// Puts `window-size` back to whatever the session inherited, on the way out.
+    ///
+    /// `window-size manual` is a change to the user's own session, and a manual size persists — a later
+    /// plain `tmux attach` would find windows that no longer follow the terminal.
+    ///
+    /// Best-effort by construction, in two ways. It can only run on a *deliberate* disconnect, so a
+    /// channel that dies with the network leaves the option set (tetmux sets it again on the next
+    /// attach, so the visible effect is limited to attaching with something else in the meantime). And
+    /// the write races teardown: locally the client reads it first, but over ssh the bytes may still be
+    /// in flight when the transport is terminated. `tmux set-option -u -t <session> window-size` is the
+    /// remedy either way.
+    private func restoreWindowSizePolicy(hostId: String, connection: Connection) {
+        guard connection.sizesWindowsIndividually, connection.handshakeComplete else { return }
+        let target = TmuxCommand.quote(reconnectTarget[hostId] ?? connection.sessionTarget)
+        send("set-option -u -t \(target) window-size", kind: .ignore, hostId: hostId, connection: connection)
+    }
+
+    /// Claims the right to size a tmux window. Called by a view when its macOS window takes focus.
+    public func claimWindowSize(hostId: String, windowId: String, owner: UUID) {
+        guard let connection = connections[hostId] else { return }
+        guard connection.windowSizeOwners[windowId] != owner else { return }
+        connection.windowSizeOwners[windowId] = owner
+        // The new owner's size may differ from the old one's, so let it through even though the
+        // window's size is unchanged from tmux's point of view.
+        connection.lastSentWindowSizes.removeValue(forKey: windowId)
+    }
+
+    public func releaseWindowSize(hostId: String, windowId: String, owner: UUID) {
+        guard let connection = connections[hostId],
+              connection.windowSizeOwners[windowId] == owner else { return }
+        connection.windowSizeOwners.removeValue(forKey: windowId)
+    }
+
+    /// Asks tmux to size one window, from the view that owns it.
+    ///
+    /// Ignored when a different view owns that window: two macOS windows showing the same tmux window
+    /// at different sizes would otherwise resize it back and forth without ever settling.
+    public func requestWindowSize(hostId: String, windowId: String, cols: Int, rows: Int, owner: UUID) {
+        guard cols > 1, rows > 1, let connection = connections[hostId] else { return }
+
+        if let currentOwner = connection.windowSizeOwners[windowId] {
+            guard currentOwner == owner else { return }
+        } else {
+            connection.windowSizeOwners[windowId] = owner
+        }
+
+        // Recorded even when per-window sizing is not enabled yet. The policy is decided a round trip
+        // after the handshake — the version probe has to answer first — and a view has usually finished
+        // measuring itself by then. Dropping these instead left a window unsized until the user
+        // happened to resize or refocus it; `applyWindowSizePolicy` flushes whatever accumulated.
+        connection.desiredWindowSizes[windowId] = (cols, rows)
+        guard connection.windowResizeTask == nil else { return }
+        connection.windowResizeTask = Task { [weak self, debounce = resizeDebounce] in
+            try? await Task.sleep(for: debounce)
+            await self?.flushWindowResizes(hostId: hostId)
+        }
+    }
+
+    private func flushWindowResizes(hostId: String) {
+        guard let connection = connections[hostId] else { return }
+        connection.windowResizeTask = nil
+        guard connection.handshakeComplete, connection.sizesWindowsIndividually else { return }
+
+        for (windowId, size) in connection.desiredWindowSizes {
+            if let sent = connection.lastSentWindowSizes[windowId], sent == size { continue }
+            connection.lastSentWindowSizes[windowId] = size
+            send(
+                "resize-window -t \(windowId) -x \(size.cols) -y \(size.rows)",
+                kind: .ignore, hostId: hostId, connection: connection
+            )
+        }
+    }
+
+    /// Forgets a window that no longer exists, so its size and owner do not accumulate for the life of
+    /// the channel.
+    private func forgetWindowGeometry(hostId: String, windowId: String) {
+        guard let connection = connections[hostId] else { return }
+        connection.desiredWindowSizes.removeValue(forKey: windowId)
+        connection.lastSentWindowSizes.removeValue(forKey: windowId)
+        connection.windowSizeOwners.removeValue(forKey: windowId)
     }
 
     // MARK: - Round-trip measurement (F4.29)
@@ -927,8 +1201,12 @@ public actor SessionService {
         send("select-window -t \(windowId)", hostId: hostId)
     }
 
+    /// tmux turns `automatic-rename` off for a window that is renamed explicitly, so the name the
+    /// user chose survives the next command change rather than being overwritten by it.
     public func renameWindow(hostId: String, windowId: String, newName: String) {
-        send("rename-window -t \(windowId) \(TmuxCommand.quote(newName))", hostId: hostId)
+        let name = TmuxCommand.singleLine(newName)
+        guard !name.isEmpty else { return }
+        send("rename-window -t \(windowId) \(TmuxCommand.quote(name))", hostId: hostId)
     }
 
     /// F4.9 — closing a tab unlinks the window from the session; it never kills what is running.
@@ -940,8 +1218,11 @@ public actor SessionService {
         send("kill-window -t \(windowId)", hostId: hostId)
     }
 
+    /// The `%session-renamed` this produces is what moves `reconnectTarget` onto the new name.
     public func renameSession(hostId: String, sessionId: String, newName: String) {
-        send("rename-session -t \(TmuxCommand.quote(sessionId)) \(TmuxCommand.quote(newName))", hostId: hostId)
+        let name = TmuxCommand.singleLine(newName)
+        guard !name.isEmpty else { return }
+        send("rename-session -t \(TmuxCommand.quote(sessionId)) \(TmuxCommand.quote(name))", hostId: hostId)
     }
 
     public func killSession(hostId: String, sessionId: String) {
@@ -950,6 +1231,8 @@ public actor SessionService {
 
     /// Creates a session on an already-connected host, without opening a second channel.
     public func newSession(hostId: String, name: String, startDirectory: String? = nil) {
+        let name = TmuxCommand.singleLine(name)
+        guard !name.isEmpty else { return }
         var command = "new-session -d -s \(TmuxCommand.quote(name))"
         if let startDirectory, !startDirectory.isEmpty {
             command += " -c \(TmuxCommand.quote(startDirectory))"
@@ -1036,6 +1319,8 @@ public actor SessionService {
         connection.cancelTimers()
         connection.readTask?.cancel()
         connection.transport.terminate()
+        // A prompt belongs to the channel that asked; there is nothing left to answer.
+        withHost(hostId) { $0.authenticationPrompt = nil }
         if connections[hostId]?.epoch == connection.epoch {
             connections.removeValue(forKey: hostId)
         }

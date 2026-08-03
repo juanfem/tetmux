@@ -147,6 +147,117 @@ public struct TmuxSession: Identifiable, Equatable, Sendable {
     }
 }
 
+/// An ssh port forward carried by a host's control channel — `-L`, `-R`, or `-D`.
+///
+/// §1.2 rules out a port-forward *management* UI, and this is not one: a forward is a property of how
+/// a host is connected, established with the channel and gone with it. There is no live forward
+/// inspector, no per-forward state, and nothing that outlives the ssh process.
+public struct PortForward: Identifiable, Equatable, Sendable, Codable {
+    public enum Kind: String, Codable, Sendable, CaseIterable, Identifiable {
+        /// `-L` — a local port reaching a service on the far side.
+        case local
+        /// `-R` — a port on the far side reaching a service here.
+        case remote
+        /// `-D` — a local SOCKS proxy.
+        case dynamic
+
+        public var id: String { rawValue }
+
+        public var flag: String {
+            switch self {
+            case .local: return "-L"
+            case .remote: return "-R"
+            case .dynamic: return "-D"
+            }
+        }
+
+        public var title: String {
+            switch self {
+            case .local: return "Local (-L)"
+            case .remote: return "Remote (-R)"
+            case .dynamic: return "SOCKS proxy (-D)"
+            }
+        }
+
+        /// A SOCKS proxy has no fixed destination; it decides per connection.
+        public var needsDestination: Bool { self != .dynamic }
+    }
+
+    public var id: UUID
+    public var kind: Kind
+    /// Which local (or, for `-R`, remote) interface to listen on. Empty means ssh's default, which
+    /// is loopback unless `GatewayPorts` says otherwise — deliberately not overridden here.
+    public var bindAddress: String
+    public var listenPort: Int
+    public var destinationHost: String
+    public var destinationPort: Int
+
+    public init(
+        id: UUID = UUID(),
+        kind: Kind = .local,
+        bindAddress: String = "",
+        listenPort: Int = 0,
+        destinationHost: String = "localhost",
+        destinationPort: Int = 0
+    ) {
+        self.id = id
+        self.kind = kind
+        self.bindAddress = bindAddress
+        self.listenPort = listenPort
+        self.destinationHost = destinationHost
+        self.destinationPort = destinationPort
+    }
+
+    /// Whether this forward is complete enough to hand to ssh. Incomplete rows are skipped rather
+        /// than passed through: a malformed `-L` makes ssh exit before tmux ever starts, which the user
+    /// would see as "the host stopped working" long after they half-filled a form.
+    public var isValid: Bool {
+        guard Self.isValidPort(listenPort) else { return false }
+        guard Self.isPlausibleAddress(bindAddress) else { return false }
+        guard kind.needsDestination else { return true }
+        return Self.isValidPort(destinationPort)
+            && !destinationHost.isEmpty
+            && Self.isPlausibleAddress(destinationHost)
+    }
+
+    /// The value for the flag: `[bind:]port` for `-D`, `[bind:]port:host:hostport` otherwise.
+    public var specification: String {
+        let bind = bindAddress.isEmpty ? "" : "\(Self.bracketIfNeeded(bindAddress)):"
+        switch kind {
+        case .dynamic:
+            return "\(bind)\(listenPort)"
+        case .local, .remote:
+            return "\(bind)\(listenPort):\(Self.bracketIfNeeded(destinationHost)):\(destinationPort)"
+        }
+    }
+
+    public var displayDescription: String {
+        switch kind {
+        case .local:
+            return "localhost:\(listenPort) → \(destinationHost):\(destinationPort) on the host"
+        case .remote:
+            return "host:\(listenPort) → \(destinationHost):\(destinationPort) from here"
+        case .dynamic:
+            return "SOCKS proxy on localhost:\(listenPort)"
+        }
+    }
+
+    /// An IPv6 literal has to be bracketed, or its colons are read as field separators.
+    private static func bracketIfNeeded(_ address: String) -> String {
+        guard address.contains(":"), !address.hasPrefix("[") else { return address }
+        return "[\(address)]"
+    }
+
+    private static func isValidPort(_ port: Int) -> Bool { (1...65535).contains(port) }
+
+    /// Whitespace would split the specification into two argv words, and a control character would
+    /// mean something no host name legitimately means.
+    private static func isPlausibleAddress(_ address: String) -> Bool {
+        !address.contains(where: { $0.isWhitespace })
+            && !address.unicodeScalars.contains { $0.properties.generalCategory == .control }
+    }
+}
+
 public struct HostConfig: Identifiable, Equatable, Sendable {
     public let id: String
     public let name: String
@@ -157,6 +268,15 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
     /// Escape hatch for transports the standard ssh invocation cannot express (jump scripts,
     /// container exec wrappers). Runs through `/bin/sh -c` with `tmux -CC …` appended.
     public let customCommand: String?
+    /// Whether this host is expected to authenticate with a password, so ssh's prompt is answered
+    /// rather than left to time out behind a GUI that never shows it. Keys remain ssh's first
+    /// choice either way — this only decides what happens when a prompt actually appears.
+    public let usesPassword: Bool
+    /// Whether the password is expected in the Keychain. The Keychain, not this flag, is the source
+    /// of truth for the secret; the flag only says what the UI should offer. No password is ever
+    /// stored in `hosts.json`.
+    public let storesPasswordInKeychain: Bool
+    public let forwards: [PortForward]
 
     /// What `ssh` should be given as the destination.
     public var sshDestination: String {
@@ -172,7 +292,10 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
         user: String? = nil,
         port: Int? = nil,
         isLocal: Bool = false,
-        customCommand: String? = nil
+        customCommand: String? = nil,
+        usesPassword: Bool = false,
+        storesPasswordInKeychain: Bool = false,
+        forwards: [PortForward] = []
     ) {
         self.id = id
         self.name = name
@@ -181,6 +304,39 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
         self.port = port
         self.isLocal = isLocal
         self.customCommand = customCommand
+        self.usesPassword = usesPassword
+        self.storesPasswordInKeychain = storesPasswordInKeychain
+        self.forwards = forwards
+    }
+}
+
+/// A prompt ssh wrote to the channel before the tmux protocol started.
+///
+/// Surfaced on `HostState` rather than folded into `ConnectionState`: a prompt is a request for
+/// input, not a connection state, and every exhaustive switch over `ConnectionState` in the UI would
+/// otherwise have to grow a case that has nothing to say about being connected.
+
+public struct AuthenticationPrompt: Equatable, Sendable, Identifiable {
+    public enum Kind: Equatable, Sendable {
+        /// An account password, which is the one thing a per-host Keychain entry can answer.
+        case password
+        /// A private key's passphrase. Belongs to the key, not the host, so it is never filled from
+        /// the host's stored password and is never offered for storage.
+        case keyPassphrase
+    }
+
+    /// Distinct per prompt occurrence, so a second prompt after a rejected password is not mistaken
+    /// for the first one still being on screen.
+    public var id: UUID
+    public var kind: Kind
+    /// What ssh actually asked, verbatim (§7) — it names the account and host, which is the only way
+    /// the user can tell which of several prompts they are answering.
+    public var text: String
+
+    public init(id: UUID = UUID(), kind: Kind, text: String) {
+        self.id = id
+        self.kind = kind
+        self.text = text
     }
 }
 
@@ -193,6 +349,10 @@ public struct HostState: Identifiable, Equatable, Sendable {
     public var tmuxVersion: String?
     /// Round-trip time over the live control channel (F4.29), in milliseconds.
     public var rttMilliseconds: Double?
+    /// Set while ssh is waiting for a secret on this host's channel. Cleared as soon as it is
+    /// answered or the channel goes away.
+    public var authenticationPrompt: AuthenticationPrompt?
+
 
     public var activeSession: TmuxSession? {
         sessions.first { $0.id == activeSessionId } ?? sessions.first
@@ -204,7 +364,8 @@ public struct HostState: Identifiable, Equatable, Sendable {
         sessions: [TmuxSession] = [],
         activeSessionId: String? = nil,
         tmuxVersion: String? = nil,
-        rttMilliseconds: Double? = nil
+        rttMilliseconds: Double? = nil,
+        authenticationPrompt: AuthenticationPrompt? = nil
     ) {
         self.config = config
         self.connectionState = connectionState
@@ -212,6 +373,7 @@ public struct HostState: Identifiable, Equatable, Sendable {
         self.activeSessionId = activeSessionId
         self.tmuxVersion = tmuxVersion
         self.rttMilliseconds = rttMilliseconds
+        self.authenticationPrompt = authenticationPrompt
     }
 
     public func window(_ windowId: String) -> TmuxWindow? {
@@ -250,6 +412,7 @@ public struct TmuxVersion: Comparable, Sendable {
 
     /// `refresh-client -B` subscriptions and `%extended-output` need 3.2.
     public var supportsSubscriptions: Bool { self >= TmuxVersion("3.2")! }
+
     /// Below this, control mode is too different to drive; §4.6 passthrough applies.
     public var supportsControlMode: Bool { self >= TmuxVersion("2.4")! }
 }

@@ -16,6 +16,8 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
     case splitDown
     case paste
     case sendNextLiteral
+    case renameWindow
+    case renameSession
 
     public var title: String {
         switch self {
@@ -27,6 +29,8 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
         case .splitDown: return "Split Down"
         case .paste: return "Paste"
         case .sendNextLiteral: return "Send Next Chord Literally"
+        case .renameWindow: return "Rename Window…"
+        case .renameSession: return "Rename Session…"
         }
     }
 }
@@ -56,6 +60,10 @@ public struct KeymapPolicy: Sendable {
         .splitDown: KeyBinding("d", [.command, .shift]),
         .paste: KeyBinding("v"),
         .sendNextLiteral: KeyBinding("v", [.command, .option]),
+        // tmux's own rename bindings are prefix-based (`prefix ,` and `prefix $`), which never reach
+        // us — the pane sees the prefix. These are the GUI equivalents and stay in Cmd space.
+        .renameWindow: KeyBinding("r"),
+        .renameSession: KeyBinding("r", [.command, .shift]),
     ])
 
     public init(bindings: [ApplicationShortcut: KeyBinding]) {

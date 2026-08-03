@@ -20,13 +20,21 @@ public final class AppModel {
     public var keymap = KeymapPolicy.default
 
     public var isLauncherPresented = false
-    public var isAddHostPresented = false
     public var newSessionTarget: String?
+    /// The host being added or edited, if the editor is open.
+    public var hostDraft: HostDraft?
+    /// An ssh prompt waiting on the user, when it could not be answered from the Keychain.
+    public var pendingAuthentication: PendingAuthentication?
     /// A window the user asked to close, pending confirmation (F4.10).
     public var pendingClose: PendingClose?
+    /// A session or window the user asked to rename, pending the new name.
+    public var pendingRename: PendingRename?
 
     @ObservationIgnored private var networkMonitor: NetworkStateMonitor?
     @ObservationIgnored private var stateTask: Task<Void, Never>?
+    /// Prompts already acted on, by prompt id. A prompt stays published until it is answered, so
+    /// without this every state broadcast in between would launch another Keychain lookup.
+    @ObservationIgnored private var handledPrompts: Set<UUID> = []
 
     public struct PendingClose: Identifiable, Equatable {
         public var id: String { "\(hostId)/\(windowId)" }
@@ -35,6 +43,70 @@ public final class AppModel {
         public let windowName: String
         public let paneCount: Int
         public let runningCommands: [String]
+    }
+
+    /// F4.11 — rename applies to either level of the tree, and both go through the same sheet.
+    public struct PendingRename: Identifiable, Equatable {
+        public enum Subject: Equatable {
+            /// `$id`
+            case session(String)
+            /// `@id`
+            case window(String)
+        }
+
+        public var id: String {
+            switch subject {
+            case .session(let sessionId): return "\(hostId)/session/\(sessionId)"
+            case .window(let windowId): return "\(hostId)/window/\(windowId)"
+            }
+        }
+
+        public let hostId: String
+        public let subject: Subject
+        public let currentName: String
+
+        public var title: String {
+            switch subject {
+            case .session: return "Rename Session"
+            case .window: return "Rename Window"
+            }
+        }
+    }
+
+    /// A host being added or edited. Carries the persistable form plus the one field that is never
+    /// persisted — the password itself, which only ever travels to the Keychain or to ssh.
+    public struct HostDraft: Identifiable, Equatable {
+        public var id: String { isNew ? "new-host" : host.id }
+        public var isNew: Bool
+        public var host: StoredHost
+    }
+
+    /// An ssh prompt the user has to answer.
+    public struct PendingAuthentication: Identifiable, Equatable {
+        public var id: UUID { prompt.id }
+        public let hostId: String
+        public let hostName: String
+        public let prompt: AuthenticationPrompt
+
+        /// A key's passphrase belongs to the key, not to this host, so it is never offered for
+        /// per-host storage — it would be stored under the wrong identity and reused for the wrong
+        /// key the moment either changed.
+        public var canOfferKeychain: Bool { prompt.kind == .password }
+    }
+
+    /// What a window is showing: enough to act on it without knowing which window asked.
+    public struct Scope: Equatable, Sendable {
+        public var hostId: String?
+        public var sessionId: String?
+        public var windowId: String?
+        public var paneId: String?
+
+        public init(hostId: String? = nil, sessionId: String? = nil, windowId: String? = nil, paneId: String? = nil) {
+            self.hostId = hostId
+            self.sessionId = sessionId
+            self.windowId = windowId
+            self.paneId = paneId
+        }
     }
 
     public init() {}
@@ -53,6 +125,33 @@ public final class AppModel {
     public var selectedWindow: TmuxWindow? {
         guard let session = selectedSession else { return nil }
         return session.windows.first { $0.id == selectedWindowId } ?? session.activeWindow
+    }
+
+    /// Set by a detached window while it is frontmost, and cleared by the main window when it takes
+    /// focus again.
+    ///
+    /// Menu commands are application-wide, so ⌘T with a torn-off window in front has to open a window
+    /// in the session *that* window is showing — not in whatever the sidebar happens to be pointing
+    /// at. The main window is the default case and needs no scope of its own: its selection already is
+    /// one.
+    public var frontmostScope: Scope?
+
+    /// The scope every command acts on.
+    public var activeScope: Scope {
+        frontmostScope ?? Scope(
+            hostId: selectedHostId,
+            sessionId: selectedSession?.id,
+            windowId: selectedWindow?.id,
+            paneId: focusedPaneId ?? selectedWindow?.preferredPaneId
+        )
+    }
+
+    private func window(in scope: Scope) -> TmuxWindow? {
+        guard let hostId = scope.hostId, let host = hosts.first(where: { $0.id == hostId }) else { return nil }
+        guard let windowId = scope.windowId else {
+            return host.sessions.first { $0.id == scope.sessionId }?.activeWindow
+        }
+        return host.window(windowId)
     }
 
     // MARK: - Lifecycle
@@ -84,6 +183,7 @@ public final class AppModel {
 
     private func apply(_ snapshot: [HostState]) {
         hosts = snapshot
+        respondToAuthenticationPrompts(in: snapshot)
 
         if selectedHostId == nil || !snapshot.contains(where: { $0.id == selectedHostId }) {
             selectedHostId = snapshot.first?.id
@@ -110,6 +210,73 @@ public final class AppModel {
         } else {
             focusedPaneId = nil
         }
+    }
+
+    // MARK: - Authentication
+
+    /// Answers ssh prompts from the Keychain where possible, and puts the rest in front of the user.
+    ///
+    /// ssh asks on a pty nobody is looking at, so an unanswered prompt is indistinguishable from a
+    /// host that hangs while connecting. Every prompt is therefore either filled or shown.
+    private func respondToAuthenticationPrompts(in snapshot: [HostState]) {
+        // Forget prompts that are gone, so a host prompting again later is not ignored as handled.
+        let live = Set(snapshot.compactMap { $0.authenticationPrompt?.id })
+        handledPrompts.formIntersection(live)
+
+        for host in snapshot {
+            guard let prompt = host.authenticationPrompt, !handledPrompts.contains(prompt.id) else { continue }
+            handledPrompts.insert(prompt.id)
+
+            // A stored password can only answer a password prompt, and only when the user asked us to
+            // keep one for this host.
+            guard prompt.kind == .password, host.config.storesPasswordInKeychain else {
+                pendingAuthentication = PendingAuthentication(
+                    hostId: host.id, hostName: host.config.name, prompt: prompt
+                )
+                continue
+            }
+
+            Task { [service, config = host.config, hostId = host.id] in
+                if let stored = await KeychainStore.password(for: config) {
+                    await service.answerAuthenticationPrompt(hostId: hostId, secret: stored)
+                } else {
+                    // The flag said there was one and there is not — the user deleted it in Keychain
+                    // Access, or this is a fresh machine. Ask rather than silently stalling.
+                    self.pendingAuthentication = PendingAuthentication(
+                        hostId: hostId, hostName: config.name, prompt: prompt
+                    )
+                }
+            }
+        }
+    }
+
+    /// Sends the secret the user typed, and stores it only if they asked.
+    public func submitAuthentication(secret: String, saveInKeychain: Bool) {
+        guard let pending = pendingAuthentication else { return }
+        pendingAuthentication = nil
+        guard !secret.isEmpty else {
+            Task { await service.cancelAuthenticationPrompt(hostId: pending.hostId) }
+            return
+        }
+
+        Task { [service] in
+            await service.answerAuthenticationPrompt(hostId: pending.hostId, secret: secret)
+
+            guard saveInKeychain, pending.canOfferKeychain,
+                  let host = hosts.first(where: { $0.id == pending.hostId }) else { return }
+            await KeychainStore.save(secret, for: host.config)
+            // Record the *intent* to use the Keychain, never the secret (§2.5).
+            var stored = host.config.asStoredHost
+            stored.usesPassword = true
+            stored.storesPasswordInKeychain = true
+            await persist(stored)
+        }
+    }
+
+    public func cancelAuthentication() {
+        guard let pending = pendingAuthentication else { return }
+        pendingAuthentication = nil
+        Task { await service.cancelAuthenticationPrompt(hostId: pending.hostId) }
     }
 
     // MARK: - Actions
@@ -148,41 +315,96 @@ public final class AppModel {
         }
     }
 
-    public func addHost(name: String, port: Int?, user: String?) {
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        Task {
-            var stored = await store.loadHosts()
-            let host = StoredHost(id: "custom-\(trimmed)", name: trimmed, user: user, port: port, isLocal: false)
-            stored.removeAll { $0.id == host.id }
-            stored.append(host)
-            try? await store.saveHosts(stored)
+    // MARK: - Hosts
+
+    public func presentNewHost() {
+        hostDraft = HostDraft(isNew: true, host: StoredHost(id: "", name: ""))
+    }
+
+    public func presentEditHost(_ hostId: String) {
+        guard let host = hosts.first(where: { $0.id == hostId }) else { return }
+        hostDraft = HostDraft(isNew: false, host: host.config.asStoredHost)
+    }
+
+    /// Saves a host from the editor.
+    ///
+    /// `password` is non-nil only when the user typed one just now. An empty password with
+    /// `savePassword` still set means "keep what is already in the Keychain", which is what an edit of
+    /// some *other* field looks like.
+    public func saveHost(_ draft: HostDraft, password: String?, savePassword: Bool) {
+        var host = draft.host
+        host.name = host.name.trimmingCharacters(in: .whitespaces)
+        guard !host.name.isEmpty else { return }
+        // A host added in-app gets a stable id derived from its name, so re-adding the same host edits
+        // it instead of accumulating duplicates. Discovered `ssh-` ids and `local` keep theirs.
+        if host.id.isEmpty {
+            host.id = "custom-\(host.name)"
+        }
+        host.forwards = host.forwards.filter(\.isValid)
+
+        let typed = password.flatMap { $0.isEmpty ? nil : $0 }
+        host.storesPasswordInKeychain = savePassword && (typed != nil || draft.host.storesPasswordInKeychain)
+        if host.storesPasswordInKeychain {
+            host.usesPassword = true
+        }
+
+        hostDraft = nil
+        Task { [service] in
+            if let typed, savePassword {
+                await KeychainStore.save(typed, for: host.asConfig)
+            } else if !savePassword, draft.host.storesPasswordInKeychain {
+                // Turning storage off deletes the secret rather than merely forgetting the flag.
+                await KeychainStore.delete(for: draft.host.asConfig)
+            }
+            await persist(host)
             await service.addHost(host.asConfig)
         }
     }
 
+    /// Writes one host into `hosts.json`, replacing any entry with the same id.
+    private func persist(_ host: StoredHost) async {
+        var stored = await store.loadHosts()
+        stored.removeAll { $0.id == host.id }
+        stored.append(host)
+        try? await store.saveHosts(stored)
+    }
+
     public func removeHost(_ hostId: String) {
+        let config = hosts.first { $0.id == hostId }?.config
         Task {
             await service.removeHost(hostId: hostId)
             var stored = await store.loadHosts()
             stored.removeAll { $0.id == hostId }
             try? await store.saveHosts(stored)
+            // Removing a host removes its secret. Leaving an orphaned Keychain item behind would be a
+            // credential the user believes they deleted.
+            if let config, config.storesPasswordInKeychain {
+                await KeychainStore.delete(for: config)
+            }
         }
     }
 
+    // MARK: - Window and pane commands
+    //
+    // All of these act on `activeScope`, which is the frontmost window's subject — the sidebar
+    // selection when that is the main window, and the torn-off window's own when it is not.
+
     public func newWindow() {
-        guard let hostId = selectedHostId, let sessionId = selectedSession?.id else { return }
+        let scope = activeScope
+        guard let hostId = scope.hostId, let sessionId = scope.sessionId else { return }
         Task { await service.newWindow(hostId: hostId, sessionId: sessionId) }
     }
 
     public func split(leftRight: Bool) {
-        guard let hostId = selectedHostId, let paneId = focusedPaneId ?? selectedWindow?.preferredPaneId else { return }
+        let scope = activeScope
+        guard let hostId = scope.hostId,
+              let paneId = scope.paneId ?? window(in: scope)?.preferredPaneId else { return }
         Task { await service.splitPane(hostId: hostId, paneId: paneId, leftRight: leftRight) }
     }
 
-    public func requestCloseWindow() {
-        guard let hostId = selectedHostId, let window = selectedWindow else { return }
-        pendingClose = PendingClose(
+    /// F4.10 — the confirmation names the window, its pane count, and what is running in it.
+    public func closeRequest(hostId: String, window: TmuxWindow) -> PendingClose {
+        PendingClose(
             hostId: hostId,
             windowId: window.id,
             windowName: window.name,
@@ -191,15 +413,77 @@ public final class AppModel {
         )
     }
 
+    public func requestCloseWindow() {
+        let scope = activeScope
+        guard let hostId = scope.hostId, let window = window(in: scope) else { return }
+        pendingClose = closeRequest(hostId: hostId, window: window)
+    }
+
     public func confirmCloseWindow() {
         guard let pending = pendingClose else { return }
         pendingClose = nil
         Task { await service.killWindow(hostId: pending.hostId, windowId: pending.windowId) }
     }
 
+    // MARK: - Renaming (F4.11)
+
+    /// Builds a rename request for a specific window, or for the frontmost one when not given.
+    public func renameRequest(hostId: String, window: TmuxWindow) -> PendingRename {
+        PendingRename(hostId: hostId, subject: .window(window.id), currentName: window.name)
+    }
+
+    public func renameRequest(hostId: String, session: TmuxSession) -> PendingRename {
+        PendingRename(hostId: hostId, subject: .session(session.id), currentName: session.name)
+    }
+
+    public func requestRenameWindow(hostId: String? = nil, windowId: String? = nil) {
+        let scope = activeScope
+        guard let hostId = hostId ?? scope.hostId else { return }
+        guard let window = windowId.flatMap({ id in hosts.first { $0.id == hostId }?.window(id) })
+            ?? self.window(in: scope) else { return }
+        pendingRename = renameRequest(hostId: hostId, window: window)
+    }
+
+    public func requestRenameSession(hostId: String? = nil, sessionId: String? = nil) {
+        let scope = activeScope
+        guard let hostId = hostId ?? scope.hostId, let host = hosts.first(where: { $0.id == hostId }) else { return }
+        guard let session = (sessionId ?? scope.sessionId).flatMap({ id in host.sessions.first { $0.id == id } })
+            ?? host.activeSession else { return }
+        pendingRename = renameRequest(hostId: hostId, session: session)
+    }
+
+    /// Sends the rename and dismisses the sheet. The name in the tree updates when tmux answers with
+    /// `%session-renamed`/`%window-renamed`, not here — tmux is authoritative for its own model.
+    public func commitRename(to newName: String) {
+        guard let pending = pendingRename else { return }
+        pendingRename = nil
+        commit(pending, to: newName)
+    }
+
+    /// The same commit, for a window holding its own rename state rather than the shared one. A sheet
+    /// bound to shared state would try to present itself in every open window at once.
+    public func commit(_ pending: PendingRename, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != pending.currentName else { return }
+
+        Task { [service] in
+            switch pending.subject {
+            case .session(let sessionId):
+                await service.renameSession(hostId: pending.hostId, sessionId: sessionId, newName: trimmed)
+            case .window(let windowId):
+                await service.renameWindow(hostId: pending.hostId, windowId: windowId, newName: trimmed)
+            }
+        }
+    }
+
     public func closePane() {
-        guard let hostId = selectedHostId, let paneId = focusedPaneId else { return }
+        let scope = activeScope
+        guard let hostId = scope.hostId, let paneId = scope.paneId else { return }
         Task { await service.killPane(hostId: hostId, paneId: paneId) }
+    }
+
+    public func killWindow(hostId: String, windowId: String) {
+        Task { await service.killWindow(hostId: hostId, windowId: windowId) }
     }
 
     public func killSession(hostId: String, sessionId: String) {
@@ -219,10 +503,34 @@ public final class AppModel {
     }
 
     public func pasteIntoFocusedPane() {
-        guard let hostId = selectedHostId,
-              let paneId = focusedPaneId ?? selectedWindow?.preferredPaneId,
+        let scope = activeScope
+        guard let hostId = scope.hostId,
+              let paneId = scope.paneId ?? window(in: scope)?.preferredPaneId,
               let text = NSPasteboard.general.string(forType: .string) else { return }
         Task { await service.paste(hostId: hostId, paneId: paneId, text: text) }
+    }
+
+    /// A tear-off the menu asked for.
+    ///
+    /// `openWindow` is an environment action, and `Commands` has no environment to read it from, so the
+    /// menu records the request and the main window performs it.
+    public var requestedDetachScene: DetachedScene?
+
+    /// F4.12 — tears the frontmost window's tmux window off into its own macOS window.
+    public func detachActiveWindow() {
+        let scope = activeScope
+        guard let hostId = scope.hostId,
+              let sessionId = scope.sessionId,
+              let windowId = scope.windowId ?? window(in: scope)?.id else { return }
+        requestedDetachScene = DetachedScene(hostId: hostId, sessionId: sessionId, windowId: windowId)
+    }
+
+    /// Moves the client to a session without changing what any window shows. Used by a detached window
+    /// showing a session that is not the attached one: only the attached session receives `%output`, so
+    /// this is what makes its panes live — and it necessarily freezes whatever session was attached
+    /// before, which is why the button that calls it says so.
+    public func attachHere(hostId: String, sessionId: String) {
+        Task { await service.switchSession(hostId: hostId, sessionId: sessionId) }
     }
 
     /// F4.25 — one ranked list over hosts, sessions, and windows.

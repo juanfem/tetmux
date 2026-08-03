@@ -24,6 +24,108 @@ final class TmuxCommandTests: XCTestCase {
         }
     }
 
+    // MARK: - Single-line sanitisation
+
+    func testSingleLineLeavesOrdinaryNamesAlone() {
+        XCTAssertEqual(TmuxCommand.singleLine("build"), "build")
+        XCTAssertEqual(TmuxCommand.singleLine("api server"), "api server")
+        XCTAssertEqual(TmuxCommand.singleLine("  padded  "), "padded")
+        XCTAssertEqual(TmuxCommand.singleLine("naïve — 日本語 🙂"), "naïve — 日本語 🙂")
+    }
+
+    /// Control-mode commands are framed by newlines, so a name carrying one ends the command before
+    /// tmux's parser reaches the closing quote — and the remainder arrives as a *new* command.
+    /// `quote` cannot defend against this, because the framing is resolved a layer below the parser.
+    func testSingleLineNeutralisesCommandFraming() {
+        XCTAssertEqual(TmuxCommand.singleLine("api\nkill-server"), "api kill-server")
+        // CRLF is a single grapheme cluster, so it collapses to one space rather than two.
+        XCTAssertEqual(TmuxCommand.singleLine("api\r\nkill-server"), "api kill-server")
+        XCTAssertEqual(TmuxCommand.singleLine("api\u{1b}kill"), "api kill")
+
+        for hostile in ["a\nkill-server", "a\rb", "a\u{0}b", "\nkill-server\n", "a\u{1b}[31m"] {
+            let sanitised = TmuxCommand.singleLine(hostile)
+            XCTAssertFalse(sanitised.contains(where: \.isNewline), sanitised.debugDescription)
+            XCTAssertFalse(
+                sanitised.unicodeScalars.contains { $0.properties.generalCategory == .control },
+                sanitised.debugDescription
+            )
+        }
+    }
+
+    // MARK: - Double-quoted literals (paste)
+
+    /// Expectations here are ground truth from tmux 3.7b's own lexer, exercised over a control-mode
+    /// channel — the only place tmux quoting is parsed at all. A shell cannot answer the question,
+    /// because argv arrives pre-split.
+    func testDoubleQuotedEncodesNewlinesRatherThanEndingTheCommand() {
+        XCTAssertEqual(TmuxCommand.doubleQuoted("plain"), "\"plain\"")
+        XCTAssertEqual(TmuxCommand.doubleQuoted("line1\nline2"), #""line1\nline2""#)
+        XCTAssertEqual(TmuxCommand.doubleQuoted("line1\r\nline2"), #""line1\r\nline2""#)
+        XCTAssertEqual(TmuxCommand.doubleQuoted("bare\rcr"), #""bare\rcr""#)
+    }
+
+    /// tmux expands `$VAR` inside double quotes, so pasting a shell snippet would otherwise arrive with
+    /// the *local* value substituted — wrong, and a way to leak local environment to a remote host.
+    func testDoubleQuotedNeutralisesExpansion() {
+        XCTAssertEqual(TmuxCommand.doubleQuoted("cd $HOME"), #""cd \$HOME""#)
+        XCTAssertEqual(TmuxCommand.doubleQuoted("${SECRET}"), #""\${SECRET}""#)
+        // Two hashes: `\#` is the escape introducer inside a single-hash raw string.
+        XCTAssertEqual(TmuxCommand.doubleQuoted("#{session_name}"), ##""\#{session_name}""##)
+        XCTAssertEqual(TmuxCommand.doubleQuoted(#"say "hi""#), #""say \"hi\"""#)
+        XCTAssertEqual(TmuxCommand.doubleQuoted(#"a\b"#), #""a\\b""#)
+    }
+
+    /// The invariant that actually matters: whatever comes out cannot end the command it is embedded in.
+    func testDoubleQuotedNeverEmitsARawNewline() {
+        let hostile = [
+            "a\nb", "a\r\nb", "\n", "\r", "a\nkill-server\n",
+            #"$(id)"#, "\u{1b}[31mred", "tab\tseparated", "NUL\0inside", "🙂\u{200d}🙂 日本語",
+        ]
+        for text in hostile {
+            let encoded = TmuxCommand.doubleQuoted(text)
+            XCTAssertFalse(encoded.contains(where: \.isNewline), encoded.debugDescription)
+            XCTAssertTrue(encoded.hasPrefix("\"") && encoded.hasSuffix("\""), encoded.debugDescription)
+        }
+    }
+
+    /// Control characters other than the framing ones survive verbatim — verified for ESC, 0x01 and
+    /// 0x7f against the real lexer. NUL cannot: tmux reads commands as C strings, so it is dropped
+    /// rather than silently truncating the rest of the paste.
+    func testDoubleQuotedPassesControlBytesButDropsNul() {
+        XCTAssertEqual(TmuxCommand.doubleQuoted("a\u{1b}b"), "\"a\u{1b}b\"")
+        XCTAssertEqual(TmuxCommand.doubleQuoted("a\u{01}b"), "\"a\u{01}b\"")
+        XCTAssertEqual(TmuxCommand.doubleQuoted("a\u{7f}b"), "\"a\u{7f}b\"")
+        XCTAssertEqual(TmuxCommand.doubleQuoted("a\0b"), "\"ab\"")
+    }
+
+    // MARK: - Chunking
+
+    func testChunkingReassemblesExactly() {
+        let text = String(repeating: "abcdef\n", count: 500) + "🙂 tail"
+        let chunks = TmuxCommand.chunk(text, maxEscapedBytes: 64)
+        XCTAssertGreaterThan(chunks.count, 1)
+        XCTAssertEqual(chunks.joined(), text)
+    }
+
+    /// A boundary through a multi-byte scalar or a grapheme cluster would put mojibake in the middle of
+    /// the paste, so chunks are only ever cut between `Character`s.
+    func testChunkingNeverSplitsACharacter() {
+        // Family emoji: one grapheme, many scalars, well over any small budget.
+        let text = String(repeating: "👨‍👩‍👧‍👦", count: 20)
+        let chunks = TmuxCommand.chunk(text, maxEscapedBytes: 16)
+        XCTAssertEqual(chunks.joined(), text)
+        for chunk in chunks {
+            XCTAssertFalse(chunk.isEmpty)
+            XCTAssertEqual(chunk, String(chunk.map { $0 }), "a chunk boundary fell inside a character")
+            XCTAssertTrue(chunk.allSatisfy { $0 == "👨‍👩‍👧‍👦" }, chunk.debugDescription)
+        }
+    }
+
+    func testChunkingShortTextIsOneChunk() {
+        XCTAssertEqual(TmuxCommand.chunk("short", maxEscapedBytes: 4096), ["short"])
+        XCTAssertEqual(TmuxCommand.chunk("", maxEscapedBytes: 4096), [])
+    }
+
     // MARK: - Local invocation
 
     func testLocalArgumentsRequestControlMode() {
@@ -94,6 +196,106 @@ final class TmuxCommandTests: XCTestCase {
         ).joined(separator: " ")
         XCTAssertFalse(joined.contains("StrictHostKeyChecking"))
         XCTAssertFalse(joined.contains("UserKnownHostsFile"))
+    }
+
+    // MARK: - Port forwards
+
+    func testForwardSpecifications() {
+        let local = PortForward(kind: .local, listenPort: 8080, destinationHost: "localhost", destinationPort: 80)
+        XCTAssertEqual(local.specification, "8080:localhost:80")
+
+        let bound = PortForward(
+            kind: .local, bindAddress: "127.0.0.1", listenPort: 5432,
+            destinationHost: "db.internal", destinationPort: 5432
+        )
+        XCTAssertEqual(bound.specification, "127.0.0.1:5432:db.internal:5432")
+
+        let remote = PortForward(kind: .remote, listenPort: 9000, destinationHost: "localhost", destinationPort: 3000)
+        XCTAssertEqual(remote.specification, "9000:localhost:3000")
+
+        // A SOCKS proxy has no destination; it decides per connection.
+        let socks = PortForward(kind: .dynamic, listenPort: 1080)
+        XCTAssertEqual(socks.specification, "1080")
+        XCTAssertTrue(socks.isValid, "-D needs no destination")
+    }
+
+    /// An IPv6 literal's colons would otherwise be read as the specification's field separators.
+    func testIPv6LiteralsAreBracketed() {
+        let forward = PortForward(
+            kind: .local, bindAddress: "::1", listenPort: 8080,
+            destinationHost: "fe80::1", destinationPort: 80
+        )
+        XCTAssertEqual(forward.specification, "[::1]:8080:[fe80::1]:80")
+
+        // Already bracketed input is left alone rather than double-wrapped.
+        let explicit = PortForward(kind: .local, bindAddress: "[::1]", listenPort: 1, destinationHost: "a", destinationPort: 2)
+        XCTAssertEqual(explicit.specification, "[::1]:1:a:2")
+    }
+
+    func testInvalidForwardsAreRejected() {
+        // A half-filled row from the editor.
+        XCTAssertFalse(PortForward(kind: .local, listenPort: 0, destinationHost: "localhost", destinationPort: 80).isValid)
+        XCTAssertFalse(PortForward(kind: .local, listenPort: 8080, destinationHost: "", destinationPort: 80).isValid)
+        XCTAssertFalse(PortForward(kind: .local, listenPort: 8080, destinationHost: "localhost", destinationPort: 0).isValid)
+        XCTAssertFalse(PortForward(kind: .local, listenPort: 70000, destinationHost: "localhost", destinationPort: 80).isValid)
+        // Whitespace would split the specification into two argv words.
+        XCTAssertFalse(PortForward(kind: .local, listenPort: 80, destinationHost: "a b", destinationPort: 80).isValid)
+        XCTAssertFalse(PortForward(kind: .dynamic, bindAddress: "a b", listenPort: 1080).isValid)
+        XCTAssertFalse(PortForward(kind: .local, listenPort: 80, destinationHost: "a\nb", destinationPort: 80).isValid)
+    }
+
+    /// A malformed forward makes ssh exit before tmux ever starts, so incomplete rows are dropped
+    /// rather than passed through — the session matters more than the tunnel.
+    func testForwardArgumentsSkipIncompleteEntries() {
+        let args = TmuxCommand.forwardArguments([
+            PortForward(kind: .local, listenPort: 8080, destinationHost: "localhost", destinationPort: 80),
+            PortForward(kind: .local, listenPort: 0, destinationHost: "", destinationPort: 0),
+            PortForward(kind: .dynamic, listenPort: 1080),
+        ])
+        XCTAssertEqual(args, ["-L", "8080:localhost:80", "-D", "1080"])
+    }
+
+    func testSshArgumentsCarryForwardsAndKeepTheRemoteCommandLast() {
+        let args = TmuxCommand.sshArguments(
+            destination: "devbox", port: nil, controlPath: "/tmp/cm-%C", remoteCommand: "true",
+            forwards: [
+                PortForward(kind: .local, listenPort: 8080, destinationHost: "localhost", destinationPort: 80),
+                PortForward(kind: .remote, listenPort: 9000, destinationHost: "localhost", destinationPort: 3000),
+            ]
+        )
+        XCTAssertEqual(args[args.firstIndex(of: "-L")! + 1], "8080:localhost:80")
+        XCTAssertEqual(args[args.firstIndex(of: "-R")! + 1], "9000:localhost:3000")
+
+        // The remote command must still be the single last element (ssh joins everything after the
+        // destination), and forwards must not have displaced it.
+        let separator = try! XCTUnwrap(args.firstIndex(of: "--"))
+        XCTAssertEqual(args.count - separator - 1, 1)
+        XCTAssertEqual(args[separator - 1], "devbox")
+
+        // A forward that cannot bind must not take the session down with it.
+        XCTAssertFalse(args.joined(separator: " ").contains("ExitOnForwardFailure"))
+    }
+
+    /// F4.14 one layer down: ssh gets one password attempt, so a rejected password cannot be
+    /// resubmitted into a lockout.
+    func testPasswordHostsGetASinglePromptAndNoWeakenedChecking() {
+        let args = TmuxCommand.sshArguments(
+            destination: "devbox", port: nil, controlPath: "/tmp/cm-%C", remoteCommand: "true",
+            expectsPasswordPrompt: true
+        )
+        let joined = args.joined(separator: " ")
+        XCTAssertTrue(joined.contains("NumberOfPasswordPrompts=1"), joined)
+        XCTAssertFalse(joined.contains("StrictHostKeyChecking"))
+        XCTAssertFalse(joined.contains("UserKnownHostsFile"))
+        // Key authentication is still ssh's decision, not ours to disable.
+        XCTAssertFalse(joined.contains("PubkeyAuthentication"))
+        XCTAssertFalse(joined.contains("PreferredAuthentications"))
+
+        // And nothing is added for a host that does not expect a prompt.
+        let plain = TmuxCommand.sshArguments(
+            destination: "devbox", port: nil, controlPath: "/tmp/cm-%C", remoteCommand: "true"
+        ).joined(separator: " ")
+        XCTAssertFalse(plain.contains("NumberOfPasswordPrompts"))
     }
 
     func testDefaultPortIsLeftToSshConfig() {

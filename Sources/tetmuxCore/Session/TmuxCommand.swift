@@ -11,6 +11,83 @@ public enum TmuxCommand {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    /// Encodes a value as a tmux **double-quoted** literal, for the one case that needs it: content
+    /// that legitimately contains newlines.
+    ///
+    /// `quote` is the right default everywhere else and cannot do this. Control-mode commands are
+    /// newline-framed and a single-quoted tmux string has no escape for a line break, so the command
+    /// ends at the first one and the remainder of the value arrives as a *new command* — which is how a
+    /// multi-line paste wedged the channel. Double quotes have `\n`, at the price of tmux expanding
+    /// `$VAR` inside them, so every `$` is escaped as well.
+    ///
+    /// Verified against tmux 3.7b's own lexer over a control-mode channel. A shell cannot answer this
+    /// question: argv arrives pre-split there, so no tmux quoting is parsed at all.
+    /// - `\` → `\\`, `"` → `\"`, `$` → `\$`, `#` → `\#`, LF → `\n`, CR → `\r`.
+    /// - Every other byte, control characters included, survives verbatim — checked for ESC, 0x01, and
+    ///   0x7f. `\xHH` is *not* a tmux escape (it yields a literal `x`), so nothing relies on it.
+    /// - NUL is dropped: tmux reads commands as C strings, so it would truncate the value silently.
+    public static func doubleQuoted(_ value: String) -> String {
+        var result = "\""
+        for character in value {
+            switch character {
+            case "\\": result += #"\\"#
+            case "\"": result += #"\""#
+            // tmux expands `$VAR` and `${VAR}` inside double quotes.
+            case "$": result += #"\$"#
+            // `#{…}` is not expanded in this position today, but escaping it costs nothing and keeps a
+            // pasted format string from becoming a format string.
+            // Not a raw string: `\#` is the escape introducer inside `#"…"#`.
+            case "#": result += "\\#"
+            case "\n": result += #"\n"#
+            case "\r": result += #"\r"#
+            // A single grapheme cluster in Swift, and distinct from either half.
+            case "\r\n": result += #"\r\n"#
+            case "\0": continue
+            default: result.append(character)
+            }
+        }
+        return result + "\""
+    }
+
+    /// Splits text so that no single command line grows to the size of the clipboard.
+    ///
+    /// Splits between `Character`s, never inside one: a chunk boundary through a multi-byte scalar or a
+    /// grapheme cluster would put mojibake in the middle of the paste. The budget is measured against
+    /// the *escaped* size, using the worst case of two bytes per source byte.
+    public static func chunk(_ text: String, maxEscapedBytes: Int = 4096) -> [String] {
+        precondition(maxEscapedBytes > 8, "a chunk must be able to hold at least one escaped character")
+        var chunks: [String] = []
+        var current = ""
+        var budget = 0
+
+        for character in text {
+            let worstCase = String(character).utf8.count * 2
+            if budget + worstCase > maxEscapedBytes, !current.isEmpty {
+                chunks.append(current)
+                current = ""
+                budget = 0
+            }
+            current.append(character)
+            budget += worstCase
+        }
+        if !current.isEmpty { chunks.append(current) }
+        return chunks
+    }
+
+    /// Collapses anything that would end a control-mode command early.
+    ///
+    /// Commands are newline-delimited on the channel, so a value containing a line break ends the
+    /// command before tmux's parser ever reaches the closing quote — the remainder of the value then
+    /// arrives as a *new* command. `quote` cannot defend against that, because the framing is
+    /// resolved a layer below the parser. Names come from text fields, and text fields accept pasted
+    /// multi-line text, so every name is put through this first.
+    public static func singleLine(_ value: String) -> String {
+        let collapsed = String(value.map { character in
+            character.unicodeScalars.contains { $0.properties.generalCategory == .control } ? " " : character
+        })
+        return collapsed.trimmingCharacters(in: .whitespaces)
+    }
+
     /// Field separator for `-F` format strings. Variable-length fields (names, paths, layouts)
     /// always go last so the parser can split with a bounded `maxSplits` and keep the remainder.
     public static let fieldSeparator = "|"
@@ -21,6 +98,7 @@ public enum TmuxCommand {
     public static let panesFormat =
         "#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_current_command}|#{pane_current_path}"
     public static let clientsFormat = "#{client_name}|#{client_session}|#{client_flags}"
+
 
     // MARK: - Transport invocation
 
@@ -61,11 +139,22 @@ public enum TmuxCommand {
     }
 
     /// Standard ssh invocation from §2.3. Never weakens host-key checking.
+    ///
+    /// `forwards` become `-L`/`-R`/`-D` arguments. `ExitOnForwardFailure` is deliberately left at
+    /// ssh's default of `no`: a local port that happens to be taken would otherwise kill the whole
+    /// session, and the session is what the user came for. ssh's complaint about the forward lands in
+    /// the pre-handshake transcript instead.
+    ///
+    /// `expectsPasswordPrompt` caps ssh at a single password attempt. Answering the same rejected
+    /// password repeatedly is how accounts get locked out, and F4.14 already refuses to retry an
+    /// authentication failure at the connection level — this is the same rule one layer down.
     public static func sshArguments(
         destination: String,
         port: Int?,
         controlPath: String,
-        remoteCommand: String
+        remoteCommand: String,
+        forwards: [PortForward] = [],
+        expectsPasswordPrompt: Bool = false
     ) -> [String] {
         var args = [
             "-o", "ControlMaster=auto",
@@ -73,14 +162,31 @@ public enum TmuxCommand {
             "-o", "ControlPersist=300",
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=3",
-            // Without a tty tmux refuses to attach; -tt forces one even though our stdin is a pipe
-            // from tmux's point of view.
-            "-tt",
         ]
+        if expectsPasswordPrompt {
+            args += ["-o", "NumberOfPasswordPrompts=1"]
+        }
+        // Without a tty tmux refuses to attach; -tt forces one even though our stdin is a pipe
+        // from tmux's point of view.
+        args += ["-tt"]
+        args += forwardArguments(forwards)
         if let port, port != 22 {
             args += ["-p", "\(port)"]
         }
         args += [destination, "--", remoteCommand]
         return args
+    }
+
+    /// Flag/value pairs for a host's forwards, skipping any that are incomplete.
+    ///
+    /// Each specification is its own argv element, so nothing here needs shell quoting — but a value
+    /// containing whitespace would still confuse ssh's own parser, which is what `PortForward.isValid`
+    /// rejects.
+    ///
+    /// With `ControlMaster=auto` a second connection to an already-mastered host asks the existing
+    /// master to set these up rather than opening its own transport. That works, and it also means a
+    /// forward can fail because the *previous* connection already bound the port.
+    public static func forwardArguments(_ forwards: [PortForward]) -> [String] {
+        forwards.filter(\.isValid).flatMap { [$0.kind.flag, $0.specification] }
     }
 }
