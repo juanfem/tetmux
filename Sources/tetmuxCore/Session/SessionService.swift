@@ -51,7 +51,6 @@ public actor SessionService {
     /// How far behind this client may fall before tmux pauses a pane on its own.
     private let pauseAfterSeconds = 3
 
-
     public init() {}
 
     // MARK: - Connection bookkeeping
@@ -113,7 +112,6 @@ public actor SessionService {
             /// do — nothing else will.
             case server
         }
-
         var desiredSize: (cols: Int, rows: Int)?
         var lastSentSize: (cols: Int, rows: Int)?
         var userInitiatedDisconnect = false
@@ -266,7 +264,6 @@ public actor SessionService {
         withHost(hostId) { $0.lastCommandFailure = nil }
         broadcastState()
     }
-
 
     private func broadcastState() {
         let snapshot = getHosts()
@@ -1283,7 +1280,6 @@ public actor SessionService {
         connection.lastSentWindowSizes.removeAll()
         flushWindowResizes(hostId: hostId)
     }
-
 
     /// Turns on tmux's half of backpressure, once the server version is known (P6.5).
     ///
