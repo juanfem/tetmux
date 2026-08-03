@@ -132,6 +132,11 @@ struct DetachedWindowView: View {
     private func content(host: HostState, session: TmuxSession, window: TmuxWindow) -> some View {
         VStack(spacing: 0) {
             ConnectionBanner(state: host.connectionState) { model.reconnect(host.id) }
+            // §7 — a refusal is a property of the host, so it belongs in whichever window is in front
+            // when it happens, not only the main one.
+            CommandFailureBanner(failure: host.lastCommandFailure) {
+                model.dismissCommandFailure(host.id)
+            }
 
             if !isLive {
                 notAttachedBanner(host: host, session: session)

@@ -169,6 +169,9 @@ struct RootView: View {
                 // terminal in front of them is frozen, and the only reconnect they can reach
                 // without knowing the sidebar dot is clickable.
                 ConnectionBanner(state: host.connectionState) { model.reconnect(host.id) }
+                CommandFailureBanner(failure: host.lastCommandFailure) {
+                    model.dismissCommandFailure(host.id)
+                }
                 WindowTabBar(model: model, session: session)
                 Divider()
                 TerminalContainerView(
@@ -373,6 +376,53 @@ struct ConnectionBanner: View {
     private var showsButton: Bool {
         if case .connecting = state { return false }
         return true
+    }
+}
+
+/// §7 — a command the user asked for that tmux refused, in tmux's own words.
+///
+/// Separate from `ConnectionBanner` because it says something different: the channel is fine, and one
+/// command did not happen. Folding the two together would either hide a refusal behind a healthy
+/// connection or make a failed rename look like a connection problem.
+struct CommandFailureBanner: View {
+    let failure: CommandFailure?
+    let onDismiss: () -> Void
+
+    var body: some View {
+        if let failure {
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+
+                    // "Rename window failed: duplicate session: work". The action is ours; everything
+                    // after the colon is tmux's, unedited — it names the thing it could not find.
+                    Text("\(failure.action) failed: ") .fontWeight(.medium)
+                        + Text(failure.message)
+
+                    Spacer(minLength: 8)
+
+                    Button {
+                        onDismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .accessibilityLabel("Dismiss")
+                }
+                .font(.caption)
+                .lineLimit(3)
+                .textSelection(.enabled)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.red.opacity(0.12))
+                Divider()
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(failure.action) failed. \(failure.message)")
+        }
     }
 }
 

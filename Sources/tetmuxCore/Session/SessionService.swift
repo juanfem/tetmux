@@ -154,6 +154,13 @@ public actor SessionService {
         enum Kind {
             /// A block we did not originate (the attach handshake) or whose result we ignore.
             case ignore
+            /// Something the user asked for, labelled with what it was. The label exists so a
+            /// refusal can be reported as a sentence — tmux says "duplicate session: work", and
+            /// only we know that was a rename (§7).
+            ///
+            /// Deliberately not the default: an internal `resize-window` that an old server refuses
+            /// is ours to cope with, not a message to put in front of somebody.
+            case userCommand(String)
             case version
             case listSessions
             case listWindows
@@ -253,6 +260,13 @@ public actor SessionService {
         diagnosticLogger = logger
     }
 
+    /// Clears a reported command failure once the user has read it (§7).
+    public func dismissCommandFailure(hostId: String) {
+        guard hosts[hostId]?.lastCommandFailure != nil else { return }
+        withHost(hostId) { $0.lastCommandFailure = nil }
+        broadcastState()
+    }
+
 
     private func broadcastState() {
         let snapshot = getHosts()
@@ -284,6 +298,9 @@ public actor SessionService {
 
         let sessionTarget = targetSession ?? reconnectTarget[hostId] ?? defaultSessionName(for: host.config)
         reconnectTarget[hostId] = sessionTarget
+        // A refusal belongs to the channel it happened on. Carrying it into a new one would put a
+        // banner about a command from ten minutes ago above a session that just came back.
+        host.lastCommandFailure = nil
         host.connectionState = .connecting
         hosts[hostId] = host
         broadcastState()
@@ -444,11 +461,25 @@ public actor SessionService {
         case .error(_, let number, _):
             let failed = connection.current
             connection.current = nil
-            let message = (failed?.lines ?? []).map { String(decoding: $0, as: UTF8.self) }.joined(separator: "\n")
+            let message = (failed?.lines ?? []).map { String(decoding: $0, as: UTF8.self) }
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             log("[\(hostId)] %error \(number): \(message)")
-            if let failed, case .capturePane(let paneId, _) = failed.kind {
+            switch failed?.kind {
+            case .capturePane(let paneId, _):
                 // The pane vanished between subscribe and capture; let a later attempt retry.
                 connection.repaintedPanes.remove(paneId)
+            case .userCommand(let action):
+                // §7 — the user asked for this and it did not happen. Saying so, in tmux's own words,
+                // is the difference between a command that failed and one that silently did nothing.
+                withHost(hostId) { host in
+                    host.lastCommandFailure = CommandFailure(
+                        action: action,
+                        message: message.isEmpty ? "tmux rejected the command" : message
+                    )
+                }
+            default:
+                break
             }
             completeHandshakeIfNeeded(hostId: hostId, connection: connection)
 
@@ -665,7 +696,8 @@ public actor SessionService {
         let text = { command.lines.map { String(decoding: $0, as: UTF8.self) } }
 
         switch command.kind {
-        case .ignore:
+        case .ignore, .userCommand:
+            // Nothing to read on success. The point of the label is the `%error` path.
             break
 
         case .version:
@@ -1113,7 +1145,8 @@ public actor SessionService {
     /// to: picking a different session in the sidebar has to move the client, not merely change
     /// what the UI draws, or every pane in it would render once and then sit frozen.
     public func switchSession(hostId: String, sessionId: String) {
-        send("switch-client -t \(TmuxCommand.quote(sessionId))", hostId: hostId)
+        send("switch-client -t \(TmuxCommand.quote(sessionId))",
+             kind: .userCommand("Switch session"), hostId: hostId)
     }
 
     // MARK: - Input
@@ -1179,7 +1212,8 @@ public actor SessionService {
         }
         // -p emits bracketed-paste markers when the pane's application asked for them (T5.4), and -d
         // drops the buffer afterwards so a clipboard's worth of text does not linger on the server.
-        send("paste-buffer -d -p -b \(buffer) -t \(paneId)", kind: .ignore, hostId: hostId, connection: connection)
+        send("paste-buffer -d -p -b \(buffer) -t \(paneId)",
+             kind: .userCommand("Paste"), hostId: hostId, connection: connection)
     }
 
     // MARK: - Geometry (§3.3 — tmux is authoritative)
@@ -1370,15 +1404,16 @@ public actor SessionService {
 
     public func newWindow(hostId: String, sessionId: String? = nil) {
         let target = sessionId.map { " -t \(TmuxCommand.quote($0))" } ?? ""
-        send("new-window\(target)", hostId: hostId)
+        send("new-window\(target)", kind: .userCommand("New window"), hostId: hostId)
     }
 
     public func splitPane(hostId: String, paneId: String, leftRight: Bool) {
-        send("split-window \(leftRight ? "-h" : "-v") -t \(paneId)", hostId: hostId)
+        send("split-window \(leftRight ? "-h" : "-v") -t \(paneId)",
+             kind: .userCommand("Split pane"), hostId: hostId)
     }
 
     public func killPane(hostId: String, paneId: String) {
-        send("kill-pane -t \(paneId)", hostId: hostId)
+        send("kill-pane -t \(paneId)", kind: .userCommand("Close pane"), hostId: hostId)
     }
 
     public func selectPane(hostId: String, paneId: String) {
@@ -1394,27 +1429,30 @@ public actor SessionService {
     public func renameWindow(hostId: String, windowId: String, newName: String) {
         let name = TmuxCommand.singleLine(newName)
         guard !name.isEmpty else { return }
-        send("rename-window -t \(windowId) \(TmuxCommand.quote(name))", hostId: hostId)
+        send("rename-window -t \(windowId) \(TmuxCommand.quote(name))",
+             kind: .userCommand("Rename window"), hostId: hostId)
     }
 
     /// F4.9 — closing a tab unlinks the window from the session; it never kills what is running.
     public func unlinkWindow(hostId: String, windowId: String) {
-        send("unlink-window -t \(windowId)", hostId: hostId)
+        send("unlink-window -t \(windowId)", kind: .userCommand("Close window"), hostId: hostId)
     }
 
     public func killWindow(hostId: String, windowId: String) {
-        send("kill-window -t \(windowId)", hostId: hostId)
+        send("kill-window -t \(windowId)", kind: .userCommand("Kill window"), hostId: hostId)
     }
 
     /// The `%session-renamed` this produces is what moves `reconnectTarget` onto the new name.
     public func renameSession(hostId: String, sessionId: String, newName: String) {
         let name = TmuxCommand.singleLine(newName)
         guard !name.isEmpty else { return }
-        send("rename-session -t \(TmuxCommand.quote(sessionId)) \(TmuxCommand.quote(name))", hostId: hostId)
+        send("rename-session -t \(TmuxCommand.quote(sessionId)) \(TmuxCommand.quote(name))",
+             kind: .userCommand("Rename session"), hostId: hostId)
     }
 
     public func killSession(hostId: String, sessionId: String) {
-        send("kill-session -t \(TmuxCommand.quote(sessionId))", hostId: hostId)
+        send("kill-session -t \(TmuxCommand.quote(sessionId))",
+             kind: .userCommand("Kill session"), hostId: hostId)
     }
 
     /// Creates a session on an already-connected host, without opening a second channel.
@@ -1425,7 +1463,7 @@ public actor SessionService {
         if let startDirectory, !startDirectory.isEmpty {
             command += " -c \(TmuxCommand.quote(startDirectory))"
         }
-        send(command, hostId: hostId)
+        send(command, kind: .userCommand("New session"), hostId: hostId)
     }
 
     /// F4.11 — detaches every other client from the session we are attached to. Also the remedy
