@@ -315,7 +315,6 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
 /// Surfaced on `HostState` rather than folded into `ConnectionState`: a prompt is a request for
 /// input, not a connection state, and every exhaustive switch over `ConnectionState` in the UI would
 /// otherwise have to grow a case that has nothing to say about being connected.
-
 /// A command the user asked for that tmux refused (§7).
 ///
 /// Control mode answers a failed command with `%error` and a body, and that body is the only
@@ -445,7 +444,6 @@ public struct TmuxVersion: Comparable, Sendable {
     /// Control-mode flow control — `refresh-client -f pause-after=`, `refresh-client -A`, and the
     /// `%pause`/`%continue` notifications that go with them — landed in 3.2 (P6.5).
     public var supportsFlowControl: Bool { self >= TmuxVersion("3.2")! }
-
     /// Below this, control mode is too different to drive; §4.6 passthrough applies.
     public var supportsControlMode: Bool { self >= TmuxVersion("2.4")! }
 }
