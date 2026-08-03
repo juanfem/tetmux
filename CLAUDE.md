@@ -23,7 +23,20 @@ swift run tetmux                       # launch the GUI
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter testLayoutChangeSeparatesItsThreeFields
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter SessionIntegrationTests
+
+Scripts/package-dmg.sh                 # .app bundle inside a .dmg, in dist/
+Scripts/package-dmg.sh --skip-build    # …from whatever is already in .build/release
 ```
+
+`.github/workflows/ci.yml` runs the same two things on every push: `swift test` with tmux installed
+(otherwise the integration suite silently skips itself and a green check means nothing), then the
+packaging script, whose result is mounted and launched before it is uploaded. A `v*` tag also
+publishes the image as a release.
+
+The .dmg is **single-architecture** and says so in its filename. A universal binary needs SwiftPM's
+`--arch arm64 --arch x86_64`, which routes through xcbuild, which compiles SwiftTerm's Metal shaders
+and so needs a Metal toolchain component that is a separate multi-gigabyte download. The native path
+copies the `.metal` source into the resource bundle and never invokes the compiler.
 
 ### The diagnostic CLI
 
@@ -107,6 +120,26 @@ disconnect.
 and the late joiner needs a repaint because control mode resends nothing for a pane that is merely
 sitting there; broadcasting it would wipe the history the other window is holding. Hence
 `Kind.capturePane(paneId:target:)` and `deliver(_:hostId:paneId:target:)`.
+
+**Pane output is bounded in bytes, and the viewer is what reports progress (P6.5).** A pane produces
+output whether or not anyone is painting it — `yes` is the one-word reproducer — and the producer side
+of an `AsyncStream` cannot observe whether its consumer is keeping up. So the surface acknowledges
+what it has fed (batched at 16 KiB; an actor hop per chunk costs more than the accounting is worth),
+`SessionService` tracks undelivered bytes per subscriber, and the *slowest* viewer of a pane decides:
+above 1 MiB it sends `refresh-client -A '%p:pause'`, below 256 KiB it resumes. The gap between the two
+is deliberate — one threshold would pause and resume on alternate chunks, and each resume costs a full
+`capture-pane`.
+
+Three things about this are easy to get wrong. **The byte ceiling cannot be delegated to the stream's
+buffering policy**, which counts elements: `%output` chunk sizes vary by orders of magnitude with what
+the pane is doing, so a buffer deep enough to hold a megabyte of `cat` is also one a chatty pane fills
+long before the high-water mark trips — and then the pause that is supposed to be the mechanism never
+fires at all. **A dropped chunk must come back off the books**, because it will never be fed and so
+never acknowledged; counting it inflates `outstanding` permanently and eventually wedges the pane
+paused with nothing left to drain. And **a pane tmux paused on its own** (`pause-after`, which also
+switches the server to `%extended-output`) **is ours to resume** — nothing else will, and a pane left
+paused never moves again. Anything lost is repaired by a repaint, never handed to the emulator as a
+hole in the byte stream. All of it needs tmux 3.2; below that the byte ceiling is the whole mechanism.
 
 **Pane surfaces need explicit `.id(paneId)`.** The layout tree is rendered through `AnyView`, which
 erases structural identity, so without an explicit id SwiftUI rebuilds every `NSView` on each update
@@ -194,8 +227,20 @@ Keep it that way — it is the only reason the protocol layer is testable agains
 - **Nothing repaints on its own.** Attaching to an existing session shows an empty terminal until
   `capture-pane -p -e -J` runs; that is what `subscribeToPane` triggers on first subscription, and
   what `completeHandshakeIfNeeded` re-triggers for every already-subscribed pane on reattach (F4.16).
-- **Closing a tab must never kill** (F4.9), and destructive actions are confirmed with no
-  "don't ask again" escape (F4.10).
+- **Closing a tab unlinks; it must never kill** (F4.9). `AppModel.closeWindow` counts the sessions
+  the window is linked to and sends `unlink-window` when there is more than one, so the window leaves
+  this session and carries on in the others. tmux cannot do that for a window in its *only* session —
+  removing it there is destroying it, and `unlink-window` refuses outright with "window only linked
+  to one session" — so that case is the single path that reaches `kill-window`, behind a confirmation
+  that says why (F4.10, no "don't ask again" escape). Both halves have a regression test, including
+  one asserting tmux still refuses; if that ever stops being true the confirmation can go.
+  `%window-close` cannot distinguish the two, so it schedules a topology refresh rather than guessing.
+- **A command the user asked for that fails has to say so** (§7). `%error` bodies used to reach only
+  the diagnostic logger, which only `--diagnose` installs — in the app the command simply did not
+  happen and nothing said why. `PendingCommand.Kind.userCommand(_:)` labels the ones a person
+  initiated, and only those become `HostState.lastCommandFailure` and a banner. Internal commands
+  keep `.ignore`: a `resize-window` an old server refuses is ours to cope with, not a sentence to put
+  in front of somebody.
 - **OSC 52 clipboard writes are denied by default and reads are never permitted** (T5.6).
 - Authentication failures are not retried; other disconnects back off 1 s → 60 s with jitter and a
   circuit breaker after 8 attempts (F4.14). An explicit reconnect — `reconnectNow`, behind the
@@ -249,7 +294,17 @@ Keep it that way — it is the only reason the protocol layer is testable agains
 `SessionIntegrationTests` drives a **real PTY against the real tmux server** on the machine. It
 creates and kills its own uniquely-named sessions, and skips entirely when tmux is absent. It also
 spawns a dozen children concurrently on purpose — that is the fork-safety regression, and it fails
-as a hang rather than an assertion.
+as a hang rather than an assertion. CI installs tmux and fails if that skip fires: a skipped test is
+indistinguishable from a passing one in a green check.
+
+The test target links `tetmuxUI` as well as `tetmuxCore`. `AppModelTests` covers the decisions that
+need no channel and no window — the F4.9 close decision, scope resolution, keymap matching — which
+were previously unreachable rather than untested.
+
+Flow-control decisions are asserted through the **diagnostic logger**, not `HostState`: pausing a pane
+is a property of the channel and deliberately invisible to the model, so `LogSink` is the only seam
+there is. The stalled-viewer test never reads its stream, on purpose — reading it would make the test
+measure nothing.
 
 Protocol tests replay byte streams captured verbatim from tmux 3.7b. When fixing a protocol bug, add
 the real captured bytes rather than a hand-written approximation. `SshPromptDetectorTests` follows the
