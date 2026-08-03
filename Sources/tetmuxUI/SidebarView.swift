@@ -73,7 +73,9 @@ struct SidebarView: View {
             Button {
                 model.selectedHostId = host.id
                 if !host.connectionState.isActive {
-                    model.connect(host.id)
+                    // A click is the user asserting the host is reachable, so it clears the
+                    // circuit breaker rather than merely queueing behind it.
+                    model.reconnect(host.id)
                 }
             } label: {
                 HStack(spacing: 6) {
@@ -99,7 +101,7 @@ struct SidebarView: View {
                 Divider()
                 Button("Disconnect") { model.disconnect(host.id) }
             } else {
-                Button("Connect") { model.connect(host.id) }
+                Button("Reconnect") { model.reconnect(host.id) }
                 Button("New Session…") { model.newSessionTarget = host.id }
             }
             if !host.config.isLocal {

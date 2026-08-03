@@ -96,6 +96,14 @@ public actor SessionService {
 
     private var reconnectAttempts: [String: Int] = [:]
     private var outputSubscribers: [String: [String: [UUID: AsyncStream<Data>.Continuation]]] = [:]
+    /// The session to reattach to when a channel is re-established, by host.
+    ///
+    /// Not the same thing as the target the *first* connect used: `switch-client` moves the client,
+    /// and control mode streams `%output` only for the attached session. Reattaching to the
+    /// original target after a drop would silently strand the user on a session whose panes repaint
+    /// once and then never move again. Kept as a name rather than a `$id` so it still resolves if
+    /// the tmux server was restarted underneath us.
+    private var reconnectTarget: [String: String] = [:]
 
     // MARK: - Host registry
 
@@ -123,6 +131,8 @@ public actor SessionService {
 
     public func removeHost(hostId: String) {
         disconnectHost(hostId: hostId)
+        finishSubscribers(hostId: hostId)
+        reconnectTarget.removeValue(forKey: hostId)
         hosts.removeValue(forKey: hostId)
         hostOrder.removeAll { $0 == hostId }
         broadcastState()
@@ -175,7 +185,8 @@ public actor SessionService {
             teardown(hostId: hostId, connection: existing)
         }
 
-        let sessionTarget = targetSession ?? defaultSessionName(for: host.config)
+        let sessionTarget = targetSession ?? reconnectTarget[hostId] ?? defaultSessionName(for: host.config)
+        reconnectTarget[hostId] = sessionTarget
         host.connectionState = .connecting
         hosts[hostId] = host
         broadcastState()
@@ -391,6 +402,9 @@ public actor SessionService {
                 }
                 host.activeSessionId = sessionId
             }
+            // Where a reconnect has to land. `switch-client` arrives here too, so this tracks the
+            // session the client is really on rather than the one it originally attached to.
+            reconnectTarget[hostId] = name
             // The client just moved to a different session. Panes we are already showing belong to
             // the old one and will go silent, and panes in the new one have sent us nothing yet, so
             // everything on screen needs repainting from tmux's scrollback.
@@ -467,6 +481,10 @@ public actor SessionService {
         send("list-clients -F \(TmuxCommand.quote(TmuxCommand.clientsFormat))",
              kind: .listClients, hostId: hostId, connection: connection)
         refreshTopology(hostId: hostId, connection: connection)
+        // Panes that were already on screen before this channel existed — the reconnect case — have
+        // a live subscriber and no content: control mode streams only what changes from now on, so
+        // without this they would sit at whatever they showed when the old channel died (F4.16).
+        repaintSubscribedPanes(hostId: hostId)
 
         for command in queued {
             send(command.text, kind: command.kind, hostId: hostId, connection: connection)
@@ -1021,13 +1039,35 @@ public actor SessionService {
         if connections[hostId]?.epoch == connection.epoch {
             connections.removeValue(forKey: hostId)
         }
-        // Panes must not keep streaming from a dead channel; finishing tells each view to stop.
-        if let panes = outputSubscribers[hostId] {
-            for continuations in panes.values {
-                for continuation in continuations.values { continuation.finish() }
-            }
-            outputSubscribers.removeValue(forKey: hostId)
+        // Pane subscriptions deliberately outlive the channel. They are a registry of what is on
+        // screen, not a property of the connection: a view subscribes exactly once, when its
+        // `NSView` is made, and pane ids survive on the server across a drop — so the view is never
+        // rebuilt and never subscribes again. Finishing the streams here left every pane dead for
+        // the rest of the app's life after the first network blip, silently: keystrokes still
+        // reached tmux, but nothing came back. `completeHandshakeIfNeeded` repaints them on the
+        // next attach instead; `finishSubscribers` is for a host that is actually going away.
+    }
+
+    /// Ends every pane stream for a host. Only correct when the host itself is going away — an
+    /// ordinary disconnect keeps its subscriptions so a later attach can repaint into the same
+    /// views.
+    private func finishSubscribers(hostId: String) {
+        guard let panes = outputSubscribers.removeValue(forKey: hostId) else { return }
+        for continuations in panes.values {
+            for continuation in continuations.values { continuation.finish() }
         }
+    }
+
+    /// An explicit "reconnect now" from the user.
+    ///
+    /// Clears the circuit breaker (F4.14) as well as any pending backoff, because the automatic
+    /// attempts and a deliberate click mean different things: the breaker exists to stop us
+    /// hammering a host nobody asked about, and a click is someone saying the host is reachable
+    /// again. Without the reset, a host that had already spent its eight attempts would refuse to
+    /// come back for the rest of the session.
+    public func reconnectNow(hostId: String) async {
+        reconnectAttempts[hostId] = 0
+        try? await connectHost(hostId: hostId)
     }
 
     /// Called on wake and on network path changes (F4.18). Probes rather than waiting for a

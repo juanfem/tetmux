@@ -199,6 +199,85 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// A pane subscription has to survive the channel it was made on. A view subscribes exactly
+    /// once, when its `NSView` is made, and pane ids survive on the server across a drop — so the
+    /// view is never rebuilt and never subscribes again. Ending the streams on teardown therefore
+    /// left every pane frozen for the rest of the app's life after the first network blip, and did
+    /// it silently: keystrokes still reached tmux, but nothing came back.
+    func testPaneSubscriptionSurvivesAReconnect() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        // Subscribe once, as a pane view does, and hold the *same* stream across the drop.
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId)
+        let collected = Task { () -> String in
+            var text = ""
+            for await chunk in stream {
+                text += String(decoding: chunk, as: UTF8.self)
+                if text.contains("after-reconnect-ok") { break }
+            }
+            return text
+        }
+
+        try await Task.sleep(for: .milliseconds(500))
+
+        // Stands in for the channel dying: the tmux client goes away, the server-side session and
+        // its pane ids do not.
+        await service.disconnectHost(hostId: "local")
+        try await Task.sleep(for: .milliseconds(300))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        _ = try await waitForHost(service) { $0.connectionState == .connected }
+
+        try await Task.sleep(for: .milliseconds(500))
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "echo after-reconnect-ok\r")
+
+        let output = try await withTimeout(seconds: 10) { await collected.value }
+        XCTAssertTrue(
+            output.contains("after-reconnect-ok"),
+            "the stream died with the channel; got:\n\(output)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// A reconnect has to land on the session the client was actually attached to, which is not
+    /// necessarily the one it originally connected with: `switch-client` moves it. Reattaching to
+    /// the original target instead strands the user on a session that gets no `%output` — its panes
+    /// repaint once from scrollback and then never move again.
+    func testReconnectReattachesToTheSessionTheClientWasSwitchedTo() async throws {
+        let other = "\(sessionName)-other"
+        defer { runTmux(["kill-session", "-t", other]) }
+        runTmux(["new-session", "-d", "-s", other])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.sessions.contains { $0.name == other } }
+        let target = try XCTUnwrap(host.sessions.first { $0.name == other })
+        await service.switchSession(hostId: "local", sessionId: target.id)
+        _ = try await waitForHost(service, timeout: 10) { $0.activeSessionId == target.id }
+
+        // Drop the channel and bring it back the way the retry path does: no explicit target.
+        await service.disconnectHost(hostId: "local")
+        try await Task.sleep(for: .milliseconds(300))
+        try await service.connectHost(hostId: "local")
+
+        let after = try await waitForHost(service, timeout: 10) { host in
+            host.connectionState == .connected && host.activeSession?.name != nil
+        }
+        XCTAssertEqual(
+            after.activeSession?.name, other,
+            "reconnected to the original target instead of the session the client was on"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     /// F4.15/§7 — a connection that cannot be established surfaces the underlying message rather
     /// than a paraphrase, and does not retry an authentication failure.
     func testUnreachableHostSurfacesTheUnderlyingError() async throws {

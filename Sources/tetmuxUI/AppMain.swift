@@ -109,6 +109,11 @@ struct RootView: View {
     private var detail: some View {
         if let host = model.selectedHost, let session = model.selectedSession, let window = model.selectedWindow {
             VStack(spacing: 0) {
+                // The panes stay on screen when a channel dies — they hold real scrollback and the
+                // window list is still meaningful — so this is the only place the user is told the
+                // terminal in front of them is frozen, and the only reconnect they can reach
+                // without knowing the sidebar dot is clickable.
+                ConnectionBanner(state: host.connectionState) { model.reconnect(host.id) }
                 WindowTabBar(model: model, session: session)
                 Divider()
                 TerminalContainerView(
@@ -122,7 +127,7 @@ struct RootView: View {
                 StatusBarView(host: host, session: session, window: window, focusedPaneId: model.focusedPaneId)
             }
         } else if let host = model.selectedHost {
-            HostPlaceholderView(host: host) { model.connect(host.id) }
+            HostPlaceholderView(host: host) { model.reconnect(host.id) }
         } else {
             EmptyStateView { model.isAddHostPresented = true }
         }
@@ -272,6 +277,75 @@ struct WindowTabBar: View {
                 model.requestCloseWindow()
             }
         }
+    }
+}
+
+/// Shown above the tab bar whenever the channel behind the visible panes is not healthy.
+///
+/// Automatic recovery is best-effort: ssh takes its keepalive interval to notice a dead link, and
+/// the backoff gives up after eight attempts (F4.14). The button is the guaranteed path — the user
+/// knows they are back on the right network long before we can infer it.
+struct ConnectionBanner: View {
+    let state: ConnectionState
+    let onReconnect: () -> Void
+
+    var body: some View {
+        if let message {
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    if case .connecting = state {
+                        ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 12, height: 12)
+                    } else {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+
+                    // §7 — whatever ssh or tmux said, verbatim, not a paraphrase of it.
+                    Text(message)
+                        .font(.caption)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+
+                    Spacer(minLength: 8)
+
+                    if showsButton {
+                        Button("Reconnect", action: onReconnect)
+                            .controlSize(.small)
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.14))
+                Divider()
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Connection \(state.accessibilityDescription)")
+        }
+    }
+
+    private var message: String? {
+        switch state {
+        case .connected:
+            return nil
+        case .connecting:
+            return "Connecting…"
+        case .disconnected:
+            return "Disconnected — the panes below are a snapshot and are not live."
+        case .reconnecting(let attempt, let seconds):
+            return "Connection lost. Reconnecting (attempt \(attempt), retrying in \(Int(seconds))s)…"
+        case .degraded(let reason):
+            return reason
+        case .failed(let reason):
+            return reason
+        }
+    }
+
+    /// Nothing to offer while a connect is already in flight.
+    private var showsButton: Bool {
+        if case .connecting = state { return false }
+        return true
     }
 }
 

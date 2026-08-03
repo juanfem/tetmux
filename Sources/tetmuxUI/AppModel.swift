@@ -119,6 +119,13 @@ public final class AppModel {
         Task { try? await service.connectHost(hostId: hostId) }
     }
 
+    /// An explicit reconnect. Distinct from `connect` in that it clears the circuit breaker: a host
+    /// that has already spent its automatic attempts must still come back on a click.
+    public func reconnect(_ hostId: String) {
+        selectedHostId = hostId
+        Task { await service.reconnectNow(hostId: hostId) }
+    }
+
     public func disconnect(_ hostId: String) {
         Task { await service.disconnectHost(hostId: hostId) }
     }

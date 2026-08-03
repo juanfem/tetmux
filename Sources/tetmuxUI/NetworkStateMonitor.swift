@@ -9,7 +9,9 @@ public final class NetworkStateMonitor: @unchecked Sendable {
     private let pathMonitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "tetmux.network.monitor")
     private let onChange: @Sendable () -> Void
-    private var wasSatisfied = true
+    private var wasSatisfied = false
+    private var interfaces: Set<String> = []
+    private var sawFirstUpdate = false
     private var wakeObserver: NSObjectProtocol?
 
     public init(onChange: @escaping @Sendable () -> Void) {
@@ -26,11 +28,24 @@ public final class NetworkStateMonitor: @unchecked Sendable {
         pathMonitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
             let satisfied = path.status == .satisfied
-            let previous = self.wasSatisfied
+            let interfaces = Set(path.availableInterfaces.map(\.name))
+            let previousSatisfied = self.wasSatisfied
+            let previousInterfaces = self.interfaces
+            let isFirst = !self.sawFirstUpdate
             self.wasSatisfied = satisfied
-            // Only the transition back to reachable is interesting; the drop itself already shows
-            // up as a dead channel.
-            guard satisfied, !previous else { return }
+            self.interfaces = interfaces
+            self.sawFirstUpdate = true
+
+            // The first update just establishes a baseline — it fires at launch, when there is
+            // nothing to reconnect.
+            guard !isFirst, satisfied else { return }
+
+            // Two different events mean the network moved under us. Coming back from unreachable is
+            // the obvious one. The other is switching between two working networks — Wi-Fi to a
+            // different Wi-Fi, or Wi-Fi to Ethernet — which never reports `.unsatisfied` at all, so
+            // watching only the satisfied flag missed exactly the case where a host that had been
+            // unreachable becomes reachable again.
+            guard !previousSatisfied || interfaces != previousInterfaces else { return }
             self.onChange()
         }
         pathMonitor.start(queue: queue)
