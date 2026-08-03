@@ -28,6 +28,29 @@ public actor SessionService {
     /// Names each paste's buffer uniquely.
     private var pasteSequence = 0
 
+    // Backpressure (P6.5). A pane can produce output faster than an emulator can paint it — `yes` is
+    // the one-word reproducer — and the queue between the two is the only place that can absorb the
+    // difference. Bounding it is what stops a runaway pane from turning into unbounded memory.
+    /// Undelivered bytes at which a pane is paused.
+    private let paneHighWaterBytes = 1 << 20
+    /// …and the level it has to drain to before it is resumed. The gap is deliberate: pausing and
+    /// resuming around a single threshold would do both on alternate chunks, and each resume costs a
+    /// full `capture-pane` repaint.
+    private let paneLowWaterBytes = 1 << 18
+    /// Hard ceiling on what one viewer may have queued. Past this, output is dropped and the pane
+    /// owes a repaint.
+    ///
+    /// Four times the high-water mark, so it is reached only when pausing did not work: while a pause
+    /// is still in flight, or below tmux 3.2 where there is nothing to pause with and this bound is
+    /// the whole mechanism. A drop is always repaired by a repaint, never handed to the emulator as a
+    /// hole in the byte stream.
+    private let paneMaxBufferedBytes = 4 << 20
+    /// Element bound on the same buffer, as a backstop to the byte bound above. Deliberately far
+    /// larger than any chunk count those bytes imply, so it binds only if the accounting is wrong.
+    private let paneBufferChunks = 65536
+    /// How far behind this client may fall before tmux pauses a pane on its own.
+    private let pauseAfterSeconds = 3
+
 
     public init() {}
 
@@ -73,6 +96,23 @@ public actor SessionService {
 
         var pendingKeys: [String: [UInt8]] = [:]
         var repaintedPanes: Set<String> = []
+
+        /// Whether this server can pause a pane at all (`refresh-client -A`, tmux 3.2).
+        var supportsFlowControl = false
+        /// Panes tmux is currently not sending output for, and who asked. Flow control is a property
+        /// of the channel, not of the pane registry: a new channel starts with nothing paused, and a
+        /// pause that outlived its connection would silence a pane no command could revive.
+        var pausedPanes: [String: PauseOrigin] = [:]
+        /// Panes that lost bytes to a full buffer and owe the emulator a repaint.
+        var lossyPanes: Set<String> = []
+
+        enum PauseOrigin {
+            /// We asked, because a view fell behind. Ours to undo once it catches up.
+            case viewer
+            /// tmux's own `pause-after`: this client is behind on the wire. Resuming is still ours to
+            /// do — nothing else will.
+            case server
+        }
 
         var desiredSize: (cols: Int, rows: Int)?
         var lastSentSize: (cols: Int, rows: Int)?
@@ -129,7 +169,29 @@ public actor SessionService {
 
     private var reconnectAttempts: [String: Int] = [:]
 
-    private var outputSubscribers: [String: [String: [UUID: AsyncStream<Data>.Continuation]]] = [:]
+    /// One view's claim on a pane's output, and how far behind that view is.
+    ///
+    /// `outstanding` is bytes handed to the stream that the view has not yet reported feeding to its
+    /// emulator — the depth of the queue between the two. Nothing else can measure it: the producer
+    /// side of an `AsyncStream` never learns whether anyone is keeping up, so a view that falls behind
+    /// is indistinguishable from one that is idle until memory says otherwise.
+    private final class PaneSubscriber {
+        let continuation: AsyncStream<Data>.Continuation
+        var outstanding = 0
+
+        init(continuation: AsyncStream<Data>.Continuation) {
+            self.continuation = continuation
+        }
+    }
+
+    private var outputSubscribers: [String: [String: [UUID: PaneSubscriber]]] = [:]
+
+    /// A view's handle on a pane. The id is what `acknowledge` reports progress against — without it
+    /// the service could hand out bytes but never learn whether anyone was keeping up.
+    public struct PaneSubscription: Sendable {
+        public let id: UUID
+        public let stream: AsyncStream<Data>
+    }
     /// The session to reattach to when a channel is re-established, by host.
     ///
     /// Not the same thing as the target the *first* connect used: `switch-client` moves the client,
@@ -476,13 +538,21 @@ public actor SessionService {
             scheduleTopologyRefresh(hostId: hostId)
 
         case .pause(let paneId):
-            log("[\(hostId)] flow control paused for \(paneId)")
+            // tmux's own `pause-after`: this client is more than `pauseAfterSeconds` behind on the
+            // wire. Recorded so the pane is not left paused — tmux never resumes it by itself, and
+            // `applyFlowControl` is the only thing that will, once the viewer has drained.
+            log("[\(hostId)] tmux paused \(paneId): this client is behind")
+            if connection.pausedPanes[paneId] == nil {
+                connection.pausedPanes[paneId] = .server
+            }
+            applyFlowControl(hostId: hostId, paneId: paneId)
 
         case .continuePane(let paneId):
             log("[\(hostId)] flow control resumed for \(paneId)")
+            connection.pausedPanes.removeValue(forKey: paneId)
             // Whatever was dropped while paused has to come from the pane itself.
-            connection.repaintedPanes.remove(paneId)
-            requestRepaint(hostId: hostId, paneId: paneId)
+            connection.lossyPanes.remove(paneId)
+            requestRepaintAfterLoss(hostId: hostId, paneId: paneId)
 
         case .clientDetached, .clientSessionChanged:
             break
@@ -612,7 +682,7 @@ public actor SessionService {
             // The size we asked for before knowing the version may have used the wrong syntax.
             connection.lastSentSize = nil
             applyWindowSizePolicy(hostId: hostId, connection: connection)
-
+            applyFlowControlPolicy(hostId: hostId, connection: connection)
             flushResize(hostId: hostId)
 
         case .listSessions:
@@ -871,13 +941,104 @@ public actor SessionService {
     private func deliver(_ data: Data, hostId: String, paneId: String, target: UUID? = nil) {
         guard let subscribers = outputSubscribers[hostId]?[paneId], !subscribers.isEmpty else { return }
 
-        if let target {
-            subscribers[target]?.yield(data)
-            return
+        for (id, subscriber) in subscribers where target == nil || target == id {
+            // The byte ceiling is enforced here rather than left to the stream's buffering policy,
+            // which can only count elements. `%output` chunk sizes vary by orders of magnitude with
+            // what the pane is doing, so an element bound is a byte bound only by accident: at a few
+            // hundred bytes a chunk, a buffer deep enough to hold a megabyte of `cat` is also deep
+            // enough that a chatty pane fills it long before the high-water mark trips, and the pause
+            // that is supposed to be the mechanism never fires at all.
+            guard subscriber.outstanding < paneMaxBufferedBytes else {
+                connections[hostId]?.lossyPanes.insert(paneId)
+                continue
+            }
+
+            switch subscriber.continuation.yield(data) {
+            case .enqueued:
+                subscriber.outstanding += data.count
+            case .dropped(let discarded):
+                // The buffer was full, so the *oldest* chunk was discarded to make room. Feeding the
+                // rest to the emulator would splice a hole into the byte stream and desynchronise the
+                // grid, so the pane is marked for repair instead. The repaint is deferred until the
+                // viewer has caught up: one per dropped chunk would be a command flood, and a
+                // `capture-pane` queued behind the backlog it is meant to repair arrives stale.
+                //
+                // The discarded chunk comes back off the books here. It will never reach the viewer
+                // and so will never be acknowledged, and counting it would inflate `outstanding` by
+                // that much forever — enough overruns and the pane would sit permanently above the
+                // high-water mark, paused with nothing left to drain.
+                subscriber.outstanding += data.count - discarded.count
+                connections[hostId]?.lossyPanes.insert(paneId)
+            case .terminated:
+                break
+            @unknown default:
+                break
+            }
         }
-        for continuation in subscribers.values {
-            continuation.yield(data)
+
+        applyFlowControl(hostId: hostId, paneId: paneId)
+    }
+
+    /// Reports bytes a view has finished feeding to its emulator, so the pane can be resumed once it
+    /// has caught up.
+    ///
+    /// Batched by the caller: an actor hop per chunk would cost more than the accounting is worth, and
+    /// the thresholds are far enough apart that a partial batch never decides anything.
+    public func acknowledge(hostId: String, paneId: String, subscriber: UUID, bytes: Int) {
+        guard bytes > 0, let entry = outputSubscribers[hostId]?[paneId]?[subscriber] else { return }
+        entry.outstanding = max(entry.outstanding - bytes, 0)
+        applyFlowControl(hostId: hostId, paneId: paneId)
+    }
+
+    /// Pauses a pane whose slowest viewer is too far behind, and resumes it once that viewer has
+    /// caught up (P6.5).
+    ///
+    /// The slowest viewer decides, because output goes to all of them: pausing on the average would
+    /// let one struggling window grow without bound, and there is no way to serve a pane to one
+    /// viewer and withhold it from another.
+    private func applyFlowControl(hostId: String, paneId: String) {
+        guard let connection = connections[hostId] else { return }
+        let outstanding = outputSubscribers[hostId]?[paneId]?.values.map(\.outstanding).max() ?? 0
+        let isPaused = connection.pausedPanes[paneId] != nil
+
+        if connection.supportsFlowControl {
+            if !isPaused, outstanding >= paneHighWaterBytes {
+                connection.pausedPanes[paneId] = .viewer
+                log("[\(hostId)] pausing \(paneId): \(outstanding) bytes undelivered")
+                send(TmuxCommand.flowControl(paneId: paneId, paused: true),
+                     kind: .ignore, hostId: hostId, connection: connection)
+                return
+            }
+            if isPaused, outstanding <= paneLowWaterBytes {
+                // A pane tmux paused on its own is resumed on the same terms. Nothing else will do
+                // it, and a pane left paused never moves again.
+                connection.pausedPanes.removeValue(forKey: paneId)
+                // tmux discards a paused pane's output rather than queueing it, so the emulator now
+                // holds a snapshot with a gap after it. The `%continue` this triggers repaints, which
+                // covers any buffer overrun too.
+                connection.lossyPanes.remove(paneId)
+                log("[\(hostId)] resuming \(paneId)")
+                send(TmuxCommand.flowControl(paneId: paneId, paused: false),
+                     kind: .ignore, hostId: hostId, connection: connection)
+                return
+            }
         }
+
+        // Either the server is too old to pause a pane, or the pause has not tripped. Repair a buffer
+        // overrun once the viewer has caught up — below 3.2 this bound is the whole mechanism.
+        guard !isPaused, outstanding <= paneLowWaterBytes,
+              connection.lossyPanes.remove(paneId) != nil else { return }
+        log("[\(hostId)] \(paneId) overran its buffer; repainting")
+        requestRepaintAfterLoss(hostId: hostId, paneId: paneId)
+    }
+
+    /// Repaints a pane after bytes were lost, rather than after it merely appeared on screen.
+    ///
+    /// Distinct from `requestRepaint`'s first-subscription case in one way that matters: the pane is
+    /// already marked as painted, so the ordinary suppression would drop this on the floor.
+    private func requestRepaintAfterLoss(hostId: String, paneId: String) {
+        connections[hostId]?.repaintedPanes.remove(paneId)
+        requestRepaint(hostId: hostId, paneId: paneId)
     }
 
     /// Streams a pane's output. On first subscription the pane is repainted from tmux's own
@@ -888,16 +1049,21 @@ public actor SessionService {
     /// repaint, addressed to it alone. Without that it would sit blank until the pane next produced
     /// output, because `repaintedPanes` remembers that the pane was already captured; broadcasting the
     /// repaint instead would clear the first window's scrollback.
-    public func subscribeToPane(hostId: String, paneId: String) -> AsyncStream<Data> {
+    public func subscribeToPane(hostId: String, paneId: String) -> PaneSubscription {
         let id = UUID()
-        let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
+        // Bounded, so a pane producing faster than its viewer paints cannot grow without limit. The
+        // oldest chunk is the one dropped: the newest is the one the screen is closest to, and the
+        // repaint that follows makes the distinction moot anyway.
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: Data.self, bufferingPolicy: .bufferingNewest(paneBufferChunks)
+        )
         let isAdditionalViewer = outputSubscribers[hostId]?[paneId]?.isEmpty == false
-        outputSubscribers[hostId, default: [:]][paneId, default: [:]][id] = continuation
+        outputSubscribers[hostId, default: [:]][paneId, default: [:]][id] = PaneSubscriber(continuation: continuation)
         continuation.onTermination = { [weak self] _ in
             Task { await self?.unsubscribe(hostId: hostId, paneId: paneId, id: id) }
         }
         requestRepaint(hostId: hostId, paneId: paneId, target: isAdditionalViewer ? id : nil)
-        return stream
+        return PaneSubscription(id: id, stream: stream)
     }
 
     private func unsubscribe(hostId: String, paneId: String, id: UUID) {
@@ -907,7 +1073,9 @@ public actor SessionService {
             // Next time this pane is displayed it needs a fresh repaint.
             connections[hostId]?.repaintedPanes.remove(paneId)
         }
-
+        // The viewer that was behind is gone, so whatever it was holding back no longer justifies a
+        // paused pane — and with no subscriber left there is nobody to acknowledge it back to life.
+        applyFlowControl(hostId: hostId, paneId: paneId)
     }
 
     private func requestRepaint(hostId: String, paneId: String, target: UUID? = nil) {
@@ -1077,6 +1245,26 @@ public actor SessionService {
         flushWindowResizes(hostId: hostId)
     }
 
+
+    /// Turns on tmux's half of backpressure, once the server version is known (P6.5).
+    ///
+    /// `pause-after` bounds what tmux will queue for this client before it stops sending a pane —
+    /// the only thing that can, since a backlog inside the server is invisible from our side of the
+    /// pty until it arrives. Below 3.2 there is no such mechanism, and the bounded per-pane buffer is
+    /// left to carry it alone.
+    ///
+    /// A client flag rather than a session option, so unlike `window-size` it dies with the channel
+    /// and leaves nothing to restore. It also switches the server to `%extended-output`, which
+    /// `ControlCodec` already handles.
+    private func applyFlowControlPolicy(hostId: String, connection: Connection) {
+        guard let version = connection.version, version.supportsFlowControl else {
+            connection.supportsFlowControl = false
+            return
+        }
+        connection.supportsFlowControl = true
+        send(TmuxCommand.pauseAfterFlag(seconds: pauseAfterSeconds),
+             kind: .ignore, hostId: hostId, connection: connection)
+    }
 
     /// Puts `window-size` back to whatever the session inherited, on the way out.
     ///
@@ -1338,8 +1526,8 @@ public actor SessionService {
     /// views.
     private func finishSubscribers(hostId: String) {
         guard let panes = outputSubscribers.removeValue(forKey: hostId) else { return }
-        for continuations in panes.values {
-            for continuation in continuations.values { continuation.finish() }
+        for subscribers in panes.values {
+            for subscriber in subscribers.values { subscriber.continuation.finish() }
         }
     }
 

@@ -119,16 +119,35 @@ struct TerminalPaneView: NSViewRepresentable {
             subscription?.cancel()
         }
 
+        /// Bytes fed before telling the service about it. An acknowledgement per chunk would be an
+        /// actor hop per chunk, which costs more than the accounting is worth; the service's
+        /// thresholds are three orders of magnitude above this, so a batch in flight never decides
+        /// anything.
+        private let acknowledgeAfterBytes = 16 * 1024
+
         func attach(view: TerminalView, hostId: String, paneId: String, service: SessionService) {
             self.view = view
             subscription?.cancel()
-            subscription = Task { [weak view] in
-                let stream = await service.subscribeToPane(hostId: hostId, paneId: paneId)
-                for await data in stream {
+            subscription = Task { [weak view, acknowledgeAfterBytes] in
+                let subscription = await service.subscribeToPane(hostId: hostId, paneId: paneId)
+                // Feeding happens here, on the main actor, so this loop *is* the paint rate. Reporting
+                // what it has consumed is what lets the service see a viewer falling behind and pause
+                // the pane (P6.5) — the producer side of an `AsyncStream` cannot observe that itself.
+                var unacknowledged = 0
+                for await data in subscription.stream {
                     if Task.isCancelled { break }
                     guard let view else { break }
                     let bytes = [UInt8](data)
                     view.feed(byteArray: bytes[...])
+
+                    unacknowledged += data.count
+                    if unacknowledged >= acknowledgeAfterBytes {
+                        await service.acknowledge(
+                            hostId: hostId, paneId: paneId,
+                            subscriber: subscription.id, bytes: unacknowledged
+                        )
+                        unacknowledged = 0
+                    }
                 }
             }
         }
