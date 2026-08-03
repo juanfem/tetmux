@@ -596,6 +596,59 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    // MARK: - Command failures (§7)
+
+    /// A command the user asked for that tmux refused has to say so. Before this it went to the
+    /// diagnostic logger, which only `--diagnose` installs — so in the app the rename simply did not
+    /// happen and nothing anywhere said why.
+    func testARefusedUserCommandIsReportedVerbatim() async throws {
+        let taken = "\(sessionName)-taken"
+        defer { runTmux(["kill-session", "-t", taken]) }
+        runTmux(["new-session", "-d", "-s", taken])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let host = try await waitForHost(service) { $0.activeSession != nil }
+        let sessionId = try XCTUnwrap(host.activeSession?.id)
+
+        // Renaming onto a name that is already taken is the most ordinary way to meet `%error`.
+        await service.renameSession(hostId: "local", sessionId: sessionId, newName: taken)
+
+        let reported = try await waitForHost(service, timeout: 10) { $0.lastCommandFailure != nil }
+        let failure = try XCTUnwrap(reported.lastCommandFailure)
+        XCTAssertEqual(failure.action, "Rename session")
+        XCTAssertTrue(
+            failure.message.contains("duplicate session"),
+            "tmux's own words should survive to the UI, got: \(failure.message.debugDescription)"
+        )
+
+        await service.dismissCommandFailure(hostId: "local")
+        let dismissed = try await waitForHost(service, timeout: 5) { $0.lastCommandFailure == nil }
+        XCTAssertNil(dismissed.lastCommandFailure)
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// Only the user's commands. tmux refuses plenty of things we ask it on our own account, and a
+    /// banner for an internal probe is noise the user can do nothing about.
+    func testAnInternalCommandFailureIsNotShownToTheUser() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        _ = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+
+        // A repaint of a pane that no longer exists: internal, expected, and handled by retrying.
+        await service.repaintPane(hostId: "local", paneId: "%99999")
+        try await Task.sleep(for: .seconds(1))
+
+        let host = await service.getHost("local")
+        let failure = host?.lastCommandFailure
+        XCTAssertNil(failure, "an internal command's refusal reached the UI: \(String(describing: failure))")
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     // MARK: - Backpressure (P6.5)
 
     /// A viewer that stops painting must not turn into unbounded memory.

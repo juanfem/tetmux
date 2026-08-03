@@ -316,6 +316,32 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
 /// input, not a connection state, and every exhaustive switch over `ConnectionState` in the UI would
 /// otherwise have to grow a case that has nothing to say about being connected.
 
+/// A command the user asked for that tmux refused (§7).
+///
+/// Control mode answers a failed command with `%error` and a body, and that body is the only
+/// explanation there is — "duplicate session: work", "window only linked to one session",
+/// "can't find pane %7". Without this the command simply appeared not to happen: the failure went to
+/// the diagnostic logger, which only `--diagnose` ever installs, so in the app nothing happened at
+/// all and nothing said why.
+///
+/// Only commands the user initiated get here. tmux refusing an internal `resize-window` on an old
+/// server is our problem to handle, not a sentence to put in front of somebody.
+public struct CommandFailure: Equatable, Sendable, Identifiable {
+    /// Distinct per occurrence, so the same failure twice reads as two attempts rather than one
+    /// banner that never went away.
+    public var id: UUID
+    /// What was being attempted, to introduce tmux's own words: "Rename window failed: …".
+    public var action: String
+    /// What tmux said, verbatim (§7). Never paraphrased — tmux names the thing it could not find.
+    public var message: String
+
+    public init(id: UUID = UUID(), action: String, message: String) {
+        self.id = id
+        self.action = action
+        self.message = message
+    }
+}
+
 public struct AuthenticationPrompt: Equatable, Sendable, Identifiable {
     public enum Kind: Equatable, Sendable {
         /// An account password, which is the one thing a per-host Keychain entry can answer.
@@ -352,7 +378,9 @@ public struct HostState: Identifiable, Equatable, Sendable {
     /// Set while ssh is waiting for a secret on this host's channel. Cleared as soon as it is
     /// answered or the channel goes away.
     public var authenticationPrompt: AuthenticationPrompt?
-
+    /// The most recent command of the user's that tmux refused (§7). Cleared when dismissed, and on
+    /// each connect so a reconnect never opens showing a failure from the previous channel.
+    public var lastCommandFailure: CommandFailure?
 
     public var activeSession: TmuxSession? {
         sessions.first { $0.id == activeSessionId } ?? sessions.first
@@ -365,7 +393,8 @@ public struct HostState: Identifiable, Equatable, Sendable {
         activeSessionId: String? = nil,
         tmuxVersion: String? = nil,
         rttMilliseconds: Double? = nil,
-        authenticationPrompt: AuthenticationPrompt? = nil
+        authenticationPrompt: AuthenticationPrompt? = nil,
+        lastCommandFailure: CommandFailure? = nil
     ) {
         self.config = config
         self.connectionState = connectionState
@@ -374,6 +403,7 @@ public struct HostState: Identifiable, Equatable, Sendable {
         self.tmuxVersion = tmuxVersion
         self.rttMilliseconds = rttMilliseconds
         self.authenticationPrompt = authenticationPrompt
+        self.lastCommandFailure = lastCommandFailure
     }
 
     public func window(_ windowId: String) -> TmuxWindow? {

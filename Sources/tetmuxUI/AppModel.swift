@@ -297,6 +297,11 @@ public final class AppModel {
         Task { await service.disconnectHost(hostId: hostId) }
     }
 
+    /// §7 — the user has read the refusal.
+    public func dismissCommandFailure(_ hostId: String) {
+        Task { await service.dismissCommandFailure(hostId: hostId) }
+    }
+
     public func select(host hostId: String, session sessionId: String?, window windowId: String?) {
         let isNewSession = sessionId != nil && sessionId != hosts.first { $0.id == hostId }?.activeSessionId
         selectedHostId = hostId
