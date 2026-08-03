@@ -10,10 +10,10 @@ The point is that a remote working set stops being a picture of a terminal. Pane
 so closing the lid, changing networks, or quitting the app leaves everything running.
 
 > **Status:** early. It connects, renders sessions and splits, tears windows off into their own macOS
-> windows, and recovers from dropped connections — but there is no settings UI, no packaged `.app`, and
-> the keymap, while centralised in one policy type, is not yet editable at runtime. Torn-off windows are
-> separate windows rather than native `NSWindow` tabs, so they cannot yet be dragged together into one
-> tab bar (F4.12 asks for that eventually).
+> windows, and recovers from dropped connections — but there is no settings UI, and the keymap, while
+> centralised in one policy type, is not yet editable at runtime. Torn-off windows are separate windows
+> rather than native `NSWindow` tabs, so they cannot yet be dragged together into one tab bar (F4.12
+> asks for that eventually).
 
 ## Requirements
 
@@ -37,6 +37,25 @@ Tests need Xcode's toolchain, because XCTest is absent from CommandLineTools:
 ```bash
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
+
+Part of the suite drives a real tmux server on the machine, and skips itself if tmux is not
+installed — so a green run without tmux is telling you less than it looks like.
+
+### A packaged app
+
+```bash
+Scripts/package-dmg.sh          # → dist/tetmux-<version>-<arch>.dmg
+```
+
+`swift run` works because the app sets its own activation policy by hand, but a bare SwiftPM binary
+has no bundle identifier, so the Keychain ACL has nothing stable to key on and every launch re-asks
+for stored passwords. The script assembles the `.app`, ad-hoc signs it, and wraps it in a disk image.
+CI does the same on every push and attaches the image to any `v*` tag.
+
+The build is single-architecture — the filename says which — because a universal one pulls in
+SwiftTerm's Metal shader compilation and a toolchain component that is a separate multi-gigabyte
+download. The image is ad-hoc signed rather than notarised, so the first open needs right-click →
+Open, or `xattr -dr com.apple.quarantine /Applications/tetmux.app`.
 
 ## Using it
 

@@ -47,7 +47,10 @@ let package = Package(
         ),
         .testTarget(
             name: "tetmuxTests",
-            dependencies: ["tetmuxCore"],
+            // `tetmuxUI` as well as the core: `AppModel` holds real logic — the close decision
+            // (F4.9), prompt handling, keymap resolution — that needed no AppKit to exercise and was
+            // simply unreachable from a test bundle that did not link it.
+            dependencies: ["tetmuxCore", "tetmuxUI"],
             path: "Tests/tetmuxTests"
         ),
     ]

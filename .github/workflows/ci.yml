@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    # arm64. The packaged binary is single-architecture, so the runner is also what it is built for.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # XCTest is absent from CommandLineTools, which is what `xcode-select -p` points at by default.
+      # Every step below inherits DEVELOPER_DIR from here.
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer
+          echo "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer" >> "$GITHUB_ENV"
+          swift --version
+
+      # SessionIntegrationTests drives a real tmux server and skips itself when tmux is absent —
+      # which on a bare image means the half of the suite that has ever caught a real bug silently
+      # does not run. Installing it is what makes this CI worth having.
+      - name: Install tmux
+        run: |
+          brew install tmux
+          tmux -V
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: |
+          set -o pipefail
+          swift test --skip-build 2>&1 | tee test.log
+
+      # A skipped test reads exactly like a passing one in a green check, and this suite skips itself
+      # by design when tmux is missing — which would quietly retire the half of it that has ever
+      # caught a real bug. Fail loudly on that specific cause and report the rest.
+      - name: Check the integration tests actually ran
+        if: always()
+        run: |
+          if grep -q "tmux is not installed" test.log; then
+            echo "::error::tmux was missing, so the integration suite skipped itself"
+            exit 1
+          fi
+          echo "::notice::$(grep -oE 'Executed [0-9]+ tests, with [0-9]+ failures' test.log | tail -1)"
+          if grep -qE "was skipped|skipped \(" test.log; then
+            echo "::warning::some tests skipped themselves:"
+            grep -B1 -E "was skipped|skipped \(" test.log | tail -20
+          fi
+
+  package:
+    name: Package .dmg
+    needs: test
+    runs-on: macos-15
+    permissions:
+      # Only the tagged path uses this, to create the release the .dmg is attached to.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags are what the version comes from, and actions/checkout does not fetch them by default.
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer
+
+      - name: Build disk image
+        id: package
+        run: |
+          # A tag build is that version; anything else is a dated snapshot, so two artifacts from
+          # different commits never claim to be the same build.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="0.0.$(date +%Y%m%d)"
+          fi
+          Scripts/package-dmg.sh --version "$VERSION"
+          echo "dmg=$(ls dist/*.dmg | head -1)" >> "$GITHUB_OUTPUT"
+
+      # Proves the bundle is more than a correctly-shaped directory: it opens the image, checks the
+      # signature the way Gatekeeper does, and runs the app's own diagnostic against a real tmux —
+      # which is what catches a resource bundle that did not make it into Contents/Resources.
+      - name: Verify the packaged app
+        run: |
+          brew install tmux
+          MOUNT="$(mktemp -d)"
+          hdiutil attach "${{ steps.package.outputs.dmg }}" -nobrowse -readonly -mountpoint "$MOUNT"
+          codesign --verify --deep --strict --verbose=2 "$MOUNT/tetmux.app"
+          "$MOUNT/tetmux.app/Contents/MacOS/tetmux" --diagnose 2>/dev/null | tee diagnose.log
+          hdiutil detach "$MOUNT"
+          grep -q "state:   connected" diagnose.log || {
+            echo "::error::the packaged app could not open a control-mode channel"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tetmux-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+      # Tag builds also become a release, so a .dmg is downloadable without digging through a
+      # workflow run. Unsigned beyond ad-hoc, which the release notes have to say out loud.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF#refs/tags/}" dist/*.dmg \
+            --title "${GITHUB_REF#refs/tags/}" \
+            --generate-notes \
+            --notes "This build is ad-hoc signed, not notarised. macOS will refuse it on first open: right-click the app and choose Open, or run \`xattr -dr com.apple.quarantine /Applications/tetmux.app\`."
