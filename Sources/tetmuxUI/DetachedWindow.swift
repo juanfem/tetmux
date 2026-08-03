@@ -271,8 +271,10 @@ struct DetachedWindowView: View {
         }
         Button("Move Back to Main Window") { mergeBack(window: window) }
         Divider()
+        // F4.9 — unlinks where tmux allows it, and hands back a confirmation only when closing would
+        // have to be a kill. This window owns the sheet; the model's own would present everywhere.
         Button("Close Window…", role: .destructive) {
-            pendingClose = model.closeRequest(hostId: host.id, window: window)
+            pendingClose = model.closeWindow(hostId: host.id, window: window)
         }
     }
 

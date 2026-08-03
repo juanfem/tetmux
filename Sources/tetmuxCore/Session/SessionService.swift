@@ -507,6 +507,11 @@ public actor SessionService {
                     }
                 }
             }
+            // The notification says a window closed, not which sessions it left, and `unlink-window`
+            // (F4.9) produces the same one for a window that is still very much alive in another
+            // session. Dropping it everywhere is right for a kill and wrong for an unlink, so let
+            // tmux settle the difference rather than guessing from the notification.
+            scheduleTopologyRefresh(hostId: hostId)
 
         case .windowRenamed(let windowId, let name), .unlinkedWindowRenamed(let windowId, let name):
             withHost(hostId) { host in

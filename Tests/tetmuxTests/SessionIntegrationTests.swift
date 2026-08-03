@@ -596,6 +596,81 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    // MARK: - Closing a window (F4.9)
+
+    /// Closing a tab must never end what is running. A window linked to two sessions leaves the one
+    /// it was closed in and carries on in the other — the pane keeps its pid, so this checks the
+    /// process itself survived rather than merely that a window with the same name still exists.
+    func testUnlinkingAWindowLeavesItRunningInItsOtherSession() async throws {
+        let other = "\(sessionName)-linked"
+        defer { runTmux(["kill-session", "-t", other]) }
+        runTmux(["new-session", "-d", "-s", other])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let windowId = try XCTUnwrap(host.activeSession?.activeWindow?.id)
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        // Link the window into the second session, which is the case `unlink-window` exists for.
+        runTmux(["link-window", "-s", windowId, "-t", "\(other):"])
+        let pid = try XCTUnwrap(
+            tmuxQuery(["display-message", "-p", "-t", paneId, "#{pane_pid}"]),
+            "could not read the pane's pid"
+        )
+
+        await service.unlinkWindow(hostId: "local", windowId: windowId)
+
+        // Gone from the session it was closed in…
+        _ = try await waitForHost(service, timeout: 10) { host in
+            host.sessions.first { $0.name == self.sessionName }?.windows.contains { $0.id == windowId } == false
+        }
+        // …and still running in the other, with the same process behind it. Filtered rather than
+        // listed: that session has a window of its own, so the first line of a plain listing is not
+        // the one under test.
+        let survivor = tmuxQuery([
+            "list-windows", "-t", other,
+            "-f", "#{==:#{window_id},\(windowId)}", "-F", "#{window_id}",
+        ])
+        XCTAssertEqual(survivor, windowId, "the window did not survive in its other session")
+        XCTAssertEqual(
+            tmuxQuery(["display-message", "-p", "-t", paneId, "#{pane_pid}"]), pid,
+            "closing a tab killed the process (F4.9)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// The other half of F4.9: tmux refuses to unlink a window from its only session, which is why
+    /// that case has to stop and ask rather than silently doing nothing. If this ever starts
+    /// succeeding, the confirmation is no longer needed and the close path should just unlink.
+    func testTmuxRefusesToUnlinkAWindowFromItsOnlySession() async throws {
+        runTmux(["new-session", "-d", "-s", sessionName])
+        let windowId = try XCTUnwrap(tmuxQuery(["list-windows", "-t", sessionName, "-F", "#{window_id}"]))
+
+        let service = SessionService()
+        let sink = LogSink()
+        await service.setDiagnosticLogger { message in
+            Task { await sink.append(message) }
+        }
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        _ = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+
+        await service.unlinkWindow(hostId: "local", windowId: windowId)
+
+        let refused = try await waitFor(seconds: 10) { await sink.contains("only linked to one session") }
+        let log = await sink.text
+        XCTAssertTrue(refused, "tmux no longer refuses this; the close path can be simplified:\n\(log)")
+        XCTAssertNotNil(
+            tmuxQuery(["list-windows", "-t", sessionName, "-F", "#{window_id}"]),
+            "the window was destroyed by a refused unlink"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     // MARK: - Command failures (§7)
 
     /// A command the user asked for that tmux refused has to say so. Before this it went to the
