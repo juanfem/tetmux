@@ -408,7 +408,7 @@ public final class AppModel {
     }
 
     /// F4.10 — the confirmation names the window, its pane count, and what is running in it.
-    public func closeRequest(hostId: String, window: TmuxWindow) -> PendingClose {
+    private func closeRequest(hostId: String, window: TmuxWindow) -> PendingClose {
         PendingClose(
             hostId: hostId,
             windowId: window.id,
@@ -421,9 +421,37 @@ public final class AppModel {
     public func requestCloseWindow() {
         let scope = activeScope
         guard let hostId = scope.hostId, let window = window(in: scope) else { return }
-        pendingClose = closeRequest(hostId: hostId, window: window)
+        pendingClose = closeWindow(hostId: hostId, window: window)
     }
 
+    /// F4.9 — closing a tab unlinks the window. It never ends what is running in it.
+    ///
+    /// A window linked to more than one session simply leaves this one and carries on in the others,
+    /// which is what closing a tab ought to mean and exactly what `unlink-window` does. tmux has no
+    /// equivalent for a window in a single session: removing it there *is* destroying it, and
+    /// `unlink-window` refuses outright ("window only linked to one session"). So that case stops and
+    /// asks (F4.10) instead of quietly killing a shell the user only meant to put away — the close
+    /// action itself still never kills, and the kill only happens on an informed confirmation.
+    ///
+    /// Returns the confirmation to present, or `nil` when the window was simply unlinked and there is
+    /// nothing to ask. The caller owns the sheet: a detached window keeps its own, because a sheet
+    /// bound to shared state presents itself in every open window at once.
+    public func closeWindow(hostId: String, window: TmuxWindow) -> PendingClose? {
+        guard linkedSessionCount(hostId: hostId, windowId: window.id) > 1 else {
+            return closeRequest(hostId: hostId, window: window)
+        }
+        Task { await service.unlinkWindow(hostId: hostId, windowId: window.id) }
+        return nil
+    }
+
+    /// How many of the host's sessions this window is linked to. `list-windows -a` reports a linked
+    /// window once per session, so the model already carries it in each one.
+    private func linkedSessionCount(hostId: String, windowId: String) -> Int {
+        guard let host = hosts.first(where: { $0.id == hostId }) else { return 0 }
+        return host.sessions.count { session in session.windows.contains { $0.id == windowId } }
+    }
+
+    /// Only ever reached from the confirmation above, which is the single place a window is killed.
     public func confirmCloseWindow() {
         guard let pending = pendingClose else { return }
         pendingClose = nil

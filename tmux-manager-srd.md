@@ -184,7 +184,7 @@ Passthrough fallback is a first-class requirement. Institutional and HPC environ
 - **F4.6** One application tab = one tmux window. Opening a session opens tabs for its windows; the active tmux window is the active tab.
 - **F4.7** Splits mirror the tmux pane layout exactly, including nesting and dimensions, reconstructed from the layout string.
 - **F4.8** GUI split/close operations translate to tmux commands (`split-window`, `kill-pane`, `resize-pane`) and apply only when tmux confirms. Dragging a divider issues `resize-pane -x/-y`.
-- **F4.9** Closing a tab detaches or unlinks — it never kills.
+- **F4.9** Closing a tab detaches or unlinks — it never kills. Where tmux makes that impossible it must say so rather than do the other thing: a window linked to a single session cannot be removed without being destroyed (`unlink-window` refuses it outright), so that case is the one path to `kill-window` and it goes through the F4.10 confirmation, worded to explain why closing has become killing.
 - **F4.10** Destructive commands require confirmation showing the target's name, pane count, and running commands. Not suppressible by a "don't ask again" checkbox.
 - **F4.11** Session operations: new (name, start directory, optional command), rename, kill, detach-others, detach-this-client.
 - **F4.12** Native `NSWindow` tabbing; tabs can be torn off into new windows and merged back. Window/tab arrangement participates in macOS state restoration in addition to `workspace.json`.

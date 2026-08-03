@@ -20,8 +20,12 @@ struct DestructiveActionModal: View {
                 Text(title).font(.headline)
             }
 
-            Text("Close **\(targetName)**? Its \(paneCount) \(paneCount == 1 ? "pane" : "panes") "
-                 + "and everything running in them will be terminated.")
+            // Says why this is a kill rather than a close. The window is in one session, and tmux
+            // cannot take a window out of its only session without destroying it — `unlink-window`
+            // refuses. Presenting it as an ordinary close would be describing the wrong action.
+            Text("tmux cannot close **\(targetName)** without ending what is running in it: "
+                 + "it is only in this session. Its \(paneCount) \(paneCount == 1 ? "pane" : "panes") "
+                 + "will be terminated.")
                 .fixedSize(horizontal: false, vertical: true)
 
             if !runningCommands.isEmpty {
