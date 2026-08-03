@@ -129,5 +129,12 @@ captured bytes rather than a hand-written approximation.
 
 ## Dependencies
 
-[SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) provides the pane surfaces, behind a seam
-narrow enough that nothing above it knows which emulator is drawing.
+[SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT) provides the pane surfaces, behind a
+seam narrow enough that nothing above it knows which emulator is drawing. It resolves
+[swift-argument-parser](https://github.com/apple/swift-argument-parser) (Apache-2.0) transitively.
+
+tmux itself is neither bundled nor linked — tetmux spawns whatever `tmux` is on the host's `PATH`.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
