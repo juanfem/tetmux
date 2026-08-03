@@ -82,12 +82,18 @@ enum Diagnostics {
         // Prove the output plane works end to end: subscribe, type, and read the echo back.
         if let paneId = host.activeSession?.activeWindow?.preferredPaneId {
             print("\n→ subscribing to \(paneId) and sending `echo tetmux-ok`…")
-            let stream = await service.subscribeToPane(hostId: hostId, paneId: paneId)
+            let subscription = await service.subscribeToPane(hostId: hostId, paneId: paneId)
             let reader = Task {
                 var received = 0
-                for await data in stream {
+                for await data in subscription.stream {
                     received += data.count
                     FileHandle.standardOutput.write(data)
+                    // Acknowledged as it goes, like a real viewer: an unacknowledged reader looks to
+                    // the service exactly like one that has fallen behind, and would have its pane
+                    // paused out from under it.
+                    await service.acknowledge(
+                        hostId: hostId, paneId: paneId, subscriber: subscription.id, bytes: data.count
+                    )
                     if received > 8192 { break }
                 }
             }

@@ -412,6 +412,9 @@ public struct TmuxVersion: Comparable, Sendable {
 
     /// `refresh-client -B` subscriptions and `%extended-output` need 3.2.
     public var supportsSubscriptions: Bool { self >= TmuxVersion("3.2")! }
+    /// Control-mode flow control — `refresh-client -f pause-after=`, `refresh-client -A`, and the
+    /// `%pause`/`%continue` notifications that go with them — landed in 3.2 (P6.5).
+    public var supportsFlowControl: Bool { self >= TmuxVersion("3.2")! }
 
     /// Below this, control mode is too different to drive; §4.6 passthrough applies.
     public var supportsControlMode: Bool { self >= TmuxVersion("2.4")! }

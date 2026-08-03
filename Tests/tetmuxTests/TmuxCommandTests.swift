@@ -335,6 +335,34 @@ final class TmuxVersionTests: XCTestCase {
         XCTAssertTrue(TmuxVersion("2.4")!.supportsControlMode)
         XCTAssertFalse(TmuxVersion("2.3")!.supportsControlMode)
         XCTAssertFalse(TmuxVersion("1.8")!.supportsControlMode)
+
+        // Flow control — `pause-after`, `refresh-client -A`, `%pause`/`%continue` — arrived in 3.2.
+        XCTAssertTrue(TmuxVersion("3.2")!.supportsFlowControl)
+        XCTAssertTrue(TmuxVersion("3.7b")!.supportsFlowControl)
+        XCTAssertFalse(TmuxVersion("3.1")!.supportsFlowControl)
+        XCTAssertFalse(TmuxVersion("2.9")!.supportsFlowControl)
+    }
+}
+
+/// P6.5 — the command forms backpressure is built out of.
+final class FlowControlCommandTests: XCTestCase {
+
+    func testPauseAfterFlagUsesTheClientFlagForm() {
+        XCTAssertEqual(TmuxCommand.pauseAfterFlag(seconds: 3), "refresh-client -f pause-after=3")
+    }
+
+    /// `pause-after=0` is not "never pause" — it is a client that is always behind, which pauses
+    /// every pane immediately and freezes the whole UI.
+    func testPauseAfterFlagNeverAsksForZeroSeconds() {
+        XCTAssertEqual(TmuxCommand.pauseAfterFlag(seconds: 0), "refresh-client -f pause-after=1")
+        XCTAssertEqual(TmuxCommand.pauseAfterFlag(seconds: -5), "refresh-client -f pause-after=1")
+    }
+
+    /// The argument is one `pane:state` word, so it has to be quoted as one — and the pane id keeps
+    /// its `%` sigil, which is what tmux matches on.
+    func testFlowControlAddressesAPaneByItsSigilledId() {
+        XCTAssertEqual(TmuxCommand.flowControl(paneId: "%7", paused: true), "refresh-client -A '%7:pause'")
+        XCTAssertEqual(TmuxCommand.flowControl(paneId: "%7", paused: false), "refresh-client -A '%7:continue'")
     }
 }
 

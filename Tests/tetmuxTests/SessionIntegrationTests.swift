@@ -111,7 +111,7 @@ final class SessionIntegrationTests: XCTestCase {
 
         // Output plane: subscribing repaints from tmux's scrollback (F4.16), then send-keys
         // round-trips through the command plane and comes back as %output.
-        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId)
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
         let collected = Task { () -> String in
             var text = ""
             for await chunk in stream {
@@ -181,7 +181,7 @@ final class SessionIntegrationTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(switched.sessions.first { $0.id == target.id }).isAttached)
 
         // And output for a pane in the newly attached session now flows.
-        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId)
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
         let collected = Task { () -> String in
             var text = ""
             for await chunk in stream {
@@ -213,7 +213,7 @@ final class SessionIntegrationTests: XCTestCase {
         let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
 
         // Subscribe once, as a pane view does, and hold the *same* stream across the drop.
-        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId)
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
         let collected = Task { () -> String in
             var text = ""
             for await chunk in stream {
@@ -565,7 +565,7 @@ final class SessionIntegrationTests: XCTestCase {
         let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
 
         // First view: subscribe and get something on screen.
-        let firstStream = await service.subscribeToPane(hostId: "local", paneId: paneId)
+        let firstStream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
         let firstView = Collector()
         let firstReader = Task { for await chunk in firstStream { await firstView.append(chunk) } }
         try await Task.sleep(for: .milliseconds(400))
@@ -574,7 +574,7 @@ final class SessionIntegrationTests: XCTestCase {
         await firstView.mark()
 
         // Second view of the same pane, as a torn-off window is.
-        let secondStream = await service.subscribeToPane(hostId: "local", paneId: paneId)
+        let secondStream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
         let secondView = Collector()
         let secondReader = Task { for await chunk in secondStream { await secondView.append(chunk) } }
         try await Task.sleep(for: .seconds(1))
@@ -593,6 +593,109 @@ final class SessionIntegrationTests: XCTestCase {
 
         firstReader.cancel()
         secondReader.cancel()
+        await service.disconnectHost(hostId: "local")
+    }
+
+    // MARK: - Backpressure (P6.5)
+
+    /// A viewer that stops painting must not turn into unbounded memory.
+    ///
+    /// tmux keeps running a pane whether or not anyone is reading it, so `%output` for a pane whose
+    /// view has stalled has nowhere to go but a queue that grows for as long as the pane keeps
+    /// talking — `yes` is the one-word reproducer. The pane is paused instead, and resumed once the
+    /// viewer acknowledges what it has painted.
+    ///
+    /// Deliberately never reads the stream: that is exactly what a stalled viewer looks like from the
+    /// service's side, and reading it would make the test measure nothing.
+    func testAStalledViewerPausesItsPaneAndResumingRepaintsIt() async throws {
+        try XCTSkipIf(
+            (TmuxVersion(installedTmuxVersion() ?? "") ?? TmuxVersion("0")!) < TmuxVersion("3.2")!,
+            "control-mode flow control needs tmux 3.2"
+        )
+
+        let service = SessionService()
+        let sink = LogSink()
+        await service.setDiagnosticLogger { message in
+            Task { await sink.append(message) }
+        }
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        let subscription = await service.subscribeToPane(hostId: "local", paneId: paneId)
+        try await Task.sleep(for: .milliseconds(400))
+
+        // Comfortably past the high-water mark, and fast enough that it is all in flight before any
+        // of it could be drained by a reader that does not exist.
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "yes tetmux-backpressure | head -n 400000\r")
+
+        let paused = try await waitFor(seconds: 20) { await sink.contains("pausing \(paneId)") }
+        let logAfterPause = await sink.text
+        XCTAssertTrue(
+            paused,
+            "a pane nobody is reading was never paused; it would queue without bound:\n\(logAfterPause)"
+        )
+
+        // The viewer catches up. Acknowledging more than is outstanding is the honest way to say
+        // "everything painted" — the service clamps at zero.
+        await service.acknowledge(hostId: "local", paneId: paneId, subscriber: subscription.id, bytes: 1 << 30)
+
+        let resumed = try await waitFor(seconds: 20) { await sink.contains("resuming \(paneId)") }
+        let logAfterResume = await sink.text
+        XCTAssertTrue(
+            resumed,
+            "the pane stayed paused after its viewer caught up; it would never move again:\n\(logAfterResume)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// The pane keeps working after all of that. A pause that is not cleanly undone leaves a pane
+    /// that takes keystrokes and answers nothing, which is the failure this whole mechanism would
+    /// otherwise introduce.
+    func testAPanePausedAndResumedStillDeliversOutput() async throws {
+        try XCTSkipIf(
+            (TmuxVersion(installedTmuxVersion() ?? "") ?? TmuxVersion("0")!) < TmuxVersion("3.2")!,
+            "control-mode flow control needs tmux 3.2"
+        )
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        let subscription = await service.subscribeToPane(hostId: "local", paneId: paneId)
+        let collected = Collector()
+        try await Task.sleep(for: .milliseconds(400))
+
+        // Stall, overrun, then start reading again — the sequence a window that was occluded and then
+        // brought back to the front produces.
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "yes tetmux-backpressure | head -n 400000\r")
+        try await Task.sleep(for: .seconds(3))
+
+        let reader = Task {
+            for await chunk in subscription.stream {
+                await collected.append(chunk)
+                await service.acknowledge(
+                    hostId: "local", paneId: paneId, subscriber: subscription.id, bytes: chunk.count
+                )
+            }
+        }
+        // Everything the stalled period left behind, plus the clamp, so nothing stays outstanding.
+        await service.acknowledge(hostId: "local", paneId: paneId, subscriber: subscription.id, bytes: 1 << 30)
+
+        try await Task.sleep(for: .seconds(2))
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "echo after-pause-marker\r")
+
+        let arrived = try await waitFor(seconds: 20) { await collected.text.contains("after-pause-marker") }
+        let tail = String(await collected.text.suffix(2000))
+        XCTAssertTrue(arrived, "the pane never came back after being paused:\n\(tail)")
+
+        reader.cancel()
         await service.disconnectHost(hostId: "local")
     }
 
@@ -712,7 +815,7 @@ final class SessionIntegrationTests: XCTestCase {
         }
         let paneId = try XCTUnwrap(connected.activeSession?.activeWindow?.preferredPaneId)
 
-        let stream = await service.subscribeToPane(hostId: "pw-twice", paneId: paneId)
+        let stream = await service.subscribeToPane(hostId: "pw-twice", paneId: paneId).stream
         let collected = Task { () -> String in
             var text = ""
             for await chunk in stream {
@@ -755,6 +858,31 @@ final class SessionIntegrationTests: XCTestCase {
 
     /// Collects one pane subscription's bytes, with a mark so a test can ask what arrived *after* some
     /// point — which is how "the other view was left alone" is expressed.
+    /// Collects the diagnostic log, which is the only place the flow-control decisions are visible:
+    /// pausing a pane changes nothing about `HostState`, deliberately — it is a property of the
+    /// channel, not of the model the UI renders.
+    private actor LogSink {
+        private var lines: [String] = []
+
+        func append(_ line: String) { lines.append(line) }
+        func contains(_ needle: String) -> Bool { lines.contains { $0.contains(needle) } }
+        var text: String { lines.joined(separator: "\n") }
+    }
+
+    /// Polls a condition to a deadline. The state being waited on here is not in `HostState`, so
+    /// `waitForHost` cannot express it.
+    private func waitFor(
+        seconds: TimeInterval,
+        until condition: @escaping @Sendable () async -> Bool
+    ) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if await condition() { return true }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
     private actor Collector {
         private var bytes = Data()
         private var markOffset = 0

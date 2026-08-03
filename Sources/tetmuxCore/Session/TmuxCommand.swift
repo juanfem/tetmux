@@ -99,6 +99,30 @@ public enum TmuxCommand {
         "#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_current_command}|#{pane_current_path}"
     public static let clientsFormat = "#{client_name}|#{client_session}|#{client_flags}"
 
+    // MARK: - Flow control (P6.5)
+
+    /// Asks tmux to pause a pane once its output is `seconds` behind on this channel.
+    ///
+    /// This is the far half of backpressure: it bounds what a fast producer can queue up *inside tmux*
+    /// for a client on a slow link, which nothing on our side of the pty can otherwise limit. Setting
+    /// it also switches the server from `%output` to `%extended-output` — same payload with an age
+    /// field, which `ControlCodec` already handles.
+    ///
+    /// The flag is per client, not per session, so it needs re-applying on each attach and nothing has
+    /// to be restored on the way out.
+    public static func pauseAfterFlag(seconds: Int) -> String {
+        "refresh-client -f pause-after=\(max(seconds, 1))"
+    }
+
+    /// Pauses or resumes one pane on this channel.
+    ///
+    /// The near half of backpressure: a viewer that cannot keep up is a local condition tmux has no
+    /// way to observe, so we pause the pane ourselves rather than letting the queue between the two
+    /// grow without bound. tmux keeps running the pane and discards what we did not take, which is why
+    /// resuming has to be followed by a repaint.
+    public static func flowControl(paneId: String, paused: Bool) -> String {
+        "refresh-client -A \(quote("\(paneId):\(paused ? "pause" : "continue")"))"
+    }
 
     // MARK: - Transport invocation
 
