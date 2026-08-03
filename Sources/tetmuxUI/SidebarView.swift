@@ -8,6 +8,7 @@ import tetmuxCore
 /// without scrolling, so rows stay single-line and badges carry the state.
 struct SidebarView: View {
     @Bindable var model: AppModel
+    @Environment(\.openWindow) private var openWindow
     /// Hosts are expanded by default and this tracks the exceptions. Tracking the expanded set
     /// instead would depend on hosts being loaded before the first layout pass, and they are not —
     /// they arrive asynchronously, so the tree came up collapsed.
@@ -40,7 +41,7 @@ struct SidebarView: View {
                 HStack {
                     Text("HOSTS").font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
                     Spacer()
-                    Button { model.isAddHostPresented = true } label: {
+                    Button { model.presentNewHost() } label: {
                         Image(systemName: "plus").font(.caption)
                     }
                     .buttonStyle(.plain)
@@ -106,6 +107,7 @@ struct SidebarView: View {
             }
             if !host.config.isLocal {
                 Divider()
+                Button("Edit Host…") { model.presentEditHost(host.id) }
                 Button("Remove Host", role: .destructive) { model.removeHost(host.id) }
             }
         }
@@ -131,6 +133,16 @@ struct SidebarView: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Session \(session.name), \(session.windows.count) windows")
         .contextMenu {
+            Button("Rename Session…") {
+                model.requestRenameSession(hostId: host.id, sessionId: session.id)
+            }
+            Button("Open in New Window") {
+                openWindow(
+                    id: DetachedScene.windowGroupId,
+                    value: DetachedScene(hostId: host.id, sessionId: session.id)
+                )
+            }
+            Divider()
             Button("Kill Session…", role: .destructive) {
                 model.killSession(hostId: host.id, sessionId: session.id)
             }
@@ -173,6 +185,22 @@ struct SidebarView: View {
             "Window \(window.name), \(window.paneCount) panes"
                 + (window.activeCommand.isEmpty ? "" : ", running \(window.activeCommand)")
         )
+        .contextMenu {
+            Button("Rename Window…") {
+                model.requestRenameWindow(hostId: host.id, windowId: window.id)
+            }
+            Button("Open in New Window") {
+                openWindow(
+                    id: DetachedScene.windowGroupId,
+                    value: DetachedScene(hostId: host.id, sessionId: session.id, windowId: window.id)
+                )
+            }
+            Divider()
+            Button("Close Window…", role: .destructive) {
+                model.select(host: host.id, session: session.id, window: window.id)
+                model.requestCloseWindow()
+            }
+        }
     }
 }
 

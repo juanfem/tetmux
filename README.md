@@ -9,9 +9,11 @@ The point is that a remote working set stops being a picture of a terminal. Pane
 `NSView`s, so selection, scrollback, and font rendering are native; the session lives on the server,
 so closing the lid, changing networks, or quitting the app leaves everything running.
 
-> **Status:** early. It connects, renders sessions and splits, and recovers from dropped
-> connections — but there is no settings UI, no packaged `.app`, and the keymap, while centralised
-> in one policy type, is not yet editable at runtime.
+> **Status:** early. It connects, renders sessions and splits, tears windows off into their own macOS
+> windows, and recovers from dropped connections — but there is no settings UI, no packaged `.app`, and
+> the keymap, while centralised in one policy type, is not yet editable at runtime. Torn-off windows are
+> separate windows rather than native `NSWindow` tabs, so they cannot yet be dragged together into one
+> tab bar (F4.12 asks for that eventually).
 
 ## Requirements
 
@@ -48,6 +50,7 @@ disconnected host connects it. There is also a menu bar item listing every host 
 | `⌘T` | New window |
 | `⇧⌘W` | Close window (confirmed) |
 | `⌘D` / `⇧⌘D` | Split right / split down |
+| `⌘R` / `⇧⌘R` | Rename window / rename session |
 | `⌘V` | Paste into the focused pane |
 | `⌥⌘V` | Send the next chord literally, bypassing every binding above |
 
@@ -55,6 +58,41 @@ Every default binding lives in `Cmd` space, which is the one real simplification
 macOS-only: `Cmd` chords collide with neither readline, Emacs, nor tmux's own prefix, so every bare
 `Ctrl` chord forwards to the pane untouched. Closing a tab **unlinks** the window — it never kills
 what is running.
+
+Sessions and windows can be renamed from the sidebar's context menu, from a tab's context menu, by
+double-clicking a tab, or with `⌘R`/`⇧⌘R`. Renaming is sent to tmux and the tree updates when tmux
+confirms it, so a rename made from another client looks exactly the same.
+
+### Separate windows
+
+Right-click a window or a session and choose **Open in New Window** to tear it out into its own macOS
+window; **Move Back to Main Window** puts it back. A torn-off window sizes its tmux window
+independently of the main one — on tmux 2.9 and newer, where `resize-window` exists; below that every
+window shares the client's single size. The same tmux window can be open in two macOS windows at once,
+in which case the focused one drives the size.
+
+All of these share the host's one ssh connection, which sets the honest limit: tmux streams output for
+**one session per connection**, so a window showing a session other than the attached one displays a
+snapshot with an **Attach Here** button. Pressing it moves the connection — and turns the previously
+attached session's windows into snapshots in turn.
+
+### SSH host options
+
+**Edit Host…** in the sidebar's context menu covers what `~/.ssh/config` cannot express per host:
+
+- **Password authentication.** Keys are still tried first — ssh decides that — but when a password
+  prompt does appear, tetmux answers it instead of hanging on a prompt written to a terminal you cannot
+  see. Optionally the password is saved in your login Keychain (as an internet password, revocable in
+  Keychain Access) and filled automatically; otherwise you are asked, and asked verbatim in ssh's own
+  words so you can tell which host and account is being asked about. One attempt per connection: a
+  rejected password fails the connection rather than being resubmitted into a lockout. Key passphrases
+  are recognised but never stored — that is ssh-agent's job.
+- **Tunnels.** Local (`-L`), remote (`-R`), and SOCKS (`-D`) forwards, established with the host's
+  connection and gone when it closes. A forward that cannot bind does not take the session down with
+  it; ssh's complaint shows up in the connection error text.
+
+Nothing here weakens ssh: no `StrictHostKeyChecking`, no `UserKnownHostsFile`, and a host-key
+confirmation is never auto-answered.
 
 ### Connection loss
 
@@ -114,18 +152,28 @@ captured bytes rather than a hand-written approximation.
 
 ## Security
 
-- Host-key checking is never weakened. No `StrictHostKeyChecking`, no `UserKnownHostsFile`.
-- No credentials are stored. Authentication is entirely ssh's responsibility.
+- Host-key checking is never weakened. No `StrictHostKeyChecking`, no `UserKnownHostsFile`, and a
+  host-key confirmation prompt is surfaced rather than answered.
+- Authentication remains ssh's responsibility. A password is stored only if you ask for it, only in the
+  login Keychain, and never in `hosts.json` — which has no field that could hold one. Deleting a host,
+  or turning storage off, deletes the Keychain item too.
 - OSC 52 clipboard **writes** are denied by default and must be enabled per host; clipboard **reads**
   by a remote host are never permitted.
 - OSC 8 hyperlinks open only `http`, `https`, `mailto`, and `ftp`.
+- Clipboard content is encoded before it reaches tmux, so a paste is data and never a command. Names
+  entered in the UI are stripped of anything that could end a command early.
 
 ## State on disk
 
 | Path | Contents |
 |---|---|
-| `~/Library/Application Support/tetmux/hosts.json` | Host list. Entries discovered from `~/.ssh/config` are re-read each launch and deliberately not persisted. |
+| `~/Library/Application Support/tetmux/hosts.json` | Host list, including tunnels and whether a password is expected. Entries discovered from `~/.ssh/config` are re-read each launch and deliberately not persisted. |
 | `~/Library/Caches/tetmux/cm-%C` | ssh `ControlMaster` socket. Kept short on purpose — unix socket paths cap at 104 bytes. |
+| Login Keychain | Per-host passwords, opt-in, as internet passwords with protocol `ssh`. |
+
+While tetmux is attached it sets `window-size manual` on the session so each window can be sized
+independently, and restores the option on a deliberate disconnect. If a connection dies with the network
+instead, the option is left set; `tmux set-option -u -t <session> window-size` resets it.
 
 ## Dependencies
 

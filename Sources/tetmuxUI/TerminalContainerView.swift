@@ -17,25 +17,40 @@ public struct TerminalContainerView: View {
     let theme: TerminalTheme
     let service: SessionService
     @Binding var focusedPaneId: String?
+    /// Identity of the macOS window this container lives in.
+    ///
+    /// A tmux window has one size, so when the same window is on screen twice only one of the two
+    /// containers can drive it. The owner is whichever one has focus; the other renders the grid tmux
+    /// gave the owner (§3.3 — tmux is still authoritative, we just stop arguing about what to ask for).
+    let owner: UUID
+    /// Whether this container also reports the *client's* size. Only the main window does: below tmux
+    /// 2.9 there is no per-window sizing at all, and `refresh-client -C` is then the single knob for
+    /// every window the client shows — two windows setting it would just overwrite each other.
+    let drivesClientSize: Bool
 
     /// Divider thickness between splits, in points.
     private let dividerWidth: CGFloat = 1
 
     @State private var cellSize: CGSize?
     @State private var containerSize: CGSize = .zero
+    @Environment(\.controlActiveState) private var controlActiveState
 
     public init(
         hostId: String,
         window: TmuxWindow,
         theme: TerminalTheme = .default,
         service: SessionService,
-        focusedPaneId: Binding<String?>
+        focusedPaneId: Binding<String?>,
+        owner: UUID,
+        drivesClientSize: Bool = true
     ) {
         self.hostId = hostId
         self.window = window
         self.theme = theme
         self.service = service
         self._focusedPaneId = focusedPaneId
+        self.owner = owner
+        self.drivesClientSize = drivesClientSize
     }
 
     public var body: some View {
@@ -46,6 +61,24 @@ public struct TerminalContainerView: View {
                 .onChange(of: proxy.size) { _, newValue in updateContainerSize(newValue) }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        // Taking focus takes over sizing, so the window in front is the one that fits.
+        .onChange(of: controlActiveState) { _, state in
+            guard state == .key else { return }
+            claimSize()
+        }
+        .onAppear { if controlActiveState == .key { claimSize() } }
+        .onDisappear {
+            let (hostId, windowId, owner) = (self.hostId, window.id, self.owner)
+            Task { await service.releaseWindowSize(hostId: hostId, windowId: windowId, owner: owner) }
+        }
+    }
+
+    private func claimSize() {
+        let (hostId, windowId, owner) = (self.hostId, window.id, self.owner)
+        Task {
+            await service.claimWindowSize(hostId: hostId, windowId: windowId, owner: owner)
+            requestSizes()
+        }
     }
 
     @ViewBuilder
@@ -133,7 +166,7 @@ public struct TerminalContainerView: View {
             onMetrics: { metrics in
                 guard let cell = metrics.cellSize, cell != cellSize else { return }
                 cellSize = cell
-                requestClientSize()
+                requestSizes()
             },
             onFocusRequest: { focus(paneId) }
         )
@@ -160,16 +193,30 @@ public struct TerminalContainerView: View {
     private func updateContainerSize(_ size: CGSize) {
         guard size.width > 1, size.height > 1, size != containerSize else { return }
         containerSize = size
-        requestClientSize()
+        requestSizes()
     }
 
     /// §3.3 step 2: measure, then ask. tmux answers with `%layout-change`, and we lay out from that.
-    private func requestClientSize() {
+    ///
+    /// Two requests, because they answer different questions: `resize-window` sizes *this* tmux window,
+    /// which is what makes a torn-off macOS window independent, and `refresh-client -C` sizes the
+    /// client, which is all a tmux older than 2.9 understands.
+    private func requestSizes() {
         guard let cell = cellSize, cell.width > 0, cell.height > 0 else { return }
         guard containerSize.width > 1, containerSize.height > 1 else { return }
         let cols = Int(containerSize.width / cell.width)
         let rows = Int(containerSize.height / cell.height)
         guard cols > 1, rows > 1 else { return }
-        Task { await service.requestClientSize(hostId: hostId, cols: cols, rows: rows) }
+
+        let (hostId, windowId, owner, drivesClientSize) =
+            (self.hostId, window.id, self.owner, self.drivesClientSize)
+        Task {
+            await service.requestWindowSize(
+                hostId: hostId, windowId: windowId, cols: cols, rows: rows, owner: owner
+            )
+            if drivesClientSize {
+                await service.requestClientSize(hostId: hostId, cols: cols, rows: rows)
+            }
+        }
     }
 }

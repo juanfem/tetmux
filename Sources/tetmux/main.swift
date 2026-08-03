@@ -47,8 +47,14 @@ enum Diagnostics {
             return
         }
 
+        // A password host would otherwise sit here until ssh gave up: the prompt is on a pty with no
+        // UI attached to it. The Keychain is the only source available without a sheet — a passphrase
+        // or a second factor is reported and left alone.
+        let answering = Task { await answerPrompts(service: service, config: config) }
+
         // Long enough for the attach handshake, the version probe, and the topology queries.
         try? await Task.sleep(for: .seconds(4))
+        answering.cancel()
 
         guard let host = await service.getHost(hostId) else {
             print("✘ host disappeared")
@@ -94,5 +100,31 @@ enum Diagnostics {
 
         await service.disconnectHost(hostId: hostId)
         print("→ done")
+    }
+
+    /// Answers a password prompt from the Keychain, once, while the diagnostic connect is in flight.
+    private static func answerPrompts(service: SessionService, config: HostConfig) async {
+        var answered = false
+        while !Task.isCancelled, !answered {
+            guard let prompt = await service.getHost(config.id)?.authenticationPrompt else {
+                try? await Task.sleep(for: .milliseconds(200))
+                continue
+            }
+
+            switch prompt.kind {
+            case .password where config.storesPasswordInKeychain:
+                if let stored = await KeychainStore.password(for: config) {
+                    print("→ answering \(prompt.text.debugDescription) from the Keychain")
+                    await service.answerAuthenticationPrompt(hostId: config.id, secret: stored)
+                } else {
+                    print("✘ \(prompt.text.debugDescription) — no Keychain entry for this host")
+                }
+            case .password:
+                print("✘ \(prompt.text.debugDescription) — this host has no stored password; the app would prompt")
+            case .keyPassphrase:
+                print("✘ \(prompt.text.debugDescription) — add the key to your ssh agent")
+            }
+            answered = true
+        }
     }
 }

@@ -9,13 +9,23 @@ public struct TetmuxApp: App {
     public init() {}
 
     public var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: RootScene.mainWindowId) {
             RootView(model: model)
                 .frame(minWidth: 900, minHeight: 560)
                 .task { await model.bootstrap() }
         }
         .windowToolbarStyle(.unified)
         .commands { menuCommands }
+
+        // F4.12 — a tmux window or a whole session, torn off into its own macOS window. Keyed by
+        // value, so re-opening a scene that is already on screen brings that window forward instead of
+        // making a second one. Every one of these shares the host's single channel with the main
+        // window; nothing here opens a second tmux client.
+        WindowGroup(id: DetachedScene.windowGroupId, for: DetachedScene.self) { $scene in
+            if let scene {
+                DetachedWindowView(model: model, scene: scene)
+            }
+        }
 
         // F4.30 — every known session, attachable without bringing the main window forward.
         MenuBarExtra("tetmux", systemImage: "terminal.fill") {
@@ -47,6 +57,14 @@ public struct TetmuxApp: App {
             Button(ApplicationShortcut.launcher.title) { model.isLauncherPresented.toggle() }
                 .keyboardShortcut(.launcher, in: keymap)
             Divider()
+            Button(ApplicationShortcut.renameWindow.title) { model.requestRenameWindow() }
+                .keyboardShortcut(.renameWindow, in: keymap)
+            Button(ApplicationShortcut.renameSession.title) { model.requestRenameSession() }
+                .keyboardShortcut(.renameSession, in: keymap)
+            Divider()
+            // F4.12 — acts on the frontmost window's subject, like every other command here.
+            Button("Open in New macOS Window") { model.detachActiveWindow() }
+            Divider()
             Button(ApplicationShortcut.closeWindow.title) { model.requestCloseWindow() }
                 .keyboardShortcut(.closeWindow, in: keymap)
             Button(ApplicationShortcut.closePane.title) { model.closePane() }
@@ -69,12 +87,19 @@ public final class TetmuxAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Scene identifiers. The main window needs an explicit one so a detached window can bring it forward
+/// when its content is merged back.
+public enum RootScene {
+    public static let mainWindowId = "tetmux.main"
+}
+
 struct RootView: View {
     @Bindable var model: AppModel
-    @State private var newHostName = ""
-    @State private var newHostUser = ""
-    @State private var newHostPort = "22"
     @State private var newSessionName = ""
+    /// This window's identity for size ownership (§3.3).
+    @State private var owner = UUID()
+    @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         NavigationSplitView {
@@ -86,7 +111,30 @@ struct RootView: View {
         .overlay {
             LauncherOverlay(isPresented: $model.isLauncherPresented, items: model.launcherItems())
         }
-        .sheet(isPresented: $model.isAddHostPresented) { addHostSheet }
+        // The main window is the default subject of every menu command; taking focus is what makes it
+        // so again after a torn-off window claimed that role.
+        .onChange(of: controlActiveState) { _, state in
+            if state == .key { model.frontmostScope = nil }
+        }
+        .onChange(of: model.requestedDetachScene) { _, requested in
+            guard let requested else { return }
+            model.requestedDetachScene = nil
+            openWindow(id: DetachedScene.windowGroupId, value: requested)
+        }
+        .sheet(item: $model.hostDraft) { draft in
+            HostEditorView(
+                draft: draft,
+                onSave: { model.saveHost($0, password: $1, savePassword: $2) },
+                onCancel: { model.hostDraft = nil }
+            )
+        }
+        .sheet(item: $model.pendingAuthentication) { pending in
+            AuthenticationSheet(
+                pending: pending,
+                onSubmit: { model.submitAuthentication(secret: $0, saveInKeychain: $1) },
+                onCancel: { model.cancelAuthentication() }
+            )
+        }
         .sheet(item: $model.pendingClose) { pending in
             DestructiveActionModal(
                 title: "Close Window",
@@ -95,6 +143,13 @@ struct RootView: View {
                 runningCommands: pending.runningCommands,
                 onConfirm: { model.confirmCloseWindow() },
                 onCancel: { model.pendingClose = nil }
+            )
+        }
+        .sheet(item: $model.pendingRename) { pending in
+            RenameSheet(
+                pending: pending,
+                onCommit: { model.commitRename(to: $0) },
+                onCancel: { model.pendingRename = nil }
             )
         }
         .sheet(item: Binding(
@@ -121,7 +176,8 @@ struct RootView: View {
                     window: window,
                     theme: model.theme,
                     service: model.service,
-                    focusedPaneId: $model.focusedPaneId
+                    focusedPaneId: $model.focusedPaneId,
+                    owner: owner
                 )
                 Divider()
                 StatusBarView(host: host, session: session, window: window, focusedPaneId: model.focusedPaneId)
@@ -129,58 +185,11 @@ struct RootView: View {
         } else if let host = model.selectedHost {
             HostPlaceholderView(host: host) { model.reconnect(host.id) }
         } else {
-            EmptyStateView { model.isAddHostPresented = true }
+            EmptyStateView { model.presentNewHost() }
         }
     }
 
     // MARK: - Sheets
-
-    private var addHostSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Add SSH Host").font(.headline)
-            Text("The name is passed straight to `ssh`, so any alias from your ~/.ssh/config works — including ProxyJump and Match rules.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Grid(alignment: .leading, verticalSpacing: 8) {
-                GridRow {
-                    Text("Host").gridColumnAlignment(.trailing)
-                    TextField("devbox or 192.168.1.50", text: $newHostName).frame(width: 260)
-                }
-                GridRow {
-                    Text("User").gridColumnAlignment(.trailing)
-                    TextField("optional", text: $newHostUser).frame(width: 260)
-                }
-                GridRow {
-                    Text("Port").gridColumnAlignment(.trailing)
-                    TextField("22", text: $newHostPort).frame(width: 90)
-                }
-            }
-            .textFieldStyle(.roundedBorder)
-
-            HStack {
-                Spacer()
-                Button("Cancel") { model.isAddHostPresented = false }
-                    .keyboardShortcut(.cancelAction)
-                Button("Add Host") {
-                    model.addHost(
-                        name: newHostName,
-                        port: Int(newHostPort.trimmingCharacters(in: .whitespaces)),
-                        user: newHostUser.isEmpty ? nil : newHostUser
-                    )
-                    newHostName = ""
-                    newHostUser = ""
-                    newHostPort = "22"
-                    model.isAddHostPresented = false
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(newHostName.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-        }
-        .padding(20)
-        .frame(width: 460)
-    }
 
     private func newSessionSheet(hostId: String) -> some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -215,6 +224,7 @@ private struct NewSessionTarget: Identifiable {
 struct WindowTabBar: View {
     @Bindable var model: AppModel
     let session: TmuxSession
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         HStack(spacing: 0) {
@@ -270,8 +280,25 @@ struct WindowTabBar: View {
             )
         }
         .buttonStyle(.plain)
+        // Double-click to rename, as a tab bar is expected to. `simultaneousGesture` rather than
+        // `onTapGesture`, so the button's own click handling is not replaced — the first click still
+        // selects the tab, which is what makes renaming the tab you just double-clicked correct.
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            model.requestRenameWindow(hostId: model.selectedHostId, windowId: window.id)
+        })
         .accessibilityLabel("Window \(window.name), \(window.paneCount) panes")
         .contextMenu {
+            Button("Rename Window…") {
+                model.requestRenameWindow(hostId: model.selectedHostId, windowId: window.id)
+            }
+            Button("Open in New Window") {
+                guard let hostId = model.selectedHostId else { return }
+                openWindow(
+                    id: DetachedScene.windowGroupId,
+                    value: DetachedScene(hostId: hostId, sessionId: session.id, windowId: window.id)
+                )
+            }
+            Divider()
             Button("Close Window…", role: .destructive) {
                 model.select(host: model.selectedHostId ?? "", session: session.id, window: window.id)
                 model.requestCloseWindow()

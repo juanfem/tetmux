@@ -8,6 +8,12 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
     public var port: Int?
     public var isLocal: Bool
     public var customCommand: String?
+    public var usesPassword: Bool
+    /// Whether the password is expected in the Keychain. **No password is ever written here** —
+    /// `hosts.json` is plain text the user is invited to read, and §2.5 keeps credentials out of it
+    /// entirely.
+    public var storesPasswordInKeychain: Bool
+    public var forwards: [PortForward]
 
     public init(
         id: String = UUID().uuidString,
@@ -16,7 +22,10 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         user: String? = nil,
         port: Int? = nil,
         isLocal: Bool = false,
-        customCommand: String? = nil
+        customCommand: String? = nil,
+        usesPassword: Bool = false,
+        storesPasswordInKeychain: Bool = false,
+        forwards: [PortForward] = []
     ) {
         self.id = id
         self.name = name
@@ -25,12 +34,48 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         self.port = port
         self.isLocal = isLocal
         self.customCommand = customCommand
+        self.usesPassword = usesPassword
+        self.storesPasswordInKeychain = storesPasswordInKeychain
+        self.forwards = forwards
+    }
+
+    /// Decoded field by field rather than by the synthesised initialiser, so a `hosts.json` written
+    /// before these fields existed still loads. The synthesised version treats a missing
+    /// non-optional key as a decoding failure, and one such failure discards the *entire* host list.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        hostname = try container.decodeIfPresent(String.self, forKey: .hostname)
+        user = try container.decodeIfPresent(String.self, forKey: .user)
+        port = try container.decodeIfPresent(Int.self, forKey: .port)
+        isLocal = try container.decodeIfPresent(Bool.self, forKey: .isLocal) ?? false
+        customCommand = try container.decodeIfPresent(String.self, forKey: .customCommand)
+        usesPassword = try container.decodeIfPresent(Bool.self, forKey: .usesPassword) ?? false
+        storesPasswordInKeychain =
+            try container.decodeIfPresent(Bool.self, forKey: .storesPasswordInKeychain) ?? false
+        forwards = try container.decodeIfPresent([PortForward].self, forKey: .forwards) ?? []
     }
 
     public var asConfig: HostConfig {
         HostConfig(
             id: id, name: name, hostname: hostname, user: user,
-            port: port, isLocal: isLocal, customCommand: customCommand
+            port: port, isLocal: isLocal, customCommand: customCommand,
+            usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
+            forwards: forwards
+        )
+    }
+}
+
+extension HostConfig {
+    /// The persistable form of a config, so a host can be round-tripped through an editor without the
+    /// UI having to hold both representations of it.
+    public var asStoredHost: StoredHost {
+        StoredHost(
+            id: id, name: name, hostname: hostname, user: user, port: port,
+            isLocal: isLocal, customCommand: customCommand,
+            usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
+            forwards: forwards
         )
     }
 }
