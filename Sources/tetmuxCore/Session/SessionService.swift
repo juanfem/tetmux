@@ -147,6 +147,14 @@ public actor SessionService {
         var keyFlushTask: Task<Void, Never>?
         var resizeTask: Task<Void, Never>?
         var topologyRefreshTask: Task<Void, Never>?
+        /// What the pending refresh will actually ask for. One debounce task is deliberate — a burst
+        /// of notifications should cost one round trip — but the two schedulers run *different*
+        /// commands, and sharing only the task meant whichever got there first silently decided for
+        /// both. A `%window-add` arriving just after a `%window-renamed` was dropped: only
+        /// `list-panes` ran, so a window created by another client kept the placeholder name and its
+        /// wrong session until something unrelated happened to refresh. Automatic renames fire
+        /// constantly, so that was often. Scope only ever widens, and the full refresh is a superset.
+        var pendingRefreshIsFullTopology = false
 
         /// Whether a secret has already been written on this channel. One attempt per channel: a
         /// rejected password answered again is how accounts get locked out, and the retry the user
@@ -263,6 +271,8 @@ public actor SessionService {
     }
 
     private var reconnectAttempts: [String: Int] = [:]
+    /// Pending backoff retries, so an explicit decision by the user can cancel one.
+    private var reconnectTasks: [String: Task<Void, Never>] = [:]
 
     /// One view's claim on a pane's output, and how far behind that view is.
     ///
@@ -327,6 +337,8 @@ public actor SessionService {
         followerChannels.removeValue(forKey: hostId)
         paneOwners.removeValue(forKey: hostId)
         reconnectTarget.removeValue(forKey: hostId)
+        reconnectAttempts.removeValue(forKey: hostId)
+        cancelScheduledReconnect(hostId: hostId)
         hosts.removeValue(forKey: hostId)
         hostOrder.removeAll { $0 == hostId }
         broadcastState()
@@ -555,6 +567,24 @@ public actor SessionService {
         follower.userInitiatedDisconnect = true
         await restoreWindowSizePolicy(hostId: hostId, connection: follower)
         guard followerChannels[hostId]?[sessionId]?.epoch == epoch else { return }
+
+        // The decision to retire was made before that await, and the await is a round trip that can
+        // take up to `sendAndAwait`'s two seconds. Tab away from a session and back inside that window
+        // and `reconcileChannels` sees this entry still in place, so it declines to start a
+        // replacement — and then the teardown below lands on the client the user is now looking at,
+        // leaving every pane a frozen still frame with nothing scheduled to fix it. Re-reading the
+        // condition here is the difference between "was stale when we started" and "is stale now".
+        if displayedSessions[hostId]?.contains(sessionId) == true,
+           connections[hostId]?.attachedSessionId != sessionId {
+            log("[\(hostId)] \(sessionId) came back before its client was retired; keeping it")
+            follower.userInitiatedDisconnect = false
+            // Put back the option the restore above removed, or this session's windows would stop
+            // being sized individually for the rest of the channel's life.
+            applyWindowSizePolicy(hostId: hostId, connection: follower)
+            updateLiveSessions(hostId: hostId)
+            broadcastState()
+            return
+        }
         followerChannels[hostId]?.removeValue(forKey: sessionId)
         teardown(hostId: hostId, connection: follower)
         updateLiveSessions(hostId: hostId)
@@ -579,7 +609,14 @@ public actor SessionService {
     }
 
     public func disconnectHost(hostId: String) async {
-        guard let connection = connections[hostId] else { return }
+        // First, and outside the guard below: a host that is *only* waiting to retry has no
+        // connection to find, and that is exactly the state a pending backoff has to be cancelled in.
+        cancelScheduledReconnect(hostId: hostId)
+        guard let connection = connections[hostId] else {
+            reconnectAttempts[hostId] = 0
+            withHost(hostId) { $0.connectionState = .disconnected }
+            return
+        }
         connection.userInitiatedDisconnect = true
         // The followers go first and by the same route, each putting its own session's `window-size`
         // back: they are clients of this host too, and leaving them attached would keep the host
@@ -778,6 +815,16 @@ public actor SessionService {
                 .joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             log("[\(hostId)] %error \(number): \(message)")
+
+            // A `switch-client` that tmux refused — the session was killed between the snapshot and
+            // the command — leaves `pendingSessionId` set, and only `%session-changed` clears it.
+            // `liveSessionIds` counts a pending switch as live on purpose, so nothing would ever
+            // withdraw the claim: the window stays a frozen still frame with no banner saying so.
+            if failed?.text.hasPrefix("switch-client") == true, connection.pendingSessionId != nil {
+                connection.pendingSessionId = nil
+                updateLiveSessions(hostId: hostId)
+            }
+
             switch failed?.kind {
             case .capturePane(let paneId, _):
                 // The pane vanished between subscribe and capture; let a later attempt retry.
@@ -1143,17 +1190,13 @@ public actor SessionService {
 
     private func scheduleTopologyRefresh(hostId: String) {
         guard let connection = connections[hostId], connection.handshakeComplete else { return }
+        // Widen whatever is already pending: a full refresh asks for everything a pane refresh does.
+        connection.pendingRefreshIsFullTopology = true
         guard connection.topologyRefreshTask == nil else { return }
         connection.topologyRefreshTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(50))
-            await self?.runTopologyRefresh(hostId: hostId)
+            await self?.runScheduledRefresh(hostId: hostId)
         }
-    }
-
-    private func runTopologyRefresh(hostId: String) {
-        guard let connection = connections[hostId] else { return }
-        connection.topologyRefreshTask = nil
-        refreshTopology(hostId: hostId, connection: connection)
     }
 
     /// Re-reads pane state only.
@@ -1163,18 +1206,26 @@ public actor SessionService {
     /// the same debounce task, so a burst of notifications costs one round trip.
     private func schedulePaneRefresh(hostId: String) {
         guard let connection = connections[hostId], connection.handshakeComplete else { return }
+        // Never narrows a full refresh that is already pending.
         guard connection.topologyRefreshTask == nil else { return }
+        connection.pendingRefreshIsFullTopology = false
         connection.topologyRefreshTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(150))
-            await self?.runPaneRefresh(hostId: hostId)
+            await self?.runScheduledRefresh(hostId: hostId)
         }
     }
 
-    private func runPaneRefresh(hostId: String) {
+    private func runScheduledRefresh(hostId: String) {
         guard let connection = connections[hostId] else { return }
         connection.topologyRefreshTask = nil
-        send("list-panes -a -F \(TmuxCommand.quote(TmuxCommand.panesFormat))",
-             kind: .listPanes, hostId: hostId, connection: connection)
+        let full = connection.pendingRefreshIsFullTopology
+        connection.pendingRefreshIsFullTopology = false
+        if full {
+            refreshTopology(hostId: hostId, connection: connection)
+        } else {
+            send("list-panes -a -F \(TmuxCommand.quote(TmuxCommand.panesFormat))",
+                 kind: .listPanes, hostId: hostId, connection: connection)
+        }
     }
 
     private func refreshTopology(hostId: String, connection: Connection) {
@@ -2089,10 +2140,21 @@ public actor SessionService {
         }
         broadcastState()
 
-        Task { [weak self] in
+        // Held so a deliberate disconnect can cancel it. Fire-and-forget meant a host the user closed
+        // on attempt 7 reconnected itself up to a minute later — possibly raising a password sheet for
+        // a host they had just shut. `connectHost`'s idempotence guard is no help there, because
+        // `.disconnected` is not active and the retry sails straight through it.
+        reconnectTasks[hostId] = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
             try? await self?.connectHost(hostId: hostId)
         }
+    }
+
+    /// Cancels a pending reconnect, if any. Called wherever the user has said what they want the
+    /// connection to do, since a backoff still in flight would overrule it a minute later.
+    private func cancelScheduledReconnect(hostId: String) {
+        reconnectTasks.removeValue(forKey: hostId)?.cancel()
     }
 
     /// A follower channel ending is a much smaller event than the primary ending.
@@ -2168,6 +2230,10 @@ public actor SessionService {
     /// again. Without the reset, a host that had already spent its eight attempts would refuse to
     /// come back for the rest of the session.
     public func reconnectNow(hostId: String) async {
+        // The comment above has always said "as well as any pending backoff", and until the retry was
+        // held somewhere it could not actually do it: the scheduled attempt stayed in flight and fired
+        // later on top of the connection this call is about to make.
+        cancelScheduledReconnect(hostId: hostId)
         reconnectAttempts[hostId] = 0
         try? await connectHost(hostId: hostId)
     }
@@ -2183,6 +2249,7 @@ public actor SessionService {
                 // will already be tearing down.
                 send("display-message -p ''", kind: .roundTrip(sentAt: .now), hostId: hostId)
             case .reconnecting, .failed:
+                cancelScheduledReconnect(hostId: hostId)
                 reconnectAttempts[hostId] = 0
                 try? await connectHost(hostId: hostId)
             case .disconnected, .connecting:

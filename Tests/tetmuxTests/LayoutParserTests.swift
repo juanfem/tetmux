@@ -110,6 +110,26 @@ final class LayoutParserTests: XCTestCase {
         }
         XCTAssertEqual(try LayoutParser.parse(layout).paneIds.count, 9)
     }
+
+    /// Both of these used to take the whole application down rather than fail the parse, and neither
+    /// could be contained by the `try?` at the call sites: Swift traps on arithmetic overflow, and a
+    /// stack overflow is not catchable either. The input is bytes off the wire — a `%layout-change`
+    /// garbled by a noisy link is enough.
+    func testAbsurdNumbersAreRejectedRatherThanTrapping() {
+        // Twenty digits: past Int64 before the parser has finished the first field.
+        XCTAssertThrowsError(try LayoutParser.parse("99999999999999999999x24,0,0,1"))
+        XCTAssertThrowsError(try LayoutParser.parse("80x24,0,0,99999999999999999999"))
+        // The boundary is still parsed, so the guard cannot be rejecting ordinary geometry.
+        XCTAssertNoThrow(try LayoutParser.parse("\(Int.max)x24,0,0,1"))
+    }
+
+    func testNestingDeeperThanTheCapIsRejectedRatherThanOverflowingTheStack() {
+        var layout = "80x24,0,0,1"
+        for _ in 0..<5000 {
+            layout = "80x24,0,0{\(layout),80x24,0,0,1}"
+        }
+        XCTAssertThrowsError(try LayoutParser.parse(layout))
+    }
 }
 
 /// The proportional split arithmetic used to lay out panes from tmux's cell counts (F4.7).

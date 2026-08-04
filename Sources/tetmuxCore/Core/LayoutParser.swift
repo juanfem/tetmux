@@ -105,7 +105,7 @@ public enum LayoutParser {
         }
 
         var scanner = Scanner(Array(body.utf8))
-        let node = try parseNode(&scanner)
+        let node = try parseNode(&scanner, depth: 0)
         guard scanner.isAtEnd else {
             throw LayoutParseError.syntaxError(reason: "trailing input at offset \(scanner.offset)")
         }
@@ -114,7 +114,18 @@ public enum LayoutParser {
 
     // MARK: - Recursive descent
 
-    private static func parseNode(_ s: inout Scanner) throws -> LayoutNode {
+    /// How deep a layout may nest before it is rejected.
+    ///
+    /// A stack overflow is not catchable either, and the codec accepts a line up to 16 MB — enough
+    /// nested `{` to run the stack out long before anything else complains. Real layouts are a
+    /// handful deep: this is far beyond any window a person has ever split by hand, and it bounds the
+    /// recursion.
+    private static let maxDepth = 64
+
+    private static func parseNode(_ s: inout Scanner, depth: Int) throws -> LayoutNode {
+        guard depth <= maxDepth else {
+            throw LayoutParseError.syntaxError(reason: "nested deeper than \(maxDepth) at offset \(s.offset)")
+        }
         let width = try s.readInt(terminator: UInt8(ascii: "x"))
         let height = try s.readInt(terminator: UInt8(ascii: ","))
         let x = try s.readInt(terminator: UInt8(ascii: ","))
@@ -135,7 +146,7 @@ public enum LayoutParser {
             var children: [LayoutNode] = []
             var closed = false
             while !s.isAtEnd {
-                children.append(try parseNode(&s))
+                children.append(try parseNode(&s, depth: depth + 1))
                 guard let next = s.peek() else { break }
                 if next == UInt8(ascii: ",") {
                     s.advance()
@@ -188,11 +199,24 @@ public enum LayoutParser {
         }
 
         /// Reads a run of digits, stopping at the first non-digit.
+        ///
+        /// Overflow is a thrown error rather than an arithmetic trap. Swift traps on `*` and `+`
+        /// overflow, and a trap is not catchable — so `try? LayoutParser.parse` at the call sites
+        /// would not have contained it, and a `%layout-change` garbled on the wire took the whole app
+        /// down. Nothing here is ever legitimately large: these are cells and offsets.
         mutating func readInt() throws -> Int {
             let start = offset
             var value = 0
             while offset < bytes.count, bytes[offset] >= 48, bytes[offset] <= 57 {
-                value = value * 10 + Int(bytes[offset] - 48)
+                let (multiplied, overflowedMultiply) = value.multipliedReportingOverflow(by: 10)
+                guard !overflowedMultiply else {
+                    throw LayoutParseError.syntaxError(reason: "number too large at offset \(start)")
+                }
+                let (added, overflowedAdd) = multiplied.addingReportingOverflow(Int(bytes[offset] - 48))
+                guard !overflowedAdd else {
+                    throw LayoutParseError.syntaxError(reason: "number too large at offset \(start)")
+                }
+                value = added
                 offset += 1
             }
             guard offset > start else {
