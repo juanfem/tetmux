@@ -4,9 +4,13 @@ From the audit of 2026-08-04. Ordered by what actually breaks for a user, not by
 Each item names the evidence, because the ones that matter here are all silent failures — nothing
 in this list announces itself, which is why they survived this long.
 
+Twelve are done, on `fix/protocol-framing-and-data-loss`. The line and file references below are as
+they were when the audit ran, so they point into the commit before the fix rather than into current
+`main` — they are kept because the evidence is the useful part of the entry.
+
 ## Protocol correctness
 
-- [ ] **Notification dispatch outranks command-block framing.** `ControlCodec.parseLine` tests
+- [x] **Notification dispatch outranks command-block framing.** `ControlCodec.parseLine` tests
   `%output`, `%extended-output`, and the whole `%verb` switch before it consults
   `activeCommandNumber`, which is read in exactly one place — the bare-line branch. So any line
   *inside* a `%begin`/`%end` block that starts with `%` is parsed as a notification. The routine
@@ -18,19 +22,24 @@ in this list announces itself, which is why they survived this long.
   `%end`/`%error` *with the matching number* may leave it.
   `Sources/tetmuxCore/Core/ControlCodec.swift:76-97`
 
-- [ ] **Responses are matched positionally and the number that would catch a desync is discarded.**
+- [x] **Responses are matched positionally and the number that would catch a desync is discarded.**
   `%begin` pops the head of `pending` and throws `commandNumber` away; `%end`/`%error` never check
   it. One lost or spurious block shifts the queue for the life of the channel, silently:
   `capture-pane` payloads land in the wrong pane (with their `ESC[3J`), `list-panes` output reaches
   `applyWindows`, and an internal `resize-window` failure surfaces as "Rename session failed". The
   value needed to detect this already arrives on every block.
   `Sources/tetmuxCore/Session/SessionService.swift:701-716`
+  *Correlation is still by order — the numbers are server-wide and cannot be predicted at send time,
+  so ordering remains the only thing that can match a response to its command. What was added is the
+  integrity check: a `%begin` with nothing pending after the handshake, a terminator closing a block
+  it did not open, and a number that fails to increase are logged as a desync. Detecting it is not
+  the same as recovering from it, and there is still no recovery.*
 
-- [ ] **An `%error` with no matched command is discarded entirely**, message text and all — the one
+- [x] **An `%error` with no matched command is discarded entirely**, message text and all — the one
   case where something already went wrong is the one case that says nothing.
   `Sources/tetmuxCore/Session/SessionService.swift:716`
 
-- [ ] **A partial PTY write is reported as a total failure.** The write loop gives up after ~1 s of
+- [x] **A partial PTY write is reported as a total failure.** The write loop gives up after ~1 s of
   `EAGAIN` with `written > 0`, and `send` reads `false` as "nothing reached tmux" and does
   `pending.removeLast()`. tmux is left holding half a command line with no newline; the next command
   concatenates onto it and answers one block for two. Permanent desync by way of the item above,
@@ -41,7 +50,7 @@ in this list announces itself, which is why they survived this long.
   failing the parse, so a build that varies the field layout makes every pane go quietly dead.
   `Sources/tetmuxCore/Core/ControlCodec.swift:217-228`
 
-- [ ] **`LayoutParser` traps on integer overflow and recurses without a depth cap.** Both are
+- [x] **`LayoutParser` traps on integer overflow and recurses without a depth cap.** Both are
   reachable from bytes on the wire, and `try?` cannot catch either — a garbled `%layout-change`
   takes the app down.
   `Sources/tetmuxCore/Core/LayoutParser.swift:194`, `:117`
@@ -59,7 +68,7 @@ in this list announces itself, which is why they survived this long.
 
 ## Lifecycle and state
 
-- [ ] **⌘Q leaves `window-size manual` on the user's sessions.** The delegate implements only
+- [x] **⌘Q leaves `window-size manual` on the user's sessions.** The delegate implements only
   `applicationShouldTerminateAfterLastWindowClosed`; `restoreWindowSizePolicy` runs on a deliberate
   per-host disconnect and nowhere else. The teardown is careful enough to wait for tmux's own `%end`
   rather than merely writing the line — and the ordinary way people close a Mac app skips all of it,
@@ -72,12 +81,12 @@ in this list announces itself, which is why they survived this long.
   presents it as the user's. Only the `%exit`-observed path avoids this.
   `Sources/tetmuxCore/Session/SessionService.swift:376-380`, `:2004-2007`
 
-- [ ] **A corrupt `hosts.json` silently discards every host, then overwrites it.** Both the read and
+- [x] **A corrupt `hosts.json` silently discards every host, then overwrites it.** Both the read and
   the decode are `try?` with no fallback: the user sees their hosts vanish, and the next edit does
   load-modify-save and destroys the file that still had them. No backup, no rename, nothing surfaced.
   `Sources/tetmuxCore/Session/HostConfigStore.swift:110-115`
 
-- [ ] **Editing an ssh-config-discovered host never persists.** `saveHosts` filters ids prefixed
+- [x] **Editing an ssh-config-discovered host never persists.** `saveHosts` filters ids prefixed
   `ssh-`, but `AppModel.saveHost` only assigns a `custom-` id when the id is empty. Forwards and ssh
   options on a discovered host work all session and are gone on relaunch — while the Keychain flag
   survives, so the two then disagree.
@@ -89,18 +98,18 @@ in this list announces itself, which is why they survived this long.
   every window resize is dropped silently for the life of the channel.
   `Sources/tetmuxCore/Session/SessionService.swift:365-402`, `:954-1010`
 
-- [ ] **Manual disconnect cannot cancel the backoff.** The retry task is fire-and-forget and stored
+- [x] **Manual disconnect cannot cancel the backoff.** The retry task is fire-and-forget and stored
   nowhere, and `.disconnected.isActive` is false so `connectHost`'s guard does not stop it — a host
   the user deliberately closed reconnects up to a minute later, possibly raising a password prompt.
   `Sources/tetmuxCore/Session/SessionService.swift:2004-2007`, `:568-586`
 
-- [ ] **Topology and pane refreshes share one task slot** but run different commands, so a
+- [x] **Topology and pane refreshes share one task slot** but run different commands, so a
   `%window-add` arriving just after a `%window-renamed` is dropped: only `list-panes` runs, and a
   window created elsewhere keeps its placeholder name and wrong session until something unrelated
   refreshes. Automatic renames fire constantly, so this is hit often.
   `Sources/tetmuxCore/Session/SessionService.swift:1074-1108`
 
-- [ ] **`retireFollower` checks then acts across an `await`.** Tab away from a session and back
+- [x] **`retireFollower` checks then acts across an `await`.** Tab away from a session and back
   within 2 s and the in-flight retirement tears down the client that the reconcile just decided to
   keep, leaving every pane a frozen still frame with nothing scheduled to fix it.
   `Sources/tetmuxCore/Session/SessionService.swift:499-511`, `:540-549`
@@ -111,7 +120,7 @@ in this list announces itself, which is why they survived this long.
   `capture-pane -S -2000` repaint each time. It needs its own hold-down, not the viewer's watermark.
   `Sources/tetmuxCore/Session/SessionService.swift:855-863`, `:1465-1477`
 
-- [ ] **`switch-client` failure leaves `pendingSessionId` set forever**, so `liveSessionIds` keeps
+- [x] **`switch-client` failure leaves `pendingSessionId` set forever**, so `liveSessionIds` keeps
   reporting a dead session as live and the not-attached banner never appears over a frozen window.
   `Sources/tetmuxCore/Session/SessionService.swift:489-492`
 
