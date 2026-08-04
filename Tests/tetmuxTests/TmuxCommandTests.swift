@@ -324,6 +324,66 @@ final class TmuxCommandTests: XCTestCase {
         XCTAssertFalse(plain.contains("NumberOfPasswordPrompts"))
     }
 
+    // MARK: - User-supplied ssh options
+
+    /// Typed-in options are split the way a shell would split them, because that is how they are
+    /// typed — but nothing else a shell does happens to them.
+    func testExtraArgumentsAreSplitLikeAShellWouldSplitThem() {
+        XCTAssertEqual(TmuxCommand.splitArguments("-C -o Compression=yes"), ["-C", "-o", "Compression=yes"])
+        XCTAssertEqual(TmuxCommand.splitArguments("   -4\t\t-A  "), ["-4", "-A"])
+        XCTAssertEqual(TmuxCommand.splitArguments(""), [])
+
+        // A value with a space in it is the reason quoting has to be understood at all.
+        XCTAssertEqual(
+            TmuxCommand.splitArguments("-o \"ProxyCommand=nc %h %p\""),
+            ["-o", "ProxyCommand=nc %h %p"]
+        )
+        XCTAssertEqual(TmuxCommand.splitArguments("-o 'RemoteCommand=a b'"), ["-o", "RemoteCommand=a b"])
+        XCTAssertEqual(TmuxCommand.splitArguments(#"-i /path/with\ space/key"#), ["-i", "/path/with space/key"])
+        // Being edited a keystroke at a time, so half a quoted value is a normal thing to hold.
+        XCTAssertEqual(TmuxCommand.splitArguments("-o \"Proxy"), ["-o", "Proxy"])
+        XCTAssertEqual(TmuxCommand.splitArguments("-o \"\""), ["-o", ""])
+    }
+
+    /// Splitting is all that happens: no expansion, no substitution, no shell. A value that looks
+    /// like a command stays one argument and reaches `execve` as text.
+    func testExtraArgumentsAreNeverExpanded() {
+        XCTAssertEqual(TmuxCommand.splitArguments("-o Foo=$HOME"), ["-o", "Foo=$HOME"])
+        XCTAssertEqual(TmuxCommand.splitArguments("-o Foo=`id`"), ["-o", "Foo=`id`"])
+        XCTAssertEqual(TmuxCommand.splitArguments("-o Foo=a;rm -rf ~"), ["-o", "Foo=a;rm", "-rf", "~"])
+    }
+
+    /// ssh resolves each parameter to the *first* value it obtains, so the user's options have to
+    /// precede tetmux's or an `-o` in this field would be accepted and then quietly ignored.
+    func testExtraArgumentsPrecedeTheDefaultsSoTheyCanOverrideThem() {
+        let args = TmuxCommand.sshArguments(
+            destination: "devbox", port: nil, controlPath: "/tmp/cm-%C", remoteCommand: "true",
+            extraArguments: ["-o", "ServerAliveInterval=60"]
+        )
+        let mine = try! XCTUnwrap(args.firstIndex(of: "ServerAliveInterval=60"))
+        let ours = try! XCTUnwrap(args.firstIndex(of: "ServerAliveInterval=15"))
+        XCTAssertLessThan(mine, ours, "a later -o is the one ssh discards")
+
+        // And the remote command is still the single last element.
+        let separator = try! XCTUnwrap(args.firstIndex(of: "--"))
+        XCTAssertEqual(args.count - separator - 1, 1)
+    }
+
+    func testX11ForwardingIsOptIn() {
+        let plain = TmuxCommand.sshArguments(
+            destination: "devbox", port: nil, controlPath: "/tmp/cm-%C", remoteCommand: "true"
+        )
+        XCTAssertFalse(plain.contains("-X"))
+        XCTAssertFalse(plain.contains("-Y"), "trusted forwarding is never implied")
+
+        let forwarding = TmuxCommand.sshArguments(
+            destination: "devbox", port: nil, controlPath: "/tmp/cm-%C", remoteCommand: "true",
+            forwardsX11: true
+        )
+        XCTAssertTrue(forwarding.contains("-X"))
+        XCTAssertFalse(forwarding.contains("-Y"))
+    }
+
     func testDefaultPortIsLeftToSshConfig() {
         let args = TmuxCommand.sshArguments(
             destination: "devbox", port: 22,

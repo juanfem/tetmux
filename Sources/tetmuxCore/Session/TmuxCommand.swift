@@ -206,9 +206,19 @@ public enum TmuxCommand {
         controlPath: String,
         remoteCommand: String,
         forwards: [PortForward] = [],
-        expectsPasswordPrompt: Bool = false
+        expectsPasswordPrompt: Bool = false,
+        extraArguments: [String] = [],
+        forwardsX11: Bool = false
     ) -> [String] {
-        var args = [
+        // The user's own options come *first*, and that placement is the whole point of them. ssh
+        // resolves each parameter to the first value it obtains, so an `-o` after ours would be
+        // silently discarded — a host needing `ServerAliveInterval=60` could not say so. Ahead of
+        // ours they win, which is what an escape hatch is for.
+        var args = extraArguments
+        if forwardsX11 {
+            args += ["-X"]
+        }
+        args += [
             "-o", "ControlMaster=auto",
             "-o", "ControlPath=\(controlPath)",
             "-o", "ControlPersist=300",
@@ -240,5 +250,47 @@ public enum TmuxCommand {
     /// forward can fail because the *previous* connection already bound the port.
     public static func forwardArguments(_ forwards: [PortForward]) -> [String] {
         forwards.filter(\.isValid).flatMap { [$0.kind.flag, $0.specification] }
+    }
+
+    /// Splits a typed-in option string into argv elements the way a shell would — and then hands
+    /// them to `execve`, not to a shell.
+    ///
+    /// The distinction matters. The user types these into a text field, so they type shell syntax:
+    /// `-o "ProxyCommand=nc %h %p"` has to arrive as two elements with the quotes gone, or ssh sees
+    /// a stray `"nc` and exits. But splitting is *all* that happens here — no globbing, no `$VAR`,
+    /// no command substitution — so a value cannot become a command however it is written. That is
+    /// the difference between this and `customCommand`, which really is handed to `/bin/sh`.
+    ///
+    /// Quotes group, a backslash escapes the next character, and an unterminated quote simply runs
+    /// to the end rather than being an error: the field is edited a keystroke at a time, and half a
+    /// quoted value is a normal thing to be holding.
+    public static func splitArguments(_ text: String) -> [String] {
+        var arguments: [String] = []
+        var current = ""
+        var started = false
+        var quote: Character?
+        var iterator = text.makeIterator()
+
+        while let character = iterator.next() {
+            if character == "\\", let escaped = iterator.next() {
+                current.append(escaped)
+                started = true
+            } else if let open = quote {
+                if character == open { quote = nil } else { current.append(character) }
+            } else if character == "\"" || character == "'" {
+                quote = character
+                // An empty quoted string is still an argument: `-o ""` is two of them.
+                started = true
+            } else if character.isWhitespace {
+                if started { arguments.append(current) }
+                current = ""
+                started = false
+            } else {
+                current.append(character)
+                started = true
+            }
+        }
+        if started { arguments.append(current) }
+        return arguments
     }
 }

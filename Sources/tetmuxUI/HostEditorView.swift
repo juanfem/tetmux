@@ -43,6 +43,8 @@ struct HostEditorView: View {
                     authenticationSection
                     Divider()
                     forwardsSection
+                    Divider()
+                    sshOptionsSection
                 }
                 .padding(.trailing, 2)
             }
@@ -133,6 +135,45 @@ struct HostEditorView: View {
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+        }
+    }
+
+    // MARK: - ssh options
+
+    /// The escape hatch for everything the fields above do not cover.
+    ///
+    /// Placed last because it is the advanced one, and shown with the resulting argv so the effect
+    /// of what was typed is visible before the connection is attempted rather than after it fails.
+    private var sshOptionsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("ssh Options").font(.subheadline).fontWeight(.semibold)
+
+            Toggle("Forward X11 (ssh -X)", isOn: $host.forwardsX11)
+            Text("Lets programs in this host's panes open windows on your Mac, which needs an X server such as XQuartz running here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Extra arguments").padding(.top, 4)
+            TextField("-o ProxyJump=bastion -C", text: $host.extraSshArguments, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...3)
+
+            // ssh takes the *first* value it obtains for a parameter, so these are placed ahead of
+            // tetmux's own -o options and genuinely override them. Worth saying: the opposite order
+            // would accept the text and silently ignore it.
+            Text("Passed to ssh ahead of tetmux's own options, so an -o here overrides the default. Split like a shell would (quotes work), but never run by one.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !TmuxCommand.splitArguments(host.extraSshArguments).isEmpty {
+                Text(TmuxCommand.splitArguments(host.extraSshArguments).map { "‹\($0)›" }.joined(separator: " "))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

@@ -294,6 +294,15 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
     /// stored in `hosts.json`.
     public let storesPasswordInKeychain: Bool
     public let forwards: [PortForward]
+    /// Extra `ssh` options, exactly as the user would type them on a command line.
+    ///
+    /// Held as one string because that is how it is typed and how it reads back; it is split into
+    /// argv elements by `TmuxCommand.splitArguments`, which understands quotes so a value containing
+    /// a space survives. No shell is involved at any point.
+    public let extraSshArguments: String
+    /// `ssh -X`. A checkbox rather than something to remember to type, because it is the one extra
+    /// option with a reason to be discoverable.
+    public let forwardsX11: Bool
 
     /// What `ssh` should be given as the destination.
     public var sshDestination: String {
@@ -312,7 +321,9 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
         customCommand: String? = nil,
         usesPassword: Bool = false,
         storesPasswordInKeychain: Bool = false,
-        forwards: [PortForward] = []
+        forwards: [PortForward] = [],
+        extraSshArguments: String = "",
+        forwardsX11: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -324,6 +335,8 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
         self.usesPassword = usesPassword
         self.storesPasswordInKeychain = storesPasswordInKeychain
         self.forwards = forwards
+        self.extraSshArguments = extraSshArguments
+        self.forwardsX11 = forwardsX11
     }
 }
 

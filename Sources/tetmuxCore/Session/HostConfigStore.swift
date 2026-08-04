@@ -14,6 +14,9 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
     /// entirely.
     public var storesPasswordInKeychain: Bool
     public var forwards: [PortForward]
+    /// Extra `ssh` options as typed. Split into argv elements at connect time, never run by a shell.
+    public var extraSshArguments: String
+    public var forwardsX11: Bool
 
     public init(
         id: String = UUID().uuidString,
@@ -25,7 +28,9 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         customCommand: String? = nil,
         usesPassword: Bool = false,
         storesPasswordInKeychain: Bool = false,
-        forwards: [PortForward] = []
+        forwards: [PortForward] = [],
+        extraSshArguments: String = "",
+        forwardsX11: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -37,6 +42,8 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         self.usesPassword = usesPassword
         self.storesPasswordInKeychain = storesPasswordInKeychain
         self.forwards = forwards
+        self.extraSshArguments = extraSshArguments
+        self.forwardsX11 = forwardsX11
     }
 
     /// Decoded field by field rather than by the synthesised initialiser, so a `hosts.json` written
@@ -55,6 +62,8 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         storesPasswordInKeychain =
             try container.decodeIfPresent(Bool.self, forKey: .storesPasswordInKeychain) ?? false
         forwards = try container.decodeIfPresent([PortForward].self, forKey: .forwards) ?? []
+        extraSshArguments = try container.decodeIfPresent(String.self, forKey: .extraSshArguments) ?? ""
+        forwardsX11 = try container.decodeIfPresent(Bool.self, forKey: .forwardsX11) ?? false
     }
 
     public var asConfig: HostConfig {
@@ -62,7 +71,7 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
             id: id, name: name, hostname: hostname, user: user,
             port: port, isLocal: isLocal, customCommand: customCommand,
             usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
-            forwards: forwards
+            forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11
         )
     }
 }
@@ -75,7 +84,7 @@ extension HostConfig {
             id: id, name: name, hostname: hostname, user: user, port: port,
             isLocal: isLocal, customCommand: customCommand,
             usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
-            forwards: forwards
+            forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11
         )
     }
 }

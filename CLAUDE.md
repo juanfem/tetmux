@@ -327,6 +327,13 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   answer — so the platform boundary stays put. Calls run on a detached task: `SecItemCopyMatching` can
   put a dialog on screen (an unsigned dev build is asked every rebuild, because the ACL is tied to the
   code signature), which would beachball the main thread or stall every host behind the actor.
+- **The ssh escape hatch is split, not shell-quoted.** A host can carry extra `ssh` options typed as
+  they would be on a command line, plus `-X` behind a checkbox. `TmuxCommand.splitArguments` splits
+  them the way a shell would — quotes group, backslash escapes — and then they go straight to `execve`:
+  no expansion, no substitution, no shell, unlike `customCommand` which really is handed to `/bin/sh`.
+  They are placed **before** tetmux's own `-o` options, and that ordering is the point: ssh resolves
+  each parameter to the *first* value it obtains, so options appended after ours would be accepted and
+  silently ignored.
 - **Tunnels are connection options, not a managed feature.** §1.2 rules out a port-forward management
   UI, and there isn't one: forwards are `-L`/`-R`/`-D` arguments that live and die with the channel.
   Incomplete rows are dropped rather than passed to ssh (a malformed `-L` makes ssh exit before tmux

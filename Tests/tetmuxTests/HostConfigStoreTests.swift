@@ -36,7 +36,36 @@ final class HostConfigStoreTests: XCTestCase {
         XCTAssertFalse(decoded[0].usesPassword)
         XCTAssertFalse(decoded[0].storesPasswordInKeychain)
         XCTAssertEqual(decoded[0].forwards, [])
+        XCTAssertEqual(decoded[0].extraSshArguments, "")
+        XCTAssertFalse(decoded[0].forwardsX11)
         XCTAssertEqual(decoded[1].name, "minimal")
+    }
+
+    /// The ssh escape hatch survives a round trip, and reaches ssh as argv rather than as a string
+    /// somebody has to re-parse.
+    func testExtraSshOptionsRoundTripAndReachTheInvocation() async throws {
+        let store = HostConfigStore(directory: directory)
+        let host = StoredHost(
+            id: "custom-devbox", name: "devbox", user: "me",
+            extraSshArguments: "-o \"ProxyCommand=nc %h %p\" -C", forwardsX11: true
+        )
+
+        try await store.saveHosts([host])
+        let loaded = await store.loadHosts()
+        let reloaded = try XCTUnwrap(loaded.first { $0.id == "custom-devbox" })
+        XCTAssertEqual(reloaded, host)
+
+        let config = reloaded.asConfig
+        let args = TmuxCommand.sshArguments(
+            destination: config.sshDestination, port: config.port,
+            controlPath: "/tmp/cm-%C", remoteCommand: "true",
+            extraArguments: TmuxCommand.splitArguments(config.extraSshArguments),
+            forwardsX11: config.forwardsX11
+        )
+        XCTAssertEqual(args.first, "-o")
+        XCTAssertEqual(args[1], "ProxyCommand=nc %h %p", "the quotes must not survive into argv")
+        XCTAssertTrue(args.contains("-C"))
+        XCTAssertTrue(args.contains("-X"))
     }
 
     func testSettingsRoundTripThroughDisk() async throws {
