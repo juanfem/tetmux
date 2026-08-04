@@ -130,6 +130,7 @@ struct TerminalPaneView: NSViewRepresentable {
         // instantiation, and it is what lets the setting apply to panes already on screen rather than
         // only to ones opened afterwards.
         view.getTerminal().changeScrollback(theme.scrollbackLines)
+        Self.hideReservedScroller(in: view)
         view.allowMouseReporting = true   // T5.3
         view.optionAsMetaKey = true
         view.configureNativeColors()
@@ -149,8 +150,40 @@ struct TerminalPaneView: NSViewRepresentable {
         return view
     }
 
+    /// Reclaims the gutter SwiftTerm reserves for its scroller, because that gutter silently broke
+    /// the geometry contract (§3.3).
+    ///
+    /// The view keeps `scrollerWidth` — 17pt, and the same for `.overlay` as for `.legacy` — off its
+    /// right edge, and derives its own column count from `frame.width - reservedScrollerWidth`,
+    /// overriding the `resize(cols:rows:)` we hand it. Meanwhile `requestSizes` measures the
+    /// container and asks tmux for `width / cellWidth` columns, subtracting nothing. So tmux sized a
+    /// pane to more columns than the emulator could ever draw and every program in it wrapped early:
+    /// at 12pt SF Mono the cell is 7.5pt, 17pt of gutter is 2.27 cells, and a 720pt pane asked tmux
+    /// for 96 columns while the grid held 93. Anything using the full width — Claude Code's boxes are
+    /// the obvious case — spilled its last few columns onto the next line.
+    ///
+    /// Hiding it rather than subtracting it in `requestSizes`, deliberately. The correction is not a
+    /// constant: every pane reserves its own gutter, so it would depend on how many panes are across
+    /// the widest row — which is a property of the layout, which is tmux's answer to the size we
+    /// asked for. That is a measurement that feeds itself, the same shape as the pane-derived cell
+    /// size that made split windows oscillate forever. Hidden, the emulator's usable width is simply
+    /// its frame width and the arithmetic has one owner again.
+    ///
+    /// `reservedScrollerWidth` is `scroller?.isHidden == true ? 0 : scrollerWidth` in SwiftTerm's own
+    /// code, so this is a path it supports; the scroller is private, hence reaching it as a subview.
+    /// Nothing is lost but the drawn bar: `scrollWheel` is handled by the terminal view itself and
+    /// never consults it.
+    static func hideReservedScroller(in view: TerminalView) {
+        for case let scroller as NSScroller in view.subviews {
+            scroller.isHidden = true
+        }
+    }
+
     func updateNSView(_ view: TerminalView, context: Context) {
         context.coordinator.parent = self
+        // Cheap, and it keeps the gutter reclaimed if SwiftTerm ever rebuilds the scroller — the
+        // failure it guards against is silent and only visible as text wrapping a few columns early.
+        Self.hideReservedScroller(in: view)
 
         if view.font.fontName != theme.resolvedFont().fontName || view.font.pointSize != theme.fontSize {
             view.font = theme.resolvedFont()
