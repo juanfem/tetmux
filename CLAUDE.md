@@ -195,6 +195,20 @@ life, and does it silently, because keystrokes still reach tmux and only the out
 inside `List` rows, and giving the `List` a `selection:` binding makes AppKit's selection gesture
 claim every click. Either mistake leaves the tree looking fine and completely unclickable.
 
+**The sidebar's glyphs are drawn, not set in SF Symbols, and its gaps are cut rather than filled.**
+Two separate reasons, both of which look like fussiness until you try the obvious thing. SF Symbols
+strokes are tuned per symbol, so `xmark` beside `plus` is optically heavier at every point size and
+weight — a diagonal lays more ink across a row of pixels than an axis-aligned rule does. Both glyphs
+are therefore the *same two rules*, one pair crossed at right angles and one pair rotated 45°, which
+also means the ✕ spans 8pt where the + spans 11: that is the optical match, not a bug. And the
+session icon's two layered rectangles need clearance between them or they merge into a blob at 13px,
+but a row has no single background to fill that clearance with — it is the sidebar material, or a
+hover highlight, or the selection tint over either. `SessionStackIcon` punches the gap out with
+`.blendMode(.destinationOut)` inside a `compositingGroup`, so whatever the row is really sitting on
+shows through and the icon has to know nothing about it. Anything colour-derived here is composited
+from `controlAccentColor` or a hierarchical style rather than written down as the sketch's hex: the
+sidebar and the panes follow the system appearance, and a light-mode literal inverts wrongly in dark.
+
 **The child of a fork may touch nothing but syscalls before `exec`.** `PtyTransport` builds argv,
 envp, termios, and the signal mask *before* forking; the child only issues syscalls. Swift
 allocation or ARC traffic there deadlocks on the malloc lock in a process with a live concurrency
@@ -295,12 +309,27 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   that says why (F4.10, no "don't ask again" escape). Both halves have a regression test, including
   one asserting tmux still refuses; if that ever stops being true the confirmation can go.
   `%window-close` cannot distinguish the two, so it schedules a topology refresh rather than guessing.
+- **⌥ on a close or kill button skips the confirmation, and is read at click time.** The confirmation
+  exists because the user cannot be assumed to know that closing the last link of a window ends what
+  is running in it; holding ⌥ *is* saying so, which is what the modifier means on a destructive
+  control elsewhere in macOS, and it is what makes closing a run of them one click each rather than
+  two. It is not a "don't ask again": nothing is remembered, so the assertion is made again for the
+  next window. The flags come from `OptionKey.isHeld` inside the action and never from a monitor —
+  `ModifierKeyMonitor` and `OptionKeyMonitor` keep a *display* current and are allowed to be a frame
+  behind, and a button whose behaviour disagreed with its own icon for one frame is the least
+  explicable bug on this list. The two monitors are separate because their constraints are opposite:
+  a window's events reach a local `.flagsChanged` monitor, and a menu's do not (it tracks events in a
+  run loop of its own), which is why the menu bar polls instead.
 - **A command the user asked for that fails has to say so** (§7). `%error` bodies used to reach only
   the diagnostic logger, which only `--diagnose` installs — in the app the command simply did not
   happen and nothing said why. `PendingCommand.Kind.userCommand(_:)` labels the ones a person
   initiated, and only those become `HostState.lastCommandFailure` and a banner. Internal commands
   keep `.ignore`: a `resize-window` an old server refuses is ours to cope with, not a sentence to put
   in front of somebody.
+- **The local host connects itself at launch; remote ones wait to be asked.** Not a general
+  auto-connect policy. Local tmux is always reachable, needs no credentials and cannot prompt for
+  anything, so the click was a step with no decision in it. A remote host connecting unbidden can
+  raise a password sheet, and several of them at launch is worse than a click.
 - **OSC 52 clipboard writes are denied by default and reads are never permitted** (T5.6).
 - Authentication failures are not retried; other disconnects back off 1 s → 60 s with jitter and a
   circuit breaker after 8 attempts (F4.14). An explicit reconnect — `reconnectNow`, behind the
@@ -339,15 +368,42 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   Incomplete rows are dropped rather than passed to ssh (a malformed `-L` makes ssh exit before tmux
   starts), and `ExitOnForwardFailure` is deliberately left at ssh's default — a taken local port must
   not kill the session. ssh's complaint lands in the pre-handshake transcript.
-- **Every window shares the host's one channel (F4.12), and only one session per host is live.**
-  `%output` arrives for every pane of the *attached* session, so any window showing that session is
-  fully live and any window showing a different session of the same host is a `capture-pane` snapshot.
-  `NotAttachedBanner` is what says so and offers "Attach Here" — which necessarily freezes whatever
-  session was attached before. Making two sessions of one host live at once needs a second channel,
-  i.e. re-keying `connections`, `outputSubscribers`, `reconnectTarget`, and `reconnectAttempts` from
-  `hostId` to `(hostId, session)`. That is deliberately not done. The banner used to live only in the
-  torn-off window because a main window could not reach the situation; with several main windows it is
-  ordinary, and panes that quietly stop moving are the worst possible way to discover it.
+- **One tmux client per session on screen, and the extra ones are not the connection.** `%output`
+  arrives only for the session a client is attached to, and a client has exactly one session — so with
+  a single channel per host, every window on a second session was a `capture-pane` still frame, and the
+  only cure (`switch-client`) moved the freeze to the other window rather than removing it. So a host
+  has a **primary** channel and any number of **followers**: `connections[hostId]` is the primary and
+  `followerChannels[hostId][sessionId]` is one client per additionally-displayed session.
+  `setDisplayedSessions` is the only input — `AppModel` recomputes it from every open window's
+  selection — and `reconcileChannels` makes reality match it.
+
+  The two kinds are deliberately not symmetrical, and treating a follower as a connection is the way to
+  break this. The primary *is* the host: its state is the host's `connectionState`, its `%exit` is the
+  server ending, its prompt is the authentication sheet, it owns the reconnect backoff and circuit
+  breaker, and every command anyone issues goes down it. A follower does exactly one thing, which is to
+  make one more session's panes move; it raises no prompt, changes no connection state, and when it
+  dies it says only that one session stopped streaming — there is no backoff, because the usual reason
+  a follower dies is that its session did. Sharing is by session and not by window: two windows on one
+  session are two views of one client, since a second client there would stream the same panes twice.
+
+  The primary is *moved* rather than duplicated when its own session leaves the screen: it has to be
+  attached to something, and `switch-client` only strands panes when somebody is watching them, which
+  is precisely the case `reconcileChannels` checks before doing it.
+- **A pane belongs to one channel, or it is painted twice.** A window can be linked into several
+  sessions (F4.9's subject), and every attached client streams `%output` for every pane it can see —
+  verified on 3.7b by attaching two control clients to two sessions sharing a window: both emit the
+  same `%output %p` line. Two copies fed to one emulator is a corrupted screen, which is worse than the
+  frozen one this whole mechanism exists to fix. `paneOwners` is first-come ownership by channel epoch;
+  everyone else's bytes for that pane are dropped, and when the owner goes away the pane is released
+  *and repainted*, because whoever picks it up has been having its bytes discarded and is mid-stream on
+  a screen it never drew. `refresh-client -A` (the pause) has to go to the owning client too — asking
+  the primary to pause a pane it is not streaming does nothing at all, silently.
+- **`HostState.liveSessionIds` is what tetmux is attached to, and it counts channels that are still
+  connecting.** `TmuxSession.isAttached` is tmux's own client count and includes terminals elsewhere on
+  the machine, so it cannot answer "are these panes live?". Liveness deliberately includes a follower
+  that is still handshaking and a `switch-client` that has not landed (`Connection.pendingSessionId`):
+  attaching is a round trip, and the strictly honest answer for its duration makes `NotAttachedBanner`
+  appear for a tenth of a second and withdraw, which reads as a glitch rather than as information.
 - **There is one kind of window.** "Open in New Window" opens an ordinary window seeded to a session
   with the sidebar collapsed, not the separate `DetachedScene` type it used to — that had its own view,
   a reduced feature set, and a button to convert itself into a real window, three things to maintain
@@ -385,6 +441,18 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   existing one forward instead of making a second, which is right for "show me this session" and wrong
   for ⌘N. And SwiftUI cannot bring a *particular* window forward at all, so `WindowAccessor` captures
   each window's `NSWindow` — that is the only way items 5 and 9 can raise the right one.
+- **With every window closed there is nobody to claim a request, so the model performs it itself.**
+  `requestedWindow` is only ever observed from inside a window, and the app deliberately outlives its
+  last one (`applicationShouldTerminateAfterLastWindowClosed` is `false`, because the menu bar extra
+  is the point of staying resident) — so picking a session from the tray did nothing at all, ⌥ or no
+  ⌥, and left the request set for the next ⌘N to inherit. `AppModel.openAppWindow` is an
+  `OpenWindowAction` handed over by a view, since only a view can read one; it stays valid after that
+  view is gone because it resolves against the scene graph. `openWindow(_:)` uses it only when
+  `openWindows` is empty — calling it while a window is watching would honour the request twice. The
+  menu bar re-adopts it on every use, being the one view still around when the last window closes,
+  and the Dock menu (AppKit's, built outside any scene) reaches it through the app delegate. **New
+  Session** with nothing open needs the same treatment one layer up: `createSession` queues a reveal
+  that *opens* a window rather than none at all, or tmux gets a session nobody is ever shown.
 - **Showing a session prefers the window already showing it.** `showSession` tries, in order: the
   window already displaying that session (brought forward), then a new window if asked for one, then
   the offered fallback — the clicked window for a sidebar double-click, the last-used one for the menu
@@ -423,13 +491,12 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   modes — the default mode never fires during menu tracking — and only between `NSMenu`'s
   begin/end-tracking notifications, so nothing wakes up while no menu is open. The *action* still
   reads `NSEvent.modifierFlags` at click time; a 20 Hz poll is for display and can be a frame behind.
-- **Focusing a window attaches it.** Only the attached session receives `%output` and there is one
-  channel per host, so a window showing another session of that host is a still frame. Clicking into a
-  window already says "I want to work here"; making the user then notice a banner and press a button
-  asks twice. `AppModel.focus` calls `switchSession` when the focused window's session is not the
-  attached one — which necessarily turns whatever *was* attached into snapshots, and that is the whole
-  job `NotAttachedBanner` is left doing. It has no button: the action it would offer is the one that
-  just ran.
+- **Nothing switches sessions on focus any more.** `AppModel.focus` used to call `switchSession` so
+  the window you clicked into became the live one; with a client per displayed session there is nothing
+  to move, and moving it would freeze the window you just left. Focus now only republishes scope and
+  re-runs `syncDisplayedSessions`. That call is made from everywhere the answer can change — focus,
+  `select`, a window registering or unregistering, and every topology snapshot, since a session put on
+  screen before tmux has named it cannot be attached to by id until the snapshot arrives.
 - **tmux ids collide across hosts.** Sessions and windows are numbered per *server*, so `$0` and `@1`
   exist on every host at once — and that is the common case, not the odd one, because the ordinary way
   to reach a second host is to ssh into it and its tmux starts numbering from zero exactly like the

@@ -410,9 +410,23 @@ public struct HostState: Identifiable, Equatable, Sendable {
     /// The most recent command of the user's that tmux refused (§7). Cleared when dismissed, and on
     /// each connect so a reconnect never opens showing a failure from the previous channel.
     public var lastCommandFailure: CommandFailure?
+    /// Sessions this host has a control-mode client for, and which therefore stream `%output`.
+    ///
+    /// Not the same as `TmuxSession.isAttached`, which is tmux's own count of clients and includes
+    /// every terminal elsewhere on the machine that happens to be attached. This is what *tetmux*
+    /// is attached to, and so the only honest answer to "are these panes live or a photograph?".
+    /// A session whose channel is still connecting is included: it is about to be live, and a
+    /// banner that appears for a moment and withdraws is worse than no banner at all.
+    public var liveSessionIds: Set<String> = []
 
     public var activeSession: TmuxSession? {
         sessions.first { $0.id == activeSessionId } ?? sessions.first
+    }
+
+    /// Whether this host is streaming a session's panes rather than showing a still frame of them.
+    public func isLive(_ sessionId: String?) -> Bool {
+        guard let sessionId else { return false }
+        return liveSessionIds.contains(sessionId)
     }
 
     public init(
@@ -423,7 +437,8 @@ public struct HostState: Identifiable, Equatable, Sendable {
         tmuxVersion: String? = nil,
         rttMilliseconds: Double? = nil,
         authenticationPrompt: AuthenticationPrompt? = nil,
-        lastCommandFailure: CommandFailure? = nil
+        lastCommandFailure: CommandFailure? = nil,
+        liveSessionIds: Set<String> = []
     ) {
         self.config = config
         self.connectionState = connectionState
@@ -433,6 +448,7 @@ public struct HostState: Identifiable, Equatable, Sendable {
         self.rttMilliseconds = rttMilliseconds
         self.authenticationPrompt = authenticationPrompt
         self.lastCommandFailure = lastCommandFailure
+        self.liveSessionIds = liveSessionIds
     }
 
     public func window(_ windowId: String) -> TmuxWindow? {

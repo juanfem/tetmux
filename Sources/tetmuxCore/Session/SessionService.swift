@@ -10,7 +10,29 @@ public actor SessionService {
 
     private var hosts: [String: HostState] = [:]
     private var hostOrder: [String] = []
+    /// The primary channel of each host: the one that carries the connection itself.
     private var connections: [String: Connection] = [:]
+
+    /// One extra channel per session that is on screen and is not the primary's, keyed
+    /// `hostId` → `sessionId`.
+    ///
+    /// This is the whole of "a client per displayed session". A tmux client is attached to exactly
+    /// one session and `%output` arrives only for that one, so a second session in front of the user
+    /// is a second client or it is a still frame. They are created and retired by
+    /// `setDisplayedSessions`, which is the only thing that knows what is on screen.
+    private var followerChannels: [String: [String: Connection]] = [:]
+
+    /// Which sessions the UI is currently showing, per host. The input to `reconcileChannels`.
+    private var displayedSessions: [String: Set<String>] = [:]
+
+    /// Which channel is painting each pane, by epoch, keyed `hostId` → `paneId`.
+    ///
+    /// A window can be linked into two sessions at once (F4.9's whole subject), and if both are on
+    /// screen then two clients stream identical `%output` for its panes. Delivering both would
+    /// double every byte the pane produces. The first channel to speak for a pane keeps it; the rest
+    /// are dropped until it goes away, and the pane is repainted when ownership moves so the new
+    /// owner's stream starts from a screen it agrees with.
+    private var paneOwners: [String: [String: UUID]] = [:]
     private var stateContinuations: [UUID: AsyncStream<[HostState]>.Continuation] = [:]
     private var diagnosticLogger: (@Sendable (String) -> Void)?
 
@@ -63,6 +85,34 @@ public actor SessionService {
         let sessionTarget: String
         var codec = ControlCodec()
         var version: TmuxVersion?
+
+        /// What this channel is for.
+        ///
+        /// Control mode streams `%output` only for the session its client is attached to, and a
+        /// client has exactly one session — so a second session on screen needs a second client.
+        /// The two kinds are not symmetrical and must not be treated as such: the primary channel
+        /// *is* the host as far as the rest of the app is concerned (its connection state, its
+        /// authentication prompt, its reconnect policy, and every command anyone issues), while a
+        /// follower exists for one reason only, which is to make one more session's panes move.
+        enum Role: Equatable {
+            case primary
+            /// Attached to this session id, and torn down when nothing displays it any more.
+            case follower(sessionId: String)
+        }
+        let role: Role
+
+        var isPrimary: Bool { role == .primary }
+
+        /// The session this channel is actually attached to, from `%session-changed`.
+        var attachedSessionId: String?
+        /// A session this channel has been told to move to but has not landed on yet.
+        ///
+        /// Counted as live, which is the difference between a banner and no banner. `switch-client`
+        /// is a round trip, and for its duration the client is attached to the old session while the
+        /// window in front of the user shows the new one — so the honest answer is "not live", and
+        /// the useful one is "give it a moment". The banner it saves is one that appears for a tenth
+        /// of a second and withdraws, which reads as a glitch rather than as information.
+        var pendingSessionId: String?
 
         /// Commands we have written and are awaiting a `%begin` block for, in the order tmux will
         /// answer them. tmux command numbers are server-wide and start at an arbitrary value, so
@@ -153,9 +203,10 @@ public actor SessionService {
         /// Everything else is fire-and-forget by design.
         var acknowledgements: [UUID: CheckedContinuation<Void, Never>] = [:]
 
-        init(transport: PtyTransport, sessionTarget: String) {
+        init(transport: PtyTransport, sessionTarget: String, role: Role = .primary) {
             self.transport = transport
             self.sessionTarget = sessionTarget
+            self.role = role
         }
 
         func cancelTimers() {
@@ -259,6 +310,9 @@ public actor SessionService {
     public func removeHost(hostId: String) async {
         await disconnectHost(hostId: hostId)
         finishSubscribers(hostId: hostId)
+        displayedSessions.removeValue(forKey: hostId)
+        followerChannels.removeValue(forKey: hostId)
+        paneOwners.removeValue(forKey: hostId)
         reconnectTarget.removeValue(forKey: hostId)
         hosts.removeValue(forKey: hostId)
         hostOrder.removeAll { $0 == hostId }
@@ -334,32 +388,11 @@ public actor SessionService {
         hosts[hostId] = host
         broadcastState()
 
-        let transport = PtyTransport()
-        let connection = Connection(transport: transport, sessionTarget: sessionTarget)
-
         do {
-            let (executable, arguments) = try invocation(for: host.config, mode: attachMode)
-            log("[\(hostId)] spawn \(executable) \(arguments.map { "\"\($0)\"" }.joined(separator: " "))")
-
-            let stream = try transport.spawn(
-                executable: executable,
-                arguments: arguments,
-                environment: childEnvironment(),
-                initialSize: (cols: 200, rows: 50)
+            let connection = try spawnChannel(
+                host: host.config, sessionTarget: sessionTarget, mode: attachMode, role: .primary
             )
             connections[hostId] = connection
-
-            let epoch = connection.epoch
-            connection.readTask = Task { [weak self] in
-                do {
-                    for try await data in stream {
-                        await self?.ingest(hostId: hostId, epoch: epoch, data: data)
-                    }
-                    await self?.channelClosed(hostId: hostId, epoch: epoch, error: nil)
-                } catch {
-                    await self?.channelClosed(hostId: hostId, epoch: epoch, error: error)
-                }
-            }
         } catch {
             host.connectionState = .failed(reason: describe(error))
             hosts[hostId] = host
@@ -368,9 +401,180 @@ public actor SessionService {
         }
     }
 
+    /// Spawns one control-mode channel and starts reading it. The one place a channel is made,
+    /// whatever it is for — a follower differs from the primary only in what it attaches to and in
+    /// what the rest of the service does with its events.
+    private func spawnChannel(
+        host config: HostConfig,
+        sessionTarget: String,
+        mode: TmuxCommand.AttachMode,
+        role: Connection.Role
+    ) throws -> Connection {
+        let hostId = config.id
+        let transport = PtyTransport()
+        let connection = Connection(transport: transport, sessionTarget: sessionTarget, role: role)
+
+        let (executable, arguments) = try invocation(for: config, mode: mode)
+        log("[\(hostId)] spawn \(executable) \(arguments.map { "\"\($0)\"" }.joined(separator: " "))")
+
+        let stream = try transport.spawn(
+            executable: executable,
+            arguments: arguments,
+            environment: childEnvironment(),
+            initialSize: (cols: 200, rows: 50)
+        )
+
+        let epoch = connection.epoch
+        connection.readTask = Task { [weak self] in
+            do {
+                for try await data in stream {
+                    await self?.ingest(hostId: hostId, epoch: epoch, data: data)
+                }
+                await self?.channelClosed(hostId: hostId, epoch: epoch, error: nil)
+            } catch {
+                await self?.channelClosed(hostId: hostId, epoch: epoch, error: error)
+            }
+        }
+        return connection
+    }
+
+    // MARK: - A client per displayed session
+
+    /// Tells the service which sessions are on screen, per host. Everything about follower channels
+    /// follows from this one call.
+    ///
+    /// Sharing is by *session*, not by macOS window: two windows showing the same session are two
+    /// views of one client, because a second client would stream the same panes twice for nothing.
+    /// A window showing nothing, or a host that is not connected, contributes nothing.
+    public func setDisplayedSessions(_ sessions: [String: Set<String>]) {
+        guard displayedSessions != sessions else { return }
+        displayedSessions = sessions
+        for hostId in Set(sessions.keys).union(followerChannels.keys).union(connections.keys) {
+            reconcileChannels(hostId: hostId)
+        }
+        // `liveSessionIds` just changed and nothing else is going to say so. Without this the view
+        // that is deciding whether to draw the not-attached banner would not hear about the client
+        // it asked for until some unrelated notification arrived — which is the flash again, only
+        // slower and less predictable.
+        broadcastState()
+    }
+
+    /// Brings a host's channels in line with what it is displaying: one client per session on
+    /// screen, and none for a session nobody is looking at.
+    ///
+    /// The primary is moved rather than duplicated when its own session falls off screen. It has to
+    /// be attached to *something* — it carries the connection — and leaving it on a session nobody
+    /// can see would keep a client, and a `window-size manual`, on a session for no reason. Moving
+    /// it is free: `switch-client` only strands panes when somebody is watching them, which is
+    /// exactly the case this checks for.
+    private func reconcileChannels(hostId: String) {
+        guard let host = hosts[hostId], let primary = connections[hostId] else {
+            // Nothing to attach with. Any followers left over belong to a channel set that is gone.
+            for (_, follower) in followerChannels[hostId] ?? [:] {
+                teardown(hostId: hostId, connection: follower)
+            }
+            followerChannels[hostId] = nil
+            updateLiveSessions(hostId: hostId)
+            return
+        }
+        let wanted = displayedSessions[hostId] ?? []
+        let known = Set(host.sessions.map(\.id))
+
+        // A session tmux has never mentioned cannot be attached to by id, and asking would fail a
+        // command for something the user did not do. The next topology snapshot brings it back here.
+        let attachable = wanted.intersection(known)
+
+        if let attached = primary.attachedSessionId,
+           !attachable.contains(attached),
+           let adopt = attachable.subtracting(followerSessionIds(hostId)).sorted().first {
+            primary.pendingSessionId = adopt
+            switchSession(hostId: hostId, sessionId: adopt)
+        }
+
+        for sessionId in attachable where sessionId != primary.attachedSessionId {
+            guard followerChannels[hostId]?[sessionId] == nil else { continue }
+            startFollower(hostId: hostId, sessionId: sessionId, config: host.config)
+        }
+
+        let stale = (followerChannels[hostId] ?? [:])
+            .filter { !attachable.contains($0.key) || $0.key == primary.attachedSessionId }
+            .map { (sessionId: $0.key, epoch: $0.value.epoch) }
+        for entry in stale {
+            log("[\(hostId)] retiring the client for \(entry.sessionId)")
+            // Detached because retiring waits for tmux to acknowledge the `window-size` restore, and
+            // reconciling must not block on a round trip per session that left the screen.
+            Task { [weak self] in
+                await self?.retireFollower(
+                    hostId: hostId, sessionId: entry.sessionId, epoch: entry.epoch
+                )
+            }
+        }
+
+        updateLiveSessions(hostId: hostId)
+    }
+
+    private func followerSessionIds(_ hostId: String) -> Set<String> {
+        Set(followerChannels[hostId]?.keys.map { $0 } ?? [])
+    }
+
+    private func startFollower(hostId: String, sessionId: String, config: HostConfig) {
+        do {
+            // By id, never by name: a session renamed between the snapshot and the attach would
+            // otherwise be created fresh under the old name by `new-session -A`.
+            let connection = try spawnChannel(
+                host: config, sessionTarget: sessionId,
+                mode: .attach(sessionName: sessionId), role: .follower(sessionId: sessionId)
+            )
+            followerChannels[hostId, default: [:]][sessionId] = connection
+            log("[\(hostId)] opened a second client for \(sessionId)")
+        } catch {
+            // Not a host failure: the primary is still up and the session is still listed. The panes
+            // in it simply stay a snapshot, which is what the banner is for.
+            log("[\(hostId)] could not open a client for \(sessionId): \(describe(error))")
+        }
+        updateLiveSessions(hostId: hostId)
+    }
+
+    /// Ends a follower, putting `window-size` back first — the same courtesy a deliberate disconnect
+    /// owes, for the same reason: the option is a change to the user's session and it persists.
+    private func retireFollower(hostId: String, sessionId: String, epoch: UUID) async {
+        guard let follower = followerChannels[hostId]?[sessionId], follower.epoch == epoch else { return }
+        follower.userInitiatedDisconnect = true
+        await restoreWindowSizePolicy(hostId: hostId, connection: follower)
+        guard followerChannels[hostId]?[sessionId]?.epoch == epoch else { return }
+        followerChannels[hostId]?.removeValue(forKey: sessionId)
+        teardown(hostId: hostId, connection: follower)
+        updateLiveSessions(hostId: hostId)
+        broadcastState()
+    }
+
+    /// Publishes which sessions actually have a client, which is what tells a view whether it is
+    /// looking at something live or at a photograph.
+    private func updateLiveSessions(hostId: String) {
+        var live: Set<String> = []
+        for channel in channels(of: hostId) {
+            // A channel that is still connecting counts. It is a moment old, it is going to be live,
+            // and a banner that appears for that moment and then withdraws is worse than no banner.
+            switch channel.role {
+            case .primary:
+                if let attached = channel.attachedSessionId { live.insert(attached) }
+                if let pending = channel.pendingSessionId { live.insert(pending) }
+            case .follower(let sessionId): live.insert(sessionId)
+            }
+        }
+        withHost(hostId) { $0.liveSessionIds = live }
+    }
+
     public func disconnectHost(hostId: String) async {
         guard let connection = connections[hostId] else { return }
         connection.userInitiatedDisconnect = true
+        // The followers go first and by the same route, each putting its own session's `window-size`
+        // back: they are clients of this host too, and leaving them attached would keep the host
+        // "disconnected" with a fistful of live tmux clients behind it.
+        for (sessionId, follower) in followerChannels[hostId] ?? [:] {
+            follower.userInitiatedDisconnect = true
+            await retireFollower(hostId: hostId, sessionId: sessionId, epoch: follower.epoch)
+        }
         await restoreWindowSizePolicy(hostId: hostId, connection: connection)
         // The channel can end while we wait — the link drops, or tmux exits — and whichever path
         // noticed has already torn it down and set the state. Tearing down a *replacement* channel,
@@ -410,7 +614,9 @@ public actor SessionService {
             controlPath: try controlPath(),
             remoteCommand: remoteCommand,
             forwards: config.forwards,
-            expectsPasswordPrompt: config.usesPassword
+            expectsPasswordPrompt: config.usesPassword,
+            extraArguments: TmuxCommand.splitArguments(config.extraSshArguments),
+            forwardsX11: config.forwardsX11
         ))
     }
 
@@ -447,15 +653,32 @@ public actor SessionService {
 
     // MARK: - Reading
 
+    /// Every live channel of a host, primary first.
+    private func channels(of hostId: String) -> [Connection] {
+        let followers = followerChannels[hostId]?.values.map { $0 } ?? []
+        return (connections[hostId].map { [$0] } ?? []) + followers
+    }
+
+    /// The channel an epoch belongs to, whichever kind it is. Reads from the channel are tagged with
+    /// their epoch precisely so a message from a channel that has since been replaced is ignored.
+    private func channel(of hostId: String, epoch: UUID) -> Connection? {
+        channels(of: hostId).first { $0.epoch == epoch }
+    }
+
     private func ingest(hostId: String, epoch: UUID, data: Data) {
-        guard let connection = connections[hostId], connection.epoch == epoch else { return }
+        guard let connection = channel(of: hostId, epoch: epoch) else { return }
 
         if !connection.handshakeComplete {
             connection.preHandshakeLog.append(contentsOf: data)
             if connection.preHandshakeLog.count > 8192 {
                 connection.preHandshakeLog.removeFirst(connection.preHandshakeLog.count - 8192)
             }
-            detectAuthenticationPrompt(hostId: hostId, connection: connection)
+            // A follower reaches the same host through the same credentials the primary already
+            // used, so a prompt on one is the primary's story to tell — and a sheet raised by a
+            // channel the user did not ask for would be unexplainable.
+            if connection.isPrimary {
+                detectAuthenticationPrompt(hostId: hostId, connection: connection)
+            }
         }
 
         let events = connection.codec.feed(data)
@@ -520,7 +743,8 @@ public actor SessionService {
             completeHandshakeIfNeeded(hostId: hostId, connection: connection)
 
         case .output(let paneId, let data), .extendedOutput(let paneId, _, let data):
-            deliver(data, hostId: hostId, paneId: paneId)
+            guard claimsPane(hostId: hostId, paneId: paneId, epoch: connection.epoch) else { break }
+            deliver(data, hostId: hostId, paneId: paneId, from: connection)
 
         case .layoutChange(let windowId, let layout, _, _):
             withHost(hostId) { host in
@@ -574,27 +798,37 @@ public actor SessionService {
 
         case .sessionChanged(let sessionId, let name):
             connection.attachedToSession = true
+            let previous = connection.attachedSessionId
+            connection.attachedSessionId = sessionId
+            if connection.pendingSessionId == sessionId { connection.pendingSessionId = nil }
             withHost(hostId) { host in
-                for index in host.sessions.indices {
-                    host.sessions[index].isAttached = host.sessions[index].id == sessionId
-                }
                 if let index = host.sessions.firstIndex(where: { $0.id == sessionId }) {
                     host.sessions[index].name = name
+                    host.sessions[index].isAttached = true
                 } else {
                     host.sessions.append(TmuxSession(id: sessionId, name: name, isAttached: true))
                 }
-                host.activeSessionId = sessionId
             }
-            // Where a reconnect has to land. `switch-client` arrives here too, so this tracks the
-            // session the client is really on rather than the one it originally attached to.
-            reconnectTarget[hostId] = name
-            // `window-size` is a session option, so the session we just moved to needs it too.
+            // `window-size` is a session option, so the session we just moved to needs it too. Every
+            // channel does this for its own session; a follower is a client like any other.
             applyWindowSizePolicy(hostId: hostId, connection: connection)
-            // The client just moved to a different session. Panes we are already showing belong to
-            // the old one and will go silent, and panes in the new one have sent us nothing yet, so
-            // everything on screen needs repainting from tmux's scrollback.
+            updateLiveSessions(hostId: hostId)
+
+            if connection.isPrimary {
+                withHost(hostId) { $0.activeSessionId = sessionId }
+                // Where a reconnect has to land. `switch-client` arrives here too, so this tracks the
+                // session the client is really on rather than the one it originally attached to.
+                reconnectTarget[hostId] = name
+                scheduleTopologyRefresh(hostId: hostId)
+            }
+            // This client just moved. Panes it was painting belong to the session it left and will
+            // go silent, and panes in the new one have sent nothing yet, so what it owns has to be
+            // repainted from tmux's scrollback — and released first, since another client may now be
+            // the one that can see them.
+            if previous != nil, previous != sessionId {
+                releasePanes(hostId: hostId, ownedBy: connection.epoch)
+            }
             repaintSubscribedPanes(hostId: hostId)
-            scheduleTopologyRefresh(hostId: hostId)
 
         case .sessionRenamed(let sessionId, let name):
             withHost(hostId) { host in
@@ -643,8 +877,16 @@ public actor SessionService {
             // Orderly: tmux is ending this client on purpose. `channelClosed` needs to know, because
             // the recovery for this is nothing like the recovery for a dropped link.
             connection.serverEnded = true
-            withHost(hostId) { host in
-                host.connectionState = .degraded(reason: reason ?? "tmux server exited")
+            // Only the primary speaks for the host. A follower exiting means its session ended or
+            // was killed — one session's panes stop, which the topology refresh will explain — and
+            // saying "the tmux server exited" because of it would be false while the primary is
+            // sitting right there, connected.
+            if connection.isPrimary {
+                withHost(hostId) { host in
+                    host.connectionState = .degraded(reason: reason ?? "tmux server exited")
+                }
+            } else {
+                scheduleTopologyRefresh(hostId: hostId)
             }
 
         case .unknownNotification(let line):
@@ -713,13 +955,20 @@ public actor SessionService {
         guard !connection.handshakeComplete else { return }
         connection.handshakeComplete = true
         connection.preHandshakeLog.removeAll()
-        // Whatever ssh asked for, it got: the protocol is speaking.
-        withHost(hostId) { $0.authenticationPrompt = nil }
 
-        withHost(hostId) { host in
-            host.connectionState = .connected
+        // A follower is one session's output, nothing more. It does not decide that the host is
+        // connected (the primary already did), it does not clear a prompt it never raised, and it
+        // does not reset the reconnect counter, which belongs to the connection this rides on. What
+        // it does need is the version — the sizing and flow-control policies it applies to its own
+        // session are chosen from it — and a repaint of what it is now responsible for.
+        if connection.isPrimary {
+            // Whatever ssh asked for, it got: the protocol is speaking.
+            withHost(hostId) { $0.authenticationPrompt = nil }
+            withHost(hostId) { host in
+                host.connectionState = .connected
+            }
+            reconnectAttempts[hostId] = 0
         }
-        reconnectAttempts[hostId] = 0
 
         // Flush anything the UI queued while we were still connecting.
         let queued = connection.outbox
@@ -731,7 +980,11 @@ public actor SessionService {
         // torn-off window unable to size itself. See `applyWindowSizePolicy`.
         send("list-clients -F \(TmuxCommand.quote(TmuxCommand.clientsFormat))",
              kind: .listClients, hostId: hostId, connection: connection)
-        refreshTopology(hostId: hostId, connection: connection)
+        // One channel's worth of topology is the whole server's, so a follower asking again would
+        // only duplicate three round trips and one broadcast.
+        if connection.isPrimary {
+            refreshTopology(hostId: hostId, connection: connection)
+        }
         // Panes that were already on screen before this channel existed — the reconnect case — have
         // a live subscriber and no content: control mode streams only what changes from now on, so
         // without this they would sit at whatever they showed when the old channel died (F4.16).
@@ -886,9 +1139,20 @@ public actor SessionService {
                 host.activeSessionId = host.sessions.first { $0.isAttached }?.id ?? host.sessions.first?.id
             }
         }
+        // `session_attached` is now a fact about several clients rather than one, and the primary's
+        // is the one `activeSessionId` means: the session commands default to and reconnects return
+        // to. Taking whichever attached session sorted first would move it whenever a second client
+        // appeared.
+        if let attached = connections[hostId]?.attachedSessionId, seen(hostId, attached) {
+            withHost(hostId) { $0.activeSessionId = attached }
+        }
         // Catches a rename we learned about from `list-sessions` rather than from a notification —
         // another client renaming the session while our channel was down, for instance.
         syncReconnectTarget(hostId: hostId)
+        // A session that appeared can now be attached to by id, and one that vanished has a client
+        // to retire. This is the only moment either becomes true.
+        reconcileChannels(hostId: hostId)
+        updateLiveSessions(hostId: hostId)
     }
 
     /// Keeps `reconnectTarget` pointing at the *current* name of the session this client is on.
@@ -901,6 +1165,10 @@ public actor SessionService {
     /// `activeSessionId` is used rather than `isAttached` deliberately — `session_attached` counts
     /// *any* client, so a user with a plain `tmux attach` open elsewhere would otherwise redirect
     /// our reconnect to their session.
+    private func seen(_ hostId: String, _ sessionId: String) -> Bool {
+        hosts[hostId]?.sessions.contains { $0.id == sessionId } ?? false
+    }
+
     private func syncReconnectTarget(hostId: String) {
         guard let host = hosts[hostId],
               let activeId = host.activeSessionId,
@@ -1084,10 +1352,44 @@ public actor SessionService {
 
     // MARK: - Pane output
 
+    /// Whether `epoch` is the channel whose bytes for this pane are the ones to paint.
+    ///
+    /// Unclaimed panes are claimed on the spot, so in the ordinary case — one client that can see
+    /// the pane — this costs a dictionary lookup and answers yes. It matters when a window is linked
+    /// into two displayed sessions: both clients then stream the same pane, and painting both would
+    /// double every byte.
+    private func claimsPane(hostId: String, paneId: String, epoch: UUID) -> Bool {
+        if let owner = paneOwners[hostId]?[paneId] { return owner == epoch }
+        paneOwners[hostId, default: [:]][paneId] = epoch
+        return true
+    }
+
+    /// Drops a dead channel's claims and repaints what it was painting.
+    ///
+    /// The repaint is the point. Another client may have been streaming those panes all along and
+    /// having its bytes dropped, so it is mid-stream on a screen it never drew; a capture puts the
+    /// pane and the new owner back in agreement in one command.
+    private func releasePanes(hostId: String, ownedBy epoch: UUID) {
+        let orphaned = (paneOwners[hostId] ?? [:]).filter { $0.value == epoch }.map(\.key)
+        guard !orphaned.isEmpty else { return }
+        for paneId in orphaned {
+            paneOwners[hostId]?.removeValue(forKey: paneId)
+            connections[hostId]?.repaintedPanes.remove(paneId)
+        }
+        guard connections[hostId] != nil else { return }
+        for paneId in orphaned where outputSubscribers[hostId]?[paneId]?.isEmpty == false {
+            requestRepaint(hostId: hostId, paneId: paneId)
+        }
+    }
+
     /// Hands pane bytes to the views showing it. `target` restricts delivery to one subscriber, which
     /// only a repaint ever does.
-    private func deliver(_ data: Data, hostId: String, paneId: String, target: UUID? = nil) {
+    private func deliver(
+        _ data: Data, hostId: String, paneId: String, target: UUID? = nil, from source: Connection? = nil
+    ) {
         guard let subscribers = outputSubscribers[hostId]?[paneId], !subscribers.isEmpty else { return }
+        // Loss is a property of the channel that lost it, and so is the pause that answers it.
+        let channel = source ?? connections[hostId]
 
         for (id, subscriber) in subscribers where target == nil || target == id {
             // The byte ceiling is enforced here rather than left to the stream's buffering policy,
@@ -1097,7 +1399,7 @@ public actor SessionService {
             // enough that a chatty pane fills it long before the high-water mark trips, and the pause
             // that is supposed to be the mechanism never fires at all.
             guard subscriber.outstanding < paneMaxBufferedBytes else {
-                connections[hostId]?.lossyPanes.insert(paneId)
+                channel?.lossyPanes.insert(paneId)
                 continue
             }
 
@@ -1116,7 +1418,7 @@ public actor SessionService {
                 // that much forever — enough overruns and the pane would sit permanently above the
                 // high-water mark, paused with nothing left to drain.
                 subscriber.outstanding += data.count - discarded.count
-                connections[hostId]?.lossyPanes.insert(paneId)
+                channel?.lossyPanes.insert(paneId)
             case .terminated:
                 break
             @unknown default:
@@ -1145,7 +1447,10 @@ public actor SessionService {
     /// let one struggling window grow without bound, and there is no way to serve a pane to one
     /// viewer and withhold it from another.
     private func applyFlowControl(hostId: String, paneId: String) {
-        guard let connection = connections[hostId] else { return }
+        // `refresh-client -A` is a property of the *client*, so the pause has to be asked of the one
+        // that is actually sending this pane. Asking the primary to pause a pane it is not streaming
+        // does nothing at all, silently, and the viewer that is drowning stays drowning.
+        guard let connection = streamingChannel(hostId: hostId, paneId: paneId) else { return }
         let outstanding = outputSubscribers[hostId]?[paneId]?.values.map(\.outstanding).max() ?? 0
         let isPaused = connection.pausedPanes[paneId] != nil
 
@@ -1178,6 +1483,14 @@ public actor SessionService {
               connection.lossyPanes.remove(paneId) != nil else { return }
         log("[\(hostId)] \(paneId) overran its buffer; repainting")
         requestRepaintAfterLoss(hostId: hostId, paneId: paneId)
+    }
+
+    /// The channel that streams a pane: whoever claimed it, else the primary.
+    private func streamingChannel(hostId: String, paneId: String) -> Connection? {
+        if let epoch = paneOwners[hostId]?[paneId], let owner = channel(of: hostId, epoch: epoch) {
+            return owner
+        }
+        return connections[hostId]
     }
 
     /// Repaints a pane after bytes were lost, rather than after it merely appeared on screen.
@@ -1602,6 +1915,10 @@ public actor SessionService {
     // MARK: - Disconnection and recovery
 
     private func channelClosed(hostId: String, epoch: UUID, error: Error?) {
+        if let follower = channel(of: hostId, epoch: epoch), case .follower(let sessionId) = follower.role {
+            followerChannelClosed(hostId: hostId, sessionId: sessionId, connection: follower, error: error)
+            return
+        }
         guard let connection = connections[hostId], connection.epoch == epoch else { return }
 
         // If the channel died before tmux ever spoke, whatever ssh printed is the real diagnosis:
@@ -1690,6 +2007,30 @@ public actor SessionService {
         }
     }
 
+    /// A follower channel ending is a much smaller event than the primary ending.
+    ///
+    /// It says one session stopped streaming — never that the host is unreachable, because the
+    /// primary is the evidence for that and it is still here. So there is no backoff, no circuit
+    /// breaker and no connection state to change: the session goes back to being a snapshot, and the
+    /// next reconcile makes another client if it is still on screen. Retrying immediately in a loop
+    /// is the one thing to avoid, since the usual reason a follower dies is that its session did.
+    private func followerChannelClosed(
+        hostId: String, sessionId: String, connection: Connection, error: Error?
+    ) {
+        let deliberate = connection.userInitiatedDisconnect
+        if followerChannels[hostId]?[sessionId]?.epoch == connection.epoch {
+            followerChannels[hostId]?.removeValue(forKey: sessionId)
+        }
+        teardown(hostId: hostId, connection: connection)
+        updateLiveSessions(hostId: hostId)
+        guard !deliberate else { return }
+
+        log("[\(hostId)] the client for \(sessionId) ended: \(error.map(describe) ?? "closed")")
+        // Whatever it was painting is now unowned; the primary picks those panes up if it can see
+        // them, and a repaint is how it starts from a screen it agrees with.
+        broadcastState()
+    }
+
     private func isAuthenticationFailure(_ reason: String) -> Bool {
         let lowered = reason.lowercased()
         return lowered.contains("permission denied")
@@ -1702,6 +2043,7 @@ public actor SessionService {
         connection.cancelTimers()
         connection.readTask?.cancel()
         connection.transport.terminate()
+        releasePanes(hostId: hostId, ownedBy: connection.epoch)
         // Nothing is going to answer anything now. A waiter left here would sit out its whole
         // timeout for an answer that cannot arrive.
         for (_, continuation) in connection.acknowledgements { continuation.resume() }

@@ -67,6 +67,29 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(confirmation?.runningCommands, ["vim", "vim"])
     }
 
+    /// ⌥ at the moment of the click is the user asserting they already know what the confirmation
+    /// would have told them, so the question is skipped and the window is killed by the same call
+    /// the confirmation would have made.
+    ///
+    /// Deliberately per-click: there is still no persistent "don't ask again" (F4.10), so the
+    /// assertion has to be made again for the next window.
+    func testOptionClickClosingAWindowSkipsTheConfirmation() {
+        let only = window("@7", name: "build", panes: ["%1", "%2"])
+        let model = AppModel()
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [only], isAttached: true),
+        ])]
+        let state = WindowState()
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+        state.selectedWindowId = "@7"
+        model.focus(state)
+
+        model.requestCloseWindow(in: state, skippingConfirmation: true)
+
+        XCTAssertNil(state.pendingClose, "⌥ must not raise the sheet it exists to skip")
+    }
+
     /// A window belonging to a host we know nothing about is not silently unlinked. Treating an
     /// unknown host as "not multi-linked" is the safe direction: it asks rather than acting.
     func testClosingAWindowOnAnUnknownHostAsks() {
@@ -370,6 +393,41 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(AppModel().claimWindowRequest())
     }
 
+    /// With every window closed there is nobody left to claim the request, so the model performs it
+    /// itself. Without this the menu bar extra — the whole reason the app stays alive with no windows
+    /// — switches to a session and nothing appears, and the request sits set for good.
+    func testAWindowRequestWithNothingOpenIsPerformedByTheModel() {
+        let model = AppModel()
+        model.hosts = [twoSessionHost]
+        var opened = 0
+        model.openAppWindow = { opened += 1 }
+
+        model.showSession(hostId: "local", sessionId: "$2")
+
+        XCTAssertEqual(opened, 1)
+        XCTAssertNil(model.requestedWindow, "a request nobody can see must not be left outstanding")
+        // The window that appears still starts where it was asked to.
+        XCTAssertEqual(model.consumeSeed()?.sessionId, "$2")
+    }
+
+    /// …and with a window on screen it must *not*, or the request is honoured twice: once here and
+    /// once by the window observing it.
+    func testAWindowRequestWithAWindowOpenIsLeftToThatWindow() {
+        let model = AppModel()
+        model.hosts = [twoSessionHost]
+        // Held, not discarded: the registry keeps windows weakly, so a released `WindowState` is
+        // indistinguishable from a closed window and this would test the case above instead.
+        let windows = openWindows(model, 1)
+        var opened = 0
+        model.openAppWindow = { opened += 1 }
+
+        model.openWindow(WindowSeed(hostId: "local", sessionId: "$2"))
+
+        XCTAssertEqual(opened, 0)
+        XCTAssertTrue(model.claimWindowRequest(), "the open window's claim is still there to make")
+        XCTAssertEqual(windows.count, 1)
+    }
+
     // MARK: - Showing what was just created
 
     /// Pushes a snapshot through the same path the channel uses, so pending reveals resolve.
@@ -400,6 +458,26 @@ final class AppModelTests: XCTestCase {
             model.takeSessionExpansion(hostId: "local", sessionId: "$7"),
             "the tree should open a session the user just made"
         )
+    }
+
+    /// The menu bar's plain New Session, once the last window has been closed: there is nothing to
+    /// reveal *in*, so the reveal has to bring its own window. Without this the session is created on
+    /// the server and nobody is ever shown it — no reveal was even queued.
+    func testCreatingASessionWithNothingOpenBringsItsOwnWindow() {
+        let model = AppModel()
+        model.hosts = [host(sessions: [])]
+        var opened = 0
+        model.openAppWindow = { opened += 1 }
+
+        // No window to reveal in, and no ⌥ either — the modifier is not what makes this one needed.
+        model.createSession(hostId: "local", name: "tetmux_1")
+
+        publish(model, [host(sessions: [
+            TmuxSession(id: "$7", name: "tetmux_1", windows: [window("@9", panes: ["%9"])], isAttached: true),
+        ])])
+
+        XCTAssertEqual(opened, 1)
+        XCTAssertEqual(model.consumeSeed()?.sessionId, "$7")
     }
 
     /// A new window is identified by not having been there before — not by whichever tmux made
@@ -498,6 +576,77 @@ final class AppModelTests: XCTestCase {
             TmuxSession(id: "$7", name: "tetmux_1", windows: [window("@9")], isAttached: true),
         ])])
         XCTAssertFalse(model.takeSessionExpansion(hostId: "local", sessionId: "$7"))
+    }
+
+    // MARK: - A client per displayed session
+
+    /// Two windows on one session ask for one client. A second client on the same session would
+    /// stream the same panes twice and buy nothing.
+    func testTwoWindowsOnTheSameSessionAskForOneClient() {
+        let model = AppModel()
+        model.hosts = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [window("@1")])])]
+        // Held: the model's window registry is weak, so a window nothing keeps alive is a window
+        // that closed the instant it opened.
+        let windows = (0..<2).map { _ -> WindowState in
+            let state = WindowState()
+            state.selectedHostId = "local"
+            state.selectedSessionId = "$1"
+            model.registerWindow(state)
+            return state
+        }
+        XCTAssertEqual(model.displayedSessions, ["local": ["$1"]])
+        XCTAssertEqual(windows.count, 2)
+    }
+
+    /// Two sessions on screen are two clients, which is the entire point: one tmux client streams
+    /// output for one session, so the second window used to be a still frame.
+    func testEverySessionOnScreenIsAskedFor() {
+        let model = AppModel()
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [window("@1")]),
+            TmuxSession(id: "$2", name: "two", windows: [window("@2")]),
+        ])]
+        let windows = ["$1", "$2"].map { sessionId -> WindowState in
+            let state = WindowState()
+            state.selectedHostId = "local"
+            state.selectedSessionId = sessionId
+            model.registerWindow(state)
+            return state
+        }
+        // Plus a window showing nothing at all, which asks for nothing.
+        let empty = WindowState()
+        model.registerWindow(empty)
+
+        XCTAssertEqual(model.displayedSessions, ["local": ["$1", "$2"]])
+        XCTAssertEqual(windows.count, 2)
+    }
+
+    /// Closing a window gives its client back, unless another window is still showing that session.
+    func testAClosedWindowStopsAskingForItsSession() {
+        let model = AppModel()
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [window("@1")]),
+            TmuxSession(id: "$2", name: "two", windows: [window("@2")]),
+        ])]
+        let shared = WindowState()
+        shared.selectedHostId = "local"
+        shared.selectedSessionId = "$1"
+        let other = WindowState()
+        other.selectedHostId = "local"
+        other.selectedSessionId = "$2"
+        let duplicate = WindowState()
+        duplicate.selectedHostId = "local"
+        duplicate.selectedSessionId = "$1"
+        for state in [shared, other, duplicate] { model.registerWindow(state) }
+
+        model.unregisterWindow(other.id)
+        XCTAssertEqual(model.displayedSessions, ["local": ["$1"]])
+
+        model.unregisterWindow(duplicate.id)
+        XCTAssertEqual(model.displayedSessions, ["local": ["$1"]], "the other window still shows it")
+
+        model.unregisterWindow(shared.id)
+        XCTAssertEqual(model.displayedSessions, [:])
     }
 
     // MARK: - Window labels
@@ -627,6 +776,19 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(state.pendingKillSession?.sessionName, "work")
         XCTAssertEqual(state.pendingKillSession?.windowCount, 2)
         XCTAssertEqual(state.pendingKillSession?.runningCommands, ["vim", "vim", "vim"])
+    }
+
+    /// ⌥ skips it here too. Same modifier, same meaning, one level up the tree.
+    func testOptionClickKillingASessionSkipsTheConfirmation() {
+        let model = AppModel()
+        model.hosts = [twoSessionHost]
+        let state = WindowState()
+
+        model.requestKillSession(
+            in: state, hostId: "local", sessionId: "$1", skippingConfirmation: true
+        )
+
+        XCTAssertNil(state.pendingKillSession)
     }
 
     /// A session that is already gone raises nothing, rather than a confirmation naming a session

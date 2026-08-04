@@ -171,26 +171,42 @@ public final class AppModel {
         activeScope = state.scope(in: hosts)
         focusOrder.removeAll { $0 == state.id }
         focusOrder.append(state.id)
-        attachIfNeeded(state)
+        syncDisplayedSessions()
     }
 
-    /// Moves the tmux client to whatever the newly focused window is showing.
+    /// Tells the service which sessions are on screen, so it can keep a tmux client attached to each.
     ///
-    /// Only the attached session receives `%output`, and there is one channel per host, so a window
-    /// showing any other session of that host is a still frame. Clicking into a window is already the
-    /// user saying "I want to work here"; making them then notice a banner and press a button to make
-    /// it live is asking twice.
-    ///
-    /// The cost is real and unavoidable: attaching here detaches there, so windows on another session
-    /// of the same host go to snapshots. That is what the banner is left to say.
-    private func attachIfNeeded(_ state: WindowState) {
-        guard let hostId = state.selectedHostId,
-              let sessionId = state.selectedSessionId,
-              let host = hosts.first(where: { $0.id == hostId }),
-              host.connectionState.isActive,
-              host.activeSessionId != sessionId else { return }
-        Task { await service.switchSession(hostId: hostId, sessionId: sessionId) }
+    /// This replaced moving one client around as the user changed windows. A tmux client is attached
+    /// to exactly one session and `%output` arrives only for that session, so with a single client
+    /// every window on a different session of the same host was a still frame — and making one live
+    /// necessarily froze another. What is on screen is a property of all the windows together, not of
+    /// whichever is key, so this is recomputed from `openWindows` whenever any of it can have changed:
+    /// focus, selection, a window opening or closing, and each topology snapshot (a session only
+    /// becomes attachable once tmux has named it).
+    public func syncDisplayedSessions() {
+        let displayed = displayedSessions
+        guard displayed != lastDisplayedSessions else { return }
+        lastDisplayedSessions = displayed
+        Task { await service.setDisplayedSessions(displayed) }
     }
+
+    /// What every open window is showing, collapsed to a set of sessions per host.
+    ///
+    /// A set, so two windows on one session ask for one client rather than two: a second client on
+    /// the same session would stream the same panes a second time for no benefit. Non-private
+    /// because it is the whole decision, and it needs no windows on screen to be asserted.
+    var displayedSessions: [String: Set<String>] {
+        var displayed: [String: Set<String>] = [:]
+        for window in openWindows {
+            guard let hostId = window.selectedHostId, let sessionId = window.selectedSessionId else { continue }
+            displayed[hostId, default: []].insert(sessionId)
+        }
+        return displayed
+    }
+
+    /// What was last sent, so a redundant call does not cost an actor hop on every keystroke that
+    /// happens to run through `focus`.
+    @ObservationIgnored private var lastDisplayedSessions: [String: Set<String>] = [:]
 
     /// Called by each window as it appears and disappears.
     public func registerWindow(_ state: WindowState) {
@@ -198,6 +214,7 @@ public final class AppModel {
         guard !windowOrder.contains(state.id) else { return }
         windowOrder.append(state.id)
         focusOrder.append(state.id)
+        syncDisplayedSessions()
     }
 
     public func unregisterWindow(_ id: UUID) {
@@ -205,6 +222,9 @@ public final class AppModel {
         focusOrder.removeAll { $0 == id }
         windowsById.removeValue(forKey: id)
         if activeWindowState?.id == id { activeWindowState = nil }
+        // The session that window was showing may now be on no screen at all, and its client is one
+        // nobody needs.
+        syncDisplayedSessions()
     }
 
     /// Every registered window that is still alive, in registration order.
@@ -263,6 +283,11 @@ public final class AppModel {
 
         for stored in await store.loadHosts() {
             await service.addHost(stored.asConfig)
+            // The local server is always reachable, needs no credentials and cannot prompt for
+            // anything, so leaving it behind a click is a step with no decision in it. Remote hosts
+            // still wait to be asked: connecting one can raise a password sheet, and raising several
+            // unbidden at launch is worse than a click.
+            if stored.isLocal { connect(stored.id) }
         }
 
         // F4.18 — wake and network-path changes drive reconnection directly rather than waiting
@@ -278,6 +303,10 @@ public final class AppModel {
         hosts = snapshot
         respondToAuthenticationPrompts(in: snapshot)
         resolveReveals()
+        // A window can be pointed at a session before tmux has told us it exists — creating one, or
+        // reconnecting — and a session can only be attached to by id once it does. Every snapshot is
+        // therefore a chance for a displayed session to become attachable.
+        syncDisplayedSessions()
     }
 
     // MARK: - Authentication
@@ -383,18 +412,18 @@ public final class AppModel {
         session sessionId: String?,
         window windowId: String?
     ) {
-        let isNewSession = sessionId != nil && sessionId != hosts.first { $0.id == hostId }?.activeSessionId
         state.selectedHostId = hostId
         state.selectedSessionId = sessionId
         state.selectedWindowId = windowId
         state.focusedPaneId = nil
         activeScope = state.scope(in: hosts)
+        // What this window shows has changed, so the set of sessions needing a client has too. It no
+        // longer moves the one client to the newly selected session — that is what made every other
+        // window a still frame, and it is why picking a session used to show the not-attached banner
+        // for the moment between the click and tmux answering `switch-client`.
+        syncDisplayedSessions()
 
         Task {
-            // Moving the client comes first: tmux only streams output for the attached session.
-            if isNewSession, let sessionId {
-                await service.switchSession(hostId: hostId, sessionId: sessionId)
-            }
             if let windowId {
                 await service.selectWindow(hostId: hostId, windowId: windowId)
             }
@@ -549,10 +578,22 @@ public final class AppModel {
     }
 
     /// Closes the frontmost window's tmux window, raising the confirmation in `state` if one is needed.
-    public func requestCloseWindow(in state: WindowState) {
+    ///
+    /// `skippingConfirmation` is ⌥ held at the moment of the click. The confirmation exists because
+    /// closing the last link of a window kills what is running in it and the user cannot be assumed
+    /// to know that (F4.10); holding ⌥ *is* saying so, which is what the modifier means on a
+    /// destructive control everywhere else in macOS. It suppresses the question and nothing else —
+    /// the F4.9 unlink path below never asked in the first place, and there is still no persistent
+    /// "don't ask again", so the assertion has to be made again for every window.
+    public func requestCloseWindow(in state: WindowState, skippingConfirmation: Bool = false) {
         let scope = activeScope
         guard let hostId = scope.hostId, let window = window(in: scope) else { return }
-        state.pendingClose = closeWindow(hostId: hostId, window: window)
+        guard let pending = closeWindow(hostId: hostId, window: window) else { return }
+        if skippingConfirmation {
+            killWindow(hostId: pending.hostId, windowId: pending.windowId)
+        } else {
+            state.pendingClose = pending
+        }
     }
 
     /// F4.9 — closing a tab unlinks the window. It never ends what is running in it.
@@ -654,9 +695,19 @@ public final class AppModel {
     /// Unlike closing a tab (F4.9) there is no non-destructive reading of this: tmux has no "unlink
     /// session", so every window in it and everything running in those windows ends. The confirmation
     /// names what is about to be lost, and there is no way to turn it off.
-    public func requestKillSession(in state: WindowState, hostId: String, sessionId: String) {
+    /// `skippingConfirmation` is ⌥ at the moment of the click — see `requestCloseWindow`.
+    public func requestKillSession(
+        in state: WindowState,
+        hostId: String,
+        sessionId: String,
+        skippingConfirmation: Bool = false
+    ) {
         guard let host = hosts.first(where: { $0.id == hostId }),
               let session = host.sessions.first(where: { $0.id == sessionId }) else { return }
+        guard !skippingConfirmation else {
+            killSession(hostId: hostId, sessionId: sessionId)
+            return
+        }
         state.pendingKillSession = PendingKillSession(
             hostId: hostId,
             sessionId: sessionId,
@@ -772,9 +823,13 @@ public final class AppModel {
     ) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        if state != nil || preferNewWindow {
+        // Nothing to reveal *in* means the reveal has to bring its own window. That is the menu bar's
+        // ordinary New Session once the last window has been closed: without this the session is
+        // created on the server and nobody is ever shown it.
+        let opensNewWindow = preferNewWindow || (state == nil && openWindows.isEmpty)
+        if state != nil || opensNewWindow {
             pendingReveals.append(RevealRequest(
-                state: preferNewWindow ? nil : state, opensNewWindow: preferNewWindow,
+                state: opensNewWindow ? nil : state, opensNewWindow: opensNewWindow,
                 hostId: hostId, sessionName: trimmed, sessionId: nil,
                 knownWindowIds: [], madeAt: .now
             ))
@@ -845,10 +900,32 @@ public final class AppModel {
     /// which is right for "show me this session" and wrong for ⌘N.
     @ObservationIgnored private var pendingSeed: WindowSeed?
 
+    /// How to open a window when there is no window open to do it.
+    ///
+    /// `requestedWindow` is only ever observed from inside a window, so with every window closed
+    /// nobody claims the request and it sits set for good — which is the whole of the menu bar
+    /// extra's failure mode once the last window has gone: the session is switched to, or created,
+    /// and nothing appears. `openWindow` is an `@Environment` action and so can only be read by a
+    /// view; this is one captured from a view that has one. It outlives that view because it
+    /// resolves against the scene graph rather than the window it was read in.
+    @ObservationIgnored public var openAppWindow: (() -> Void)?
+
+    /// A plain new window, for callers outside SwiftUI — the Dock menu is built by AppKit and has no
+    /// environment of its own to read `openWindow` from.
+    public func openNewAppWindow() {
+        openAppWindow?()
+    }
+
     /// Asks for a new window showing `seed`. The request is picked up by whichever window is on screen.
     public func openWindow(_ seed: WindowSeed) {
         pendingSeed = seed
         requestedWindow = seed
+        // With nothing on screen to claim it, the request has to be performed here or not at all.
+        // `claimWindowRequest` still runs, so the window that appears takes the seed by the ordinary
+        // route and no later ⌘N inherits a request that was never picked up.
+        if openWindows.isEmpty, let openAppWindow, claimWindowRequest() {
+            openAppWindow()
+        }
     }
 
     /// Claims the outstanding window request, if there is one. Returns whether the caller should open.

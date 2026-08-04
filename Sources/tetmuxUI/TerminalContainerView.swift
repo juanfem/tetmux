@@ -265,9 +265,51 @@ public struct TerminalContainerView: View {
         return result
     }
 
+    /// How far an unfocused pane drops back when the window is split.
+    ///
+    /// Chosen so that default-coloured text composites onto the spec's inactive grey: the pane sits on
+    /// `textBackgroundColor`, so this blend puts black-on-white text at `#75757a` and does the
+    /// equivalent thing in dark mode instead of inverting into a light-mode constant. It is *up* from
+    /// the 0.45 it was, which is the point of turn 4 — the frame got quieter, so the panes it is not
+    /// pointing at no longer have to be washed out for it to be found.
+    ///
+    /// This is a composite rather than a foreground colour on the emulator, which is what the spec's
+    /// wording asks for and SwiftTerm cannot honestly give: `nativeForegroundColor` recolours only text
+    /// the program left at the default, so a pane running `ls --color` or an editor would not dim at
+    /// all, and setting it repaints nothing already on screen.
+    private static let inactivePaneOpacity: Double = 0.54
+
+    /// The active pane's frame: the accent with most of its saturation taken out, so it sits below the
+    /// pane's own text in contrast rather than competing with it.
+    ///
+    /// Saturation and not opacity, which is the distinction the spec is drawing and the one that is easy
+    /// to get wrong. Fading the accent toward the pane's ground only *lightens* it — the blue channel
+    /// stays pinned at full, so the result is a pale accent rather than a desaturated one, and it still
+    /// reads as coloured. Cutting saturation instead reaches the sketch's `#a8c4e8` almost exactly.
+    ///
+    /// Derived from `controlAccentColor` rather than written down as that hex, for the reason the
+    /// sidebar avoids literal fills: the accent is the user's choice, and desaturating whatever they
+    /// picked is right for a graphite or pink accent where a hardcoded blue is simply wrong. The dynamic
+    /// provider re-resolves it per appearance, so dark mode gets the dark accent treated the same way.
+    private static let activePaneBorder = Color(nsColor: NSColor(name: nil) { appearance in
+        var resolved = NSColor.controlAccentColor
+        appearance.performAsCurrentDrawingAppearance {
+            guard let accent = NSColor.controlAccentColor.usingColorSpace(.sRGB) else { return }
+            resolved = NSColor(
+                hue: accent.hueComponent,
+                saturation: accent.saturationComponent * 0.30,
+                brightness: accent.brightnessComponent * 0.91,
+                alpha: 1
+            )
+        }
+        return resolved
+    })
+
     private func pane(_ paneId: String, cols: Int, rows: Int) -> some View {
         let focused = focusedPaneId == paneId
             || (focusedPaneId == nil && paneId == window.preferredPaneId)
+        // A single pane is not ambiguous, so it is neither framed nor dimmed.
+        let split = window.paneCount > 1
         return TerminalPaneView(
             hostId: hostId,
             paneId: paneId,
@@ -278,11 +320,28 @@ public struct TerminalContainerView: View {
             service: service,
             onFocusRequest: { focus(paneId) }
         )
-        .overlay(alignment: .top) {
-            // A two-point edge is enough to say which pane has the keyboard, without chrome that
-            // would eat a row of cells.
-            if focused && window.paneCount > 1 {
-                Rectangle().fill(Color.accentColor).frame(height: 2)
+        // Inactive panes step back so the focused one is findable without reading any of them. Kept
+        // mild rather than dramatic: the other panes are usually still worth watching, which is the
+        // whole reason the window is split.
+        .opacity(split && !focused ? Self.inactivePaneOpacity : 1)
+        .overlay {
+            // A frame on all four sides, not an edge between two panes.
+            //
+            // The two-point edge this replaced was drawn along the top of the focused pane, which put
+            // it exactly where the divider above it already was — so it read as a divider that had
+            // turned blue, and which of the two panes it belonged to was a guess. Enclosing the pane
+            // names it. Inset by a point so the stroke never lands on the seam itself, and the
+            // dividers stay neutral so nothing competes with it.
+            //
+            // One point of desaturated accent, not one and a half of the full one. The saturated frame
+            // was permanent and competed with the pane's own text for attention — and it is not the
+            // real focus indicator anyway. The block cursor is, and it should stay the loudest thing on
+            // screen.
+            if split && focused {
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(Self.activePaneBorder, lineWidth: 1)
+                    .padding(1)
+                    .allowsHitTesting(false)
             }
         }
         .contentShape(Rectangle())

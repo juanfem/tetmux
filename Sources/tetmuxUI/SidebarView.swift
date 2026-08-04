@@ -27,38 +27,48 @@ struct SidebarView: View {
     /// exist on every host, so an unqualified key lights up the matching row on every other host too.
     @State private var hoveredRow: String?
 
+    /// Whether the pointer is over the footer's Add host row.
+    @State private var addHostHovered = false
+
+    /// ⌥, which turns every destructive row button into one that acts without asking. Held here so
+    /// the glyph can say so *before* the click rather than after it — a modifier whose only evidence
+    /// is what already happened is not a modifier anyone can learn.
+    @State private var modifiers = ModifierKeyMonitor()
+
     var body: some View {
-        List {
-            Section {
-                ForEach(model.hosts) { host in
-                    hostGroup(host)
-                }
-            } header: {
-                HStack(spacing: 8) {
-                    Text("HOSTS").font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
-                    Spacer()
-                    Button { setAllExpanded(true) } label: {
-                        Image(systemName: "chevron.down.square").font(.caption)
+        VStack(spacing: 0) {
+            List {
+                Section {
+                    ForEach(model.hosts) { host in
+                        hostGroup(host)
                     }
-                    .buttonStyle(.plain)
-                    .help("Expand every host and session")
-                    .accessibilityLabel("Expand all")
-                    Button { setAllExpanded(false) } label: {
-                        Image(systemName: "chevron.right.square").font(.caption)
+                } header: {
+                    HStack(spacing: 2) {
+                        Text("HOSTS").font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
+                        Spacer()
+                        // Both stay one click — the whole point of the pair is that neither hides
+                        // behind a menu — but they no longer read as the same glyph at this size.
+                        HeaderButton(help: "Collapse every host and session", label: "Collapse all") {
+                            setAllExpanded(false)
+                        } icon: {
+                            RuleStackIcon(showsMiddleRule: false)
+                        }
+                        HeaderButton(help: "Expand every host and session", label: "Expand all") {
+                            setAllExpanded(true)
+                        } icon: {
+                            RuleStackIcon(showsMiddleRule: true)
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .help("Collapse every host and session")
-                    .accessibilityLabel("Collapse all")
-                    Button { model.presentNewHost(in: state) } label: {
-                        Image(systemName: "plus").font(.caption)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Add host")
-                    .accessibilityLabel("Add host")
+                    .padding(.trailing, RowAction.edgeInset)
                 }
             }
+            .listStyle(.sidebar)
+
+            // Add host is the one action that belongs to the list rather than to a row, so it sits in
+            // the dead space under the tree instead of competing with the view controls in the header.
+            Divider()
+            addHostFooter
         }
-        .listStyle(.sidebar)
         // A session or window created from this tree opens as soon as tmux confirms it exists.
         .onChange(of: model.sessionsToExpand) { _, _ in
             for host in model.hosts {
@@ -69,6 +79,28 @@ struct SidebarView: View {
                 }
             }
         }
+    }
+
+    private var addHostFooter: some View {
+        Button { model.presentNewHost(in: state) } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "plus").font(.callout).foregroundStyle(.secondary)
+                Text("Add host").font(.subheadline)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(addHostHovered ? Color.primary.opacity(0.07) : Color.clear)
+        )
+        .padding(RowAction.edgeInset)
+        .onHover { addHostHovered = $0 }
+        .help("Add a host")
+        .accessibilityLabel("Add host")
     }
 
     // MARK: - Keys
@@ -199,11 +231,20 @@ struct SidebarView: View {
                     Text(host.config.name)
                         .fontWeight(.medium)
                         .lineLimit(1)
-                        // Greyed when there is nothing behind it, so a screen of hosts reads as
-                        // "these three are live" without picking apart the badges.
-                        .foregroundStyle(live ? .primary : .secondary)
+                        // Deliberately *not* greyed when the host is offline. Greying the name as well
+                        // as the rail and the label made an idle host read as a disabled one — three
+                        // greys saying the same thing, and the one carrying the identity is the one
+                        // that had to stay legible. The rail and the status label carry the state.
+                        .foregroundStyle(.primary)
                     Spacer(minLength: 4)
                     hostStatusLabel(host)
+                    // Only while closed, exactly as a collapsed session shows its window count: with
+                    // the sessions listed underneath, the number is the count of the rows below it.
+                    if !isExpanded(host), !host.sessions.isEmpty {
+                        Text("\(host.sessions.count)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .contentShape(Rectangle())
             }
@@ -211,32 +252,38 @@ struct SidebarView: View {
 
             // Item 3 — a host is where sessions come from, so the button to make one lives on it.
             let showsActions = hoveredRow == host.id || host.id == state.selectedHostId
-            RowButton(
-                systemName: "chevron.down.square",
-                help: "Expand every session on \(host.config.name)",
-                isVisible: showsActions
-            ) {
-                setExpanded(host, true)
-            }
-            RowButton(
-                systemName: "chevron.right.square",
-                help: "Collapse every session on \(host.config.name)",
-                isVisible: showsActions
-            ) {
-                setExpanded(host, false)
-            }
-            RowButton(
-                systemName: "plus",
-                help: "New session on \(host.config.name)",
-                isVisible: showsActions
-            ) {
-                model.createSessionWithDefaultName(hostId: host.id, revealIn: state)
+            rowActions {
+                RowButton(
+                    glyph: .plus,
+                    help: "New session on \(host.config.name)",
+                    isVisible: showsActions
+                ) {
+                    model.createSessionWithDefaultName(hostId: host.id, revealIn: state)
+                }
+                // Laid out whether or not the host is live, so a host connecting or dropping does not
+                // shift the row's other button sideways under the pointer.
+                RowButton(
+                    glyph: .cross,
+                    help: "Disconnect from \(host.config.name)",
+                    isVisible: showsActions && live
+                ) {
+                    model.disconnect(host.id)
+                }
             }
         }
         .onHover { hovering(host.id, $0) }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Host \(host.config.name), \(host.connectionState.accessibilityDescription)")
+        .accessibilityLabel(
+            "Host \(host.config.name), \(host.connectionState.accessibilityDescription), "
+                + "\(host.sessions.count) sessions"
+        )
         .contextMenu {
+            // Expanding or collapsing one host's sessions used to be two of the four buttons crowded
+            // onto the row's right edge. The row now carries only the two actions the spec assigns to
+            // a host, so these keep a home here rather than disappearing.
+            Button("Expand All Sessions") { setExpanded(host, true) }
+            Button("Collapse All Sessions") { setExpanded(host, false) }
+            Divider()
             if host.connectionState.isActive {
                 Button("New Session") { model.createSessionWithDefaultName(hostId: host.id, revealIn: state) }
                 Button("Detach Other Clients") {
@@ -306,9 +353,12 @@ struct SidebarView: View {
                 model.select(in: state, host: host.id, session: session.id, window: session.activeWindow?.id)
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: session.isAttached ? "macwindow.badge.plus" : "macwindow")
-                        .font(.caption)
-                        .foregroundStyle(session.isAttached ? Color.accentColor : .secondary)
+                    // A session is the one thing in the tree that *contains* windows, so it is the
+                    // one layered glyph (§2). Colour still carries what *tetmux* is streaming — not
+                    // `session_attached`, which counts every client of the server including
+                    // terminals elsewhere on the machine. Accented means these panes move.
+                    SessionStackIcon()
+                        .foregroundStyle(host.isLive(session.id) ? Color.accentColor : .secondary)
                     Text(session.name).font(.subheadline).lineLimit(1).truncationMode(.tail)
                     Spacer(minLength: 4)
                     // Only while closed: with the windows listed underneath, a count is just the
@@ -329,24 +379,40 @@ struct SidebarView: View {
                 focus(host: host, session: session)
             })
 
-            RowButton(
-                systemName: "plus",
-                help: "New window in \(session.name)",
-                isVisible: hoveredRow == rowKey || isSelected
-            ) {
-                model.newWindow(hostId: host.id, sessionId: session.id, revealIn: state)
-            }
-            RowButton(
-                systemName: "xmark",
-                help: "Kill \(session.name)",
-                isVisible: hoveredRow == rowKey || isSelected
-            ) {
-                model.requestKillSession(in: state, hostId: host.id, sessionId: session.id)
+            rowActions {
+                RowButton(
+                    glyph: .plus,
+                    help: "New window in \(session.name)",
+                    isVisible: hoveredRow == rowKey || isSelected
+                ) {
+                    model.newWindow(hostId: host.id, sessionId: session.id, revealIn: state)
+                }
+                // Inline rather than behind an overflow menu: closing a run of sessions is one click
+                // and one confirmation each, not a menu opened per row. It already asks before
+                // killing — unless ⌥ is down, which is how a run of them becomes one click each.
+                RowButton(
+                    glyph: .cross,
+                    help: modifiers.isOptionHeld
+                        ? "Kill \(session.name) without asking"
+                        : "Kill \(session.name)",
+                    isVisible: hoveredRow == rowKey || isSelected,
+                    isArmed: modifiers.isOptionHeld
+                ) {
+                    model.requestKillSession(
+                        in: state, hostId: host.id, sessionId: session.id,
+                        skippingConfirmation: OptionKey.isHeld
+                    )
+                }
             }
         }
         .padding(.leading, 14)
         .onHover { hovering(rowKey, $0) }
-        .accessibilityLabel("Session \(session.name), \(session.windows.count) windows")
+        // Liveness used to be a second glyph as well as a colour; the layered icon is now the same
+        // shape either way, so the state it carries has to be said here in words.
+        .accessibilityLabel(
+            "Session \(session.name), \(session.windows.count) windows, "
+                + (host.isLive(session.id) ? "attached" : "not attached")
+        )
         .contextMenu {
             Button("Rename Session…") {
                 model.requestRenameSession(in: state, hostId: host.id, sessionId: session.id)
@@ -404,14 +470,18 @@ struct SidebarView: View {
                     Circle()
                         .fill(window.hasActivity ? Color.accentColor : Color.clear)
                         .frame(width: 5, height: 5)
+                    // §3 — the pane glyph describes the window, so it sits with the row's other
+                    // icons rather than at the right edge, where it read as a third button. The slot
+                    // is reserved whether or not the window is split, so every name starts at the
+                    // same x; §2 leaves it never empty, since one pane is a plain rectangle.
+                    WindowPaneIcon(split: Self.splitAxis(window))
+                        .foregroundStyle(.secondary)
+                        .frame(width: TreeIcon.slot, height: TreeIcon.slot)
                     Text(label)
                         .font(.subheadline)
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Spacer(minLength: 4)
-                    if window.paneCount > 1 {
-                        Image(systemName: "square.split.2x1").font(.caption2).foregroundStyle(.secondary)
-                    }
                 }
                 .contentShape(Rectangle())
             }
@@ -424,13 +494,18 @@ struct SidebarView: View {
                 focus(host: host, session: session, window: window)
             })
 
-            RowButton(
-                systemName: "xmark",
-                help: "Close \(window.name)",
-                isVisible: hoveredRow == rowKey || isSelected
-            ) {
-                model.select(in: state, host: host.id, session: session.id, window: window.id)
-                model.requestCloseWindow(in: state)
+            rowActions {
+                RowButton(
+                    glyph: .cross,
+                    help: modifiers.isOptionHeld
+                        ? "Close \(window.name) without asking"
+                        : "Close \(window.name)",
+                    isVisible: hoveredRow == rowKey || isSelected,
+                    isArmed: modifiers.isOptionHeld
+                ) {
+                    model.select(in: state, host: host.id, session: session.id, window: window.id)
+                    model.requestCloseWindow(in: state, skippingConfirmation: OptionKey.isHeld)
+                }
             }
         }
         .padding(.leading, 32)
@@ -459,6 +534,32 @@ struct SidebarView: View {
         }
     }
 
+    /// Which way the window's outermost seam runs, or `nil` when it has a single pane.
+    ///
+    /// The *root* container and no deeper one: the icon draws one rule, and the rule it should draw
+    /// is the split the user would see first. A nested seam has no room to be shown at 13px and
+    /// would contradict the outer one if it were.
+    static func splitAxis(_ window: TmuxWindow) -> SplitDirection? {
+        guard case .container(let direction, _, _, _, _, _) = window.layoutTree else {
+            // No layout yet. `list-panes` can already say there are several, so say *divided* rather
+            // than lying about a window that is about to redraw as one — the axis is a guess only
+            // until the first `%layout-change`, which is the very next thing to arrive.
+            return window.paneCount > 1 ? .leftRight : nil
+        }
+        return direction
+    }
+
+    // MARK: - Row actions
+
+    /// The trailing action group of a row.
+    ///
+    /// One place for the spacing rules so they cannot drift back into per-row variation, which is what
+    /// this replaced: every row's right edge used to space, size and reveal its buttons differently.
+    private func rowActions<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: RowAction.gap, content: content)
+            .padding(.trailing, RowAction.edgeInset)
+    }
+
     /// Tracks the hovered row without letting a stale leave-event clear a newer enter-event.
     private func hovering(_ rowKey: String, _ isInside: Bool) {
         if isInside {
@@ -469,30 +570,256 @@ struct SidebarView: View {
     }
 }
 
+/// Geometry every sidebar control shares.
+///
+/// Constants rather than literals at each call site, because the thing being fixed was that the rows
+/// disagreed with each other: a 12px glyph here, a 14px hit box there, and buttons flush against the
+/// scroller on one row and inset on the next.
+private enum RowAction {
+    /// The hit target. A bare glyph is not one — 22pt is.
+    static let size: CGFloat = 22
+    static let radius: CGFloat = 5
+    /// Between the additive button and the destructive one. `+` and `✕` are never adjacent.
+    static let gap: CGFloat = 6
+    /// From the sidebar's inner edge, so nothing sits flush against the scroller.
+    static let edgeInset: CGFloat = 6
+    /// Opacity only, and short. Anything that changes layout would shuffle the tree under the pointer.
+    static let reveal = Animation.easeInOut(duration: 0.12)
+
+    /// Under the pointer, and only there — a button has no frame and no fill at rest.
+    ///
+    /// One rule rather than a plain and a selected variant, because a translucent darkening composites
+    /// correctly over either: on the sidebar material it is the spec's `#dedee1`, and on a selected
+    /// row's accent tint it is that tint a comparable step darker, which is what the spec asks for
+    /// there. A literal pair of hex fills would have to be chosen against a background this control
+    /// cannot see, and would invert wrongly in dark mode besides.
+    static let hoverFill = Color.primary.opacity(0.10)
+}
+
+/// The line weight and slot width shared by everything the sidebar *draws* rather than sets in a font.
+private enum TreeIcon {
+    /// One weight across the tree icons and the row buttons alike, so a row has a single line weight
+    /// from its leading glyph to its trailing action. SF Symbols was the thing breaking that: its
+    /// strokes are tuned per symbol and came out heavier than anything drawn beside them.
+    static let stroke: CGFloat = 1.3
+    /// Reserved on every window row, split or not, so all the names in a session start at the same x.
+    static let slot: CGFloat = 13
+}
+
 /// A small action on a sidebar row.
 ///
 /// Always laid out and only sometimes visible: hiding it outright would resize the row under the
 /// pointer, and the tree would shuffle as the mouse crossed it — the same reason the tab bar's close
-/// button works this way.
+/// button works this way. The reveal is therefore opacity and nothing else.
+///
+/// Unframed and unfilled at rest, so the 22pt hit target is invisible until the pointer is on the
+/// button itself. The framed version this replaced put a bordered box on every revealed row, which on
+/// a hovered or selected row — already tinted — stacked two rectangles of chrome behind a glyph and
+/// made the right edge of the tree the loudest thing in it.
 private struct RowButton: View {
-    let systemName: String
+    let glyph: RowActionGlyph.Kind
     let help: String
     let isVisible: Bool
+    /// ⌥ is down, so this button will act rather than ask.
+    ///
+    /// Said in colour rather than as a different glyph. The two glyphs in the tree are the same two
+    /// rules at two rotations precisely so they weigh the same, and a third shape drawn to sit
+    /// between them would have to be matched all over again for a state that lasts as long as a key
+    /// is held. Red is also the one thing here that reads at a glance as *this does not come back*.
+    var isArmed: Bool = false
     let action: () -> Void
+
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 8, weight: .bold))
-                .frame(width: 14, height: 14)
-                .contentShape(Rectangle())
+            RowActionGlyph(kind: glyph)
+                .foregroundStyle(tint)
+                .frame(width: RowAction.size, height: RowAction.size)
+                .background(
+                    RoundedRectangle(cornerRadius: RowAction.radius)
+                        .fill(isHovered ? RowAction.hoverFill : Color.clear)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: RowAction.radius))
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
         .opacity(isVisible ? 1 : 0)
+        .animation(RowAction.reveal, value: isVisible)
         .allowsHitTesting(isVisible)
+        .onHover { isHovered = $0 && isVisible }
         .help(help)
         .accessibilityLabel(help)
+        .accessibilityHidden(!isVisible)
+    }
+
+    private var tint: AnyShapeStyle {
+        if isArmed { return AnyShapeStyle(Color.red) }
+        return AnyShapeStyle(isHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+    }
+}
+
+/// The `+` and the `✕` on a row action, drawn as rules rather than set from SF Symbols.
+///
+/// Both are the *same two rules*, one pair crossed at right angles and one pair rotated 45°, which is
+/// the only way the two buttons weigh the same. `Image(systemName: "xmark")` beside
+/// `Image(systemName: "plus")` does not: a diagonal stroke lays more ink across a row of pixels than an
+/// axis-aligned one, so the `✕` read as heavier at every point size and every weight the two were
+/// tried at. Rotating leaves the ✕ spanning 8pt where the + spans 11 — that is the optical match, not
+/// a mistake to correct.
+private struct RowActionGlyph: View {
+    enum Kind { case plus, cross }
+
+    let kind: Kind
+
+    /// The rule length before rotation.
+    private static let length: CGFloat = 11
+
+    var body: some View {
+        ZStack {
+            rule.rotationEffect(.degrees(kind == .plus ? 0 : 45))
+            rule.rotationEffect(.degrees(kind == .plus ? 90 : -45))
+        }
+        .frame(width: Self.length, height: Self.length)
+    }
+
+    private var rule: some View {
+        Capsule().frame(width: Self.length, height: TreeIcon.stroke)
+    }
+}
+
+/// A session: windows layered behind one another, and the only layered glyph in the tree.
+///
+/// Two 11×8 rectangles, the front one offset 4 down and right (§2).
+private struct SessionStackIcon: View {
+    private static let rect = CGSize(width: 11, height: 8)
+    private static let offset: CGFloat = 4
+    /// Clearance cut around the front rectangle. Without it the two merge into a filled blob at this
+    /// size — the failure the spec warns about, and it is worst on the selection tint.
+    private static let clearance: CGFloat = 1.3
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            outline
+            // The gap, cut out rather than painted.
+            //
+            // The spec calls for a background-coloured fill, but a sidebar row has no one background:
+            // it is the sidebar material, or a hover highlight, or the selection tint over either, and
+            // painting the wrong one shows as a pale smear across the rear window. `destinationOut`
+            // erases to transparent instead, so whatever the row is actually sitting on shows through
+            // and the icon needs to know nothing about it.
+            //
+            // Filled with an explicit opaque colour, and that is the whole trick rather than a detail.
+            // `destinationOut` removes destination alpha *in proportion to the source's*, so an eraser
+            // that inherits the ambient `foregroundStyle` erases only as much as that style is opaque —
+            // and `Color.secondary` is translucent. The live icon (accent, fully opaque) cut a clean
+            // gap while every idle one was left with a half-erased grey smear across both rectangles:
+            // precisely the blob the spec warns about, arrived at from the other direction. Which
+            // colour is irrelevant, only its alpha.
+            shape
+                .fill(Color.black)
+                .frame(
+                    width: Self.rect.width + Self.clearance * 2,
+                    height: Self.rect.height + Self.clearance * 2
+                )
+                .offset(x: Self.offset - Self.clearance, y: Self.offset - Self.clearance)
+                .blendMode(.destinationOut)
+        }
+        .compositingGroup()
+        .overlay(alignment: .topLeading) {
+            outline.offset(x: Self.offset, y: Self.offset)
+        }
+        .frame(
+            width: Self.rect.width + Self.offset,
+            height: Self.rect.height + Self.offset,
+            alignment: .topLeading
+        )
+    }
+
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 1.5) }
+
+    private var outline: some View {
+        shape
+            .strokeBorder(lineWidth: TreeIcon.stroke)
+            .frame(width: Self.rect.width, height: Self.rect.height)
+    }
+}
+
+/// A tmux window: one rectangle, divided along its outermost seam when the window is split.
+///
+/// The three levels of the tree then differ by *structure* rather than by decoration — layered
+/// contains windows, plain is one pane, divided is a split — which is what makes them tell apart at
+/// 13px on a selected row, where colour says nothing.
+private struct WindowPaneIcon: View {
+    /// `nil` when the window has a single pane.
+    let split: SplitDirection?
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 2)
+            .strokeBorder(lineWidth: TreeIcon.stroke)
+            .overlay {
+                if let split {
+                    // Centred rather than placed at the real ratio: the rule is the *fact* of a split,
+                    // and a 13px box cannot show 70/30 as anything but off-centre noise.
+                    Rectangle().frame(
+                        width: split == .leftRight ? TreeIcon.stroke : nil,
+                        height: split == .leftRight ? nil : TreeIcon.stroke
+                    )
+                }
+            }
+            .frame(width: TreeIcon.slot, height: 10)
+    }
+}
+
+/// A view control in the `HOSTS` header: one click, 22pt, no frame.
+///
+/// Unframed on purpose, unlike `RowButton`. These sit on the header's own background rather than on a
+/// highlighted row, so there is nothing for a frame to separate them from.
+private struct HeaderButton<Icon: View>: View {
+    let help: String
+    let label: String
+    let action: () -> Void
+    @ViewBuilder let icon: () -> Icon
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            icon()
+                .frame(width: RowAction.size, height: RowAction.size)
+                .background(
+                    RoundedRectangle(cornerRadius: RowAction.radius)
+                        .fill(isHovered ? Color.primary.opacity(0.09) : Color.clear)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: RowAction.radius))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(help)
+        .accessibilityLabel(label)
+    }
+}
+
+/// Collapse all and Expand all, as a stack of rules.
+///
+/// SF Symbols has no pair that survives this size: `chevron.down.square` and `chevron.right.square`
+/// differ by the rotation of a 4pt chevron inside a box, which at 11pt is two identical grey squares —
+/// you had to click one to learn what it did. Rules stacked with a gap read as *closed up*, and a
+/// third shorter rule appearing between them reads as something opening, which is the actual
+/// difference between the two commands.
+private struct RuleStackIcon: View {
+    let showsMiddleRule: Bool
+
+    var body: some View {
+        VStack(spacing: 2) {
+            rule(width: 10)
+            if showsMiddleRule { rule(width: 5) }
+            rule(width: 10)
+        }
+        .foregroundStyle(.secondary)
+    }
+
+    private func rule(width: CGFloat) -> some View {
+        Capsule().frame(width: width, height: 1.4)
     }
 }
 

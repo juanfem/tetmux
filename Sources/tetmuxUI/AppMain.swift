@@ -16,7 +16,12 @@ public struct TetmuxApp: App {
         WindowGroup(id: RootScene.mainWindowId) {
             RootView(model: model)
                 .frame(minWidth: 900, minHeight: 560)
-                .task { await model.bootstrap() }
+                .task {
+                    // The Dock menu is AppKit's, built outside any scene, so it reaches the model
+                    // through the delegate rather than through an environment it does not have.
+                    appDelegate.model = model
+                    await model.bootstrap()
+                }
         }
         .windowToolbarStyle(.unified)
         .commands { menuCommands }
@@ -89,7 +94,12 @@ private struct NewAppWindowButton: View {
 
 /// A SwiftPM executable has no app bundle, so nothing sets the activation policy for us; without
 /// this the window opens behind everything and never takes focus.
+@MainActor
 public final class TetmuxAppDelegate: NSObject, NSApplicationDelegate {
+    /// Set by the scene as it comes up. Weak, because the delegate outlives nothing but the process
+    /// and must not be the reason the model is kept alive.
+    public weak var model: AppModel?
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -112,6 +122,29 @@ public final class TetmuxAppDelegate: NSObject, NSApplicationDelegate {
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // The menu bar extra (F4.30) is the point of staying resident.
         false
+    }
+
+    /// The Dock icon's menu.
+    ///
+    /// One item, and it is the one the Dock cannot otherwise offer: with every window closed the app
+    /// is still running — `applicationShouldTerminateAfterLastWindowClosed` above says so — and the
+    /// Dock's own menu has nothing in it that brings a window back. Sessions are deliberately not
+    /// listed here; that is the menu bar extra's job, and it can say what ⌥ would do, which a Dock
+    /// menu cannot.
+    public func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        let item = NSMenuItem(
+            title: ApplicationShortcut.newAppWindow.title,
+            action: #selector(openNewAppWindow),
+            keyEquivalent: ""
+        )
+        item.target = self
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func openNewAppWindow() {
+        model?.openNewAppWindow()
     }
 }
 
@@ -149,6 +182,9 @@ struct RootView: View {
         .background(WindowAccessor { state.nsWindow = $0 })
         .onAppear {
             model.registerWindow(state)
+            // Handed over rather than claimed: the model has to be able to open a window when there
+            // is none left to observe `requestedWindow`, and `openWindow` can only be read here.
+            model.openAppWindow = { openWindow(id: RootScene.mainWindowId) }
             // A window opened to show something specific starts there rather than on whatever the
             // reconciler would otherwise pick. Consumed once, so ⌘N's plain window is unaffected.
             if let seed = model.consumeSeed() { state.apply(seed) }
@@ -361,6 +397,10 @@ private struct WindowTab: View {
     let openWindow: OpenWindowAction
 
     @State private var isHovering = false
+    /// ⌥ skips the close confirmation here for the same reason it does in the tree — this is the same
+    /// action on the same window, and a modifier that worked in one of the two places would read as a
+    /// bug in the other.
+    @State private var modifiers = ModifierKeyMonitor()
 
     private func select() {
         model.select(in: state, host: state.selectedHostId ?? "", session: session.id, window: window.id)
@@ -397,7 +437,7 @@ private struct WindowTab: View {
             // scope, and the pointer being over a tab is not something the scope knows about.
             Button {
                 select()
-                model.requestCloseWindow(in: state)
+                model.requestCloseWindow(in: state, skippingConfirmation: OptionKey.isHeld)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
@@ -405,7 +445,7 @@ private struct WindowTab: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(modifiers.isOptionHeld ? AnyShapeStyle(Color.red) : AnyShapeStyle(.secondary))
             // Always laid out, only sometimes visible: hiding it outright would resize the tab under
             // the pointer on hover, and the strip would shuffle as the mouse crossed it.
             .opacity(isHovering || isSelected ? 1 : 0)
@@ -510,31 +550,35 @@ struct ConnectionBanner: View {
     }
 }
 
-/// The honest version of what a single channel can do: this session's panes are a snapshot until the
-/// client moves here, and moving it freezes whatever session was attached before.
+/// Says that this session's panes are a photograph, on the rare occasions that is still true.
 ///
-/// Stating the situation is all it does. Focusing the window is what resolves it — `AppModel.focus`
-/// attaches — so a button here would only offer what clicking the window already did, and a banner
-/// with an action that has just run is a banner nobody believes.
+/// Every session on screen gets a client of its own now, so the ordinary reasons this used to appear
+/// — a second window on a second session, or the moment between picking a session and tmux answering
+/// `switch-client` — are gone. `liveSessionIds` counts a channel that is still connecting as live
+/// precisely so the second case cannot flash a banner and withdraw it.
 ///
-/// Making two sessions of one host live at once needs a second channel — see the F4.12 note in
-/// CLAUDE.md for why that is deliberately not done.
+/// What is left is the honest case: tmux refused the attach, or the client for this session died and
+/// the host is still up. Stating it is all this does; the next reconcile is already trying again, so
+/// a button here would offer an action that is running.
 struct NotAttachedBanner: View {
     let host: HostState
     let session: TmuxSession
 
-    /// `session_attached` counts every client including other people's, so the attached *session id*
-    /// this client reported is the only trustworthy signal.
-    private var isLive: Bool { host.activeSessionId == session.id }
+    /// `session_attached` counts every client of the server, including terminals elsewhere on the
+    /// machine that have nothing to do with this app, so what *tetmux* is attached to is the only
+    /// trustworthy signal.
+    private var isLive: Bool { host.isLive(session.id) }
 
     var body: some View {
-        if !isLive {
+        // Only while the host itself is up. A host that is reconnecting has its own banner saying so,
+        // and two of them stacked would describe one problem twice.
+        if !isLive, host.connectionState.isActive {
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
                     Image(systemName: "pause.circle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
-                    Text("Not attached — these panes are a snapshot. tmux streams output for one session per connection.")
+                    Text("Not attached — these panes are a snapshot. tetmux has no tmux client on this session.")
                         .font(.caption)
                         .lineLimit(2)
                     Spacer(minLength: 8)
@@ -662,6 +706,7 @@ struct EmptyStateView: View {
 /// "somewhere else, not here".
 struct MenuBarContent: View {
     @Bindable var model: AppModel
+    @Environment(\.openWindow) private var openWindow
     /// Owned here rather than by the app so it exists for as long as the menu can be opened, and so
     /// the items and the hint below them cannot disagree about what ⌥ is currently doing.
     @State private var optionKey = OptionKeyMonitor()
@@ -676,7 +721,7 @@ struct MenuBarContent: View {
                     Button {
                         open(host: host, session: session)
                     } label: {
-                        Label(session.name, systemImage: icon(attached: session.isAttached))
+                        Label(session.name, systemImage: icon(live: host.isLive(session.id)))
                     }
                 }
                 // Item 10 — a host with no sessions still needs a way to get one, and a host with
@@ -705,15 +750,26 @@ struct MenuBarContent: View {
             .keyboardShortcut("q")
     }
 
-    private func icon(attached: Bool) -> String {
+    private func icon(live: Bool) -> String {
         if optionKey.isHeld { return newWindowIcon }
-        return attached ? "macwindow.badge.plus" : "macwindow"
+        return live ? "macwindow.badge.plus" : "macwindow"
+    }
+
+    /// Leaves the model able to open a window on its own.
+    ///
+    /// The menu bar outlives every window, so this menu is the one view still around when the last
+    /// one closes — and `openWindow` is readable only from a view. Re-set on each use rather than
+    /// once, because the action a closed window handed over is the one thing here that could have
+    /// gone stale, and this costs nothing.
+    private func adoptWindowOpener() {
+        model.openAppWindow = { openWindow(id: RootScene.mainWindowId) }
     }
 
     private func open(host: HostState, session: TmuxSession) {
+        adoptWindowOpener()
         // Read at click time, not from `optionKey`, which is a poll and so can be a frame behind:
         // `MenuBarExtra` gives no event, but the flags are current while the item's action runs.
-        let wantsNewWindow = NSEvent.modifierFlags.contains(.option)
+        let wantsNewWindow = OptionKey.isHeld
         // No `fallback:`, so this lands on the last-used window — item 9's "otherwise the one that
         // was last used".
         model.showSession(
@@ -731,7 +787,8 @@ struct MenuBarContent: View {
     /// The window cannot be opened now — `new-session` answers with no id — so the intent travels
     /// with the reveal request and the window appears when tmux confirms the session.
     private func newSession(host: HostState) {
-        let wantsNewWindow = NSEvent.modifierFlags.contains(.option)
+        adoptWindowOpener()
+        let wantsNewWindow = OptionKey.isHeld
         // No window may be key — the menu bar is reachable with the app in the background — so name
         // the window explicitly rather than relying on focus.
         model.createSessionWithDefaultName(
@@ -741,6 +798,18 @@ struct MenuBarContent: View {
         )
         NSApp.activate(ignoringOtherApps: true)
     }
+}
+
+/// ⌥ as it is *at this instant*, for an action that has already been triggered.
+///
+/// Every control that treats ⌥ as part of the click reads it here rather than from either monitor
+/// below: both of those exist to keep a *display* current and are allowed to be a frame behind, and
+/// a button whose behaviour disagreed with its own icon by one frame would be the one bug this is
+/// least able to explain to the person it happened to. The flags are live and correct for as long as
+/// the action's own call stack, wherever it was triggered from.
+@MainActor
+enum OptionKey {
+    static var isHeld: Bool { NSEvent.modifierFlags.contains(.option) }
 }
 
 /// Whether ⌥ is down *right now*, so an open menu can show what clicking it would do.
@@ -793,8 +862,49 @@ final class OptionKeyMonitor {
     }
 
     private func sample() {
-        let held = NSEvent.modifierFlags.contains(.option)
+        let held = OptionKey.isHeld
         guard held != isHeld else { return }
         isHeld = held
+    }
+}
+
+/// The same question for an ordinary window: is ⌥ down, so a close button can say that clicking it
+/// will not stop to ask?
+///
+/// Separate from `OptionKeyMonitor` because the two have opposite constraints. A window's events go
+/// through the normal responder chain, so `.flagsChanged` simply arrives — no Accessibility
+/// permission, no timer, and nothing running while the key is not being pressed. That monitor cannot
+/// use this mechanism (a menu tracks events in a run loop where a local monitor sees nothing), and
+/// this must not use that one: its 20 Hz timer is bounded by how long a menu stays open, whereas a
+/// window is open for as long as the app runs.
+///
+/// One instance per window, which is what SwiftUI ownership gives; the monitor is app-wide either
+/// way, so several simply agree.
+@MainActor
+@Observable
+final class ModifierKeyMonitor {
+    private(set) var isOptionHeld = false
+
+    /// `nonisolated(unsafe)` so `deinit` can take it back. It is written once in `init` and read once
+    /// in `deinit`, and `NSEvent.removeMonitor` is safe from either.
+    @ObservationIgnored nonisolated(unsafe) private var monitor: Any?
+
+    init() {
+        // `.flagsChanged` alone would go stale while the app is in the background, where a modifier
+        // pressed elsewhere is never reported. `.mouseEntered` corrects it at the one moment that
+        // matters: the buttons this drives are revealed by hovering the row in the first place, so
+        // the pointer crossing into one is always the event before the click.
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .mouseEntered]) {
+            [weak self] event in
+            MainActor.assumeIsolated {
+                let held = event.modifierFlags.contains(.option)
+                if let self, held != self.isOptionHeld { self.isOptionHeld = held }
+            }
+            return event
+        }
+    }
+
+    deinit {
+        if let monitor { NSEvent.removeMonitor(monitor) }
     }
 }

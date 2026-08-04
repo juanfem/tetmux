@@ -1,5 +1,6 @@
 import XCTest
 @testable import tetmuxCore
+@testable import tetmuxUI
 
 /// End-to-end over a real PTY and a real tmux server (§8, integration matrix). Skipped when tmux
 /// is not installed so the suite still runs on a bare CI image.
@@ -197,6 +198,238 @@ final class SessionIntegrationTests: XCTestCase {
         XCTAssertTrue(output.contains("switched-ok"), "no output after switching session; got:\n\(output)")
 
         await service.disconnectHost(hostId: "local")
+    }
+
+    /// A client per session on screen: both sessions stream at once, which one channel cannot do.
+    ///
+    /// This is the whole point of follower channels. With a single client, output arrives only for
+    /// the attached session, so a second window on a second session was a photograph — and the only
+    /// cure, `switch-client`, moved the freeze to the first window instead of removing it.
+    func testTwoDisplayedSessionsBothStreamOutputAtOnce() async throws {
+        let other = "\(sessionName)-second"
+        defer { runTmux(["kill-session", "-t", other]) }
+        runTmux(["new-session", "-d", "-s", other])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service, timeout: 10) { host in
+            host.sessions.first { $0.name == self.sessionName }?.activeWindow?.preferredPaneId != nil
+                && host.sessions.first { $0.name == other }?.activeWindow?.preferredPaneId != nil
+        }
+        let first = try XCTUnwrap(host.sessions.first { $0.name == sessionName })
+        let second = try XCTUnwrap(host.sessions.first { $0.name == other })
+        let firstPane = try XCTUnwrap(first.activeWindow?.preferredPaneId)
+        let secondPane = try XCTUnwrap(second.activeWindow?.preferredPaneId)
+
+        // Both on screen, as two macOS windows would be.
+        await service.setDisplayedSessions(["local": [first.id, second.id]])
+        let live = try await waitForHost(service, timeout: 15) { host in
+            host.liveSessionIds.isSuperset(of: [first.id, second.id])
+        }
+        XCTAssertTrue(live.isLive(second.id), "the second session never got a client")
+
+        let firstStream = await service.subscribeToPane(hostId: "local", paneId: firstPane).stream
+        let secondStream = await service.subscribeToPane(hostId: "local", paneId: secondPane).stream
+        let firstText = collect(firstStream, until: "one-is-live")
+        let secondText = collect(secondStream, until: "two-is-live")
+
+        try await Task.sleep(for: .milliseconds(700))
+        await service.sendKeys(hostId: "local", paneId: firstPane, text: "echo one-is-live\r")
+        await service.sendKeys(hostId: "local", paneId: secondPane, text: "echo two-is-live\r")
+
+        let one = try await withTimeout(seconds: 15) { await firstText.value }
+        let two = try await withTimeout(seconds: 15) { await secondText.value }
+        XCTAssertTrue(one.contains("one-is-live"), "the primary session stopped streaming; got:\n\(one)")
+        XCTAssertTrue(two.contains("two-is-live"), "the second session never streamed; got:\n\(two)")
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// A session put on screen counts as live from the moment it is asked for, not from the moment
+    /// tmux answers.
+    ///
+    /// This is the banner flash: attaching is a round trip, and for its duration the honest answer
+    /// is "no client here" — so the window showed "not attached" for a tenth of a second and then
+    /// took it back, which reads as a glitch rather than as information.
+    func testASessionIsLiveTheMomentItIsDisplayed() async throws {
+        let other = "\(sessionName)-instant"
+        defer { runTmux(["kill-session", "-t", other]) }
+        runTmux(["new-session", "-d", "-s", other])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service, timeout: 10) { host in
+            host.sessions.contains { $0.name == other } && host.activeSessionId != nil
+        }
+        let first = try XCTUnwrap(host.sessions.first { $0.name == self.sessionName })
+        let second = try XCTUnwrap(host.sessions.first { $0.name == other })
+
+        await service.setDisplayedSessions(["local": [first.id, second.id]])
+        // No waiting: the very next read of the model must already say both are live, because that
+        // read is what a view about to draw a banner would do.
+        let snapshot = await service.getHost("local")
+        let immediately = try XCTUnwrap(snapshot)
+        XCTAssertTrue(
+            immediately.isLive(second.id),
+            "the session was displayed and is not live yet — this is the frame the banner flashes in"
+        )
+        XCTAssertTrue(immediately.isLive(first.id))
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// The wiring, end to end: two macOS windows on two sessions really do produce two tmux clients.
+    ///
+    /// Everything above tests `SessionService` directly. This one goes through `AppModel`, because
+    /// the decision of what is on screen is made there — from every open window's selection — and a
+    /// service that reconciles perfectly against a set nobody sends it would still leave the second
+    /// window frozen.
+    func testTheModelAsksForAClientPerWindowOnScreen() async throws {
+        let other = "\(sessionName)-model"
+        defer { runTmux(["kill-session", "-t", other]) }
+        runTmux(["new-session", "-d", "-s", other])
+
+        let model = await AppModel()
+        let service = await model.service
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service, timeout: 10) { host in
+            host.sessions.contains { $0.name == other } && host.sessions.contains { $0.name == self.sessionName }
+        }
+        let first = try XCTUnwrap(host.sessions.first { $0.name == self.sessionName })
+        let second = try XCTUnwrap(host.sessions.first { $0.name == other })
+
+        // Two windows, as ⌘N and a sidebar double-click would leave them.
+        let windows = await MainActor.run { () -> [WindowState] in
+            [first.id, second.id].map { sessionId in
+                let state = WindowState()
+                state.selectedHostId = "local"
+                state.selectedSessionId = sessionId
+                model.registerWindow(state)
+                return state
+            }
+        }
+
+        let live = try await waitForHost(service, timeout: 15) { host in
+            host.liveSessionIds.isSuperset(of: [first.id, second.id])
+        }
+        XCTAssertTrue(live.isLive(second.id), "the second window's session never got a client")
+
+        // And closing one hands its client back.
+        await MainActor.run { model.unregisterWindow(windows[1].id) }
+        _ = try await waitForHost(service, timeout: 15) { !$0.liveSessionIds.contains(second.id) }
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// A session that leaves the screen takes its client with it. Otherwise every session ever looked
+    /// at would keep a tmux client — and a `window-size manual` — for the life of the app.
+    func testASessionThatLeavesTheScreenLosesItsClient() async throws {
+        let other = "\(sessionName)-third"
+        defer { runTmux(["kill-session", "-t", other]) }
+        runTmux(["new-session", "-d", "-s", other])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service, timeout: 10) { host in
+            host.sessions.contains { $0.name == other } && host.sessions.contains { $0.name == self.sessionName }
+        }
+        let first = try XCTUnwrap(host.sessions.first { $0.name == self.sessionName })
+        let second = try XCTUnwrap(host.sessions.first { $0.name == other })
+
+        await service.setDisplayedSessions(["local": [first.id, second.id]])
+        _ = try await waitForHost(service, timeout: 15) { $0.liveSessionIds.contains(second.id) }
+
+        // The window showing it closed.
+        await service.setDisplayedSessions(["local": [first.id]])
+        let after = try await waitForHost(service, timeout: 15) { !$0.liveSessionIds.contains(second.id) }
+        XCTAssertTrue(after.isLive(first.id), "the session still on screen must stay live")
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// One window, two displayed sessions, one copy of the output.
+    ///
+    /// A window can be linked into several sessions (F4.9's whole subject), and each attached client
+    /// streams `%output` for every pane it can see. With a client per displayed session that means
+    /// two identical streams for the same pane, and painting both would double every byte the pane
+    /// produces — a corrupted screen rather than a frozen one.
+    func testAWindowLinkedIntoTwoDisplayedSessionsIsNotPaintedTwice() async throws {
+        let other = "\(sessionName)-linked"
+        defer { runTmux(["kill-session", "-t", other]) }
+        runTmux(["new-session", "-d", "-s", other])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service, timeout: 10) { host in
+            host.sessions.first { $0.name == self.sessionName }?.activeWindow?.preferredPaneId != nil
+                && host.sessions.contains { $0.name == other }
+        }
+        let first = try XCTUnwrap(host.sessions.first { $0.name == self.sessionName })
+        let windowId = try XCTUnwrap(first.activeWindow?.id)
+        let paneId = try XCTUnwrap(first.activeWindow?.preferredPaneId)
+
+        // The same window, now in both sessions.
+        runTmux(["link-window", "-s", windowId, "-t", other])
+        let linked = try await waitForHost(service, timeout: 10) { host in
+            host.sessions.first { $0.name == other }?.windows.contains { $0.id == windowId } == true
+        }
+        let second = try XCTUnwrap(linked.sessions.first { $0.name == other })
+
+        await service.setDisplayedSessions(["local": [first.id, second.id]])
+        _ = try await waitForHost(service, timeout: 15) { host in
+            host.liveSessionIds.isSuperset(of: [first.id, second.id])
+        }
+
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
+        // Read for a fixed span rather than stopping at the marker. Stopping at the first hit is
+        // exactly how this test can pass while the bug is present: the duplicate is the *second*
+        // copy, and a reader that has already returned never sees it.
+        let collector = OutputCollector()
+        let reader = Task {
+            for await chunk in stream { await collector.append(String(decoding: chunk, as: UTF8.self)) }
+        }
+        try await Task.sleep(for: .milliseconds(700))
+        // The marker is assembled by the shell, so the line the tty echoes back does not contain it
+        // and every occurrence counted here is one the pane actually produced.
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "echo dup$(echo -n check)\r")
+
+        // Wait for the marker to arrive rather than for a fixed span: on a loaded machine three
+        // seconds is not always enough for the *first* copy, and a reader that collected nothing
+        // counts no duplicates and passes for the wrong reason. Then keep reading, because the
+        // duplicate is the second copy and by definition arrives after the first.
+        for _ in 0..<150 {
+            if await collector.text.contains("dupcheck") { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try await Task.sleep(for: .seconds(2))
+        reader.cancel()
+        let output = await collector.text
+        await service.disconnectHost(hostId: "local")
+
+        let occurrences = output.components(separatedBy: "dupcheck").count - 1
+        XCTAssertEqual(occurrences, 1, "the pane was painted by both clients; got:\n\(output)")
+    }
+
+    /// Reading a stream until a marker appears, so two of them can be in flight at once.
+    private func collect(_ stream: AsyncStream<Data>, until marker: String) -> Task<String, Never> {
+        Task {
+            var text = ""
+            for await chunk in stream {
+                text += String(decoding: chunk, as: UTF8.self)
+                if text.contains(marker) { break }
+            }
+            return text
+        }
     }
 
     /// A pane subscription has to survive the channel it was made on. A view subscribes exactly
@@ -1222,4 +1455,13 @@ final class SessionIntegrationTests: XCTestCase {
             return value
         }
     }
+}
+
+/// Accumulates a pane's output so a test can watch it arrive rather than block on it.
+///
+/// Needed because the interesting question here is what shows up *after* the first match — a reader
+/// that returns at the marker can never see a duplicate.
+private actor OutputCollector {
+    private(set) var text = ""
+    func append(_ chunk: String) { text += chunk }
 }
