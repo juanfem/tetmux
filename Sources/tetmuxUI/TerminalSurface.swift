@@ -26,20 +26,30 @@ public struct TerminalTheme: Equatable, Sendable {
             ?? NSFont(name: "Menlo", size: fontSize)
             ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
     }
-}
 
-/// What a pane surface reports back about its own geometry, so the container can work out how many
-/// cells the whole client is worth (§3.3 step 1).
-struct PaneMetrics: Equatable {
-    var pixelSize: CGSize
-    var cols: Int
-    var rows: Int
-
-    /// Cell size implied by this measurement. SwiftTerm floors pixels to whole cells, so this is a
-    /// slight overestimate; it is within a fraction of a cell and converges as the view settles.
-    var cellSize: CGSize? {
-        guard cols > 0, rows > 0, pixelSize.width > 0, pixelSize.height > 0 else { return nil }
-        return CGSize(width: pixelSize.width / CGFloat(cols), height: pixelSize.height / CGFloat(rows))
+    /// The size of one character cell, from the font.
+    ///
+    /// Deliberately *not* measured from a pane. A pane can only report its own frame divided by its
+    /// own cell count, and that is a circular measurement: the frame comes from the layout, the layout
+    /// comes from the size we asked tmux for, and the size we ask for comes from the cell size. With a
+    /// single pane the circle is stable and nobody notices. With a split window each pane divides a
+    /// different frame by a different cell count, so they report *different* cell sizes — 8.31, 8.39,
+    /// 8.46 for one 3-pane window — whichever reported last won, and the requested width oscillated
+    /// between 111 and 112 columns forever. That was the separator flicker.
+    ///
+    /// A font's cell size depends on nothing but the font, so computing it here breaks the loop at its
+    /// source. Mirrors SwiftTerm's own `computeFontDimensions` so the grid we ask for is the grid it
+    /// draws: ascent + descent + leading for the height, the advancement of `W` for the width, both
+    /// snapped up to the pixel grid to avoid sub-pixel seams between cells.
+    public func cellSize(backingScaleFactor scale: CGFloat) -> CGSize {
+        let font = resolvedFont()
+        let height = ceil(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font))
+        let width = font.advancement(forGlyph: font.glyph(withName: "W")).width
+        let scale = scale > 0 ? scale : 1
+        return CGSize(
+            width: max(1, ceil(width * scale) / scale),
+            height: max(1, min(ceil(height * scale) / scale, 8192))
+        )
     }
 }
 
@@ -57,7 +67,6 @@ struct TerminalPaneView: NSViewRepresentable {
     let isFocused: Bool
     let theme: TerminalTheme
     let service: SessionService
-    let onMetrics: (PaneMetrics) -> Void
     let onFocusRequest: () -> Void
 
     func makeNSView(context: Context) -> TerminalView {
@@ -109,7 +118,6 @@ struct TerminalPaneView: NSViewRepresentable {
         var parent: TerminalPaneView
         private weak var view: TerminalView?
         private var subscription: Task<Void, Never>?
-        private var lastReportedMetrics: PaneMetrics?
 
         init(parent: TerminalPaneView) {
             self.parent = parent
@@ -171,12 +179,11 @@ struct TerminalPaneView: NSViewRepresentable {
             Task { await service.sendKeys(hostId: hostId, paneId: paneId, bytes: bytes) }
         }
 
-        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            let metrics = PaneMetrics(pixelSize: source.frame.size, cols: newCols, rows: newRows)
-            guard metrics != lastReportedMetrics, metrics.cellSize != nil else { return }
-            lastReportedMetrics = metrics
-            parent.onMetrics(metrics)
-        }
+        /// Deliberately ignored. tmux owns geometry (§3.3): the container measures itself, asks tmux,
+        /// and lays out whatever `%layout-change` returns. This fires when SwiftTerm re-derives its own
+        /// grid from the frame we just gave it, so acting on it would be reacting to our own last
+        /// action — which is precisely the loop that made split windows redraw forever.
+        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {}
 
         func scrolled(source: TerminalView, position: Double) {}
         func setTerminalTitle(source: TerminalView, title: String) {}

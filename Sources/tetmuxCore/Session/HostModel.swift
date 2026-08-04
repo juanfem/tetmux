@@ -60,6 +60,8 @@ public struct TmuxWindow: Identifiable, Equatable, Sendable {
     public var layoutTree: LayoutNode?
     public var panes: [TmuxPane]
     public var activePaneId: String?
+    /// Whether the user named this window, rather than tmux naming it after what is running.
+    public var hasExplicitName: Bool
 
     public var paneCount: Int {
         panes.isEmpty ? (layoutTree?.paneIds.count ?? 0) : panes.count
@@ -74,6 +76,19 @@ public struct TmuxWindow: Identifiable, Equatable, Sendable {
         panes.first { $0.id == activePaneId }?.command ?? panes.first?.command ?? ""
     }
 
+    /// How this window should be listed, in the sidebar and on its tab.
+    ///
+    /// A name the user chose always wins — that is the whole point of having named it. Otherwise the
+    /// window is identified by what is *running* in it, which for a split window means every pane, not
+    /// just the active one: tmux's automatic name follows whichever pane is current, so a split
+    /// window's label used to change as the user moved between panes, and two split windows read
+    /// identically whenever their active panes happened to match.
+    public var displayLabel: String {
+        guard !hasExplicitName, paneCount > 1 else { return name }
+        let commands = panes.map(\.command).filter { !$0.isEmpty }
+        return commands.isEmpty ? name : commands.joined(separator: " · ")
+    }
+
     public init(
         id: String,
         name: String,
@@ -81,12 +96,14 @@ public struct TmuxWindow: Identifiable, Equatable, Sendable {
         hasActivity: Bool = false,
         layoutString: String = "",
         panes: [TmuxPane] = [],
-        activePaneId: String? = nil
+        activePaneId: String? = nil,
+        hasExplicitName: Bool = false
     ) {
         self.id = id
         self.name = name
         self.isActive = isActive
         self.hasActivity = hasActivity
+        self.hasExplicitName = hasExplicitName
         self.layoutString = layoutString
         self.layoutTree = layoutString.isEmpty ? nil : try? LayoutParser.parse(layoutString)
         self.panes = panes

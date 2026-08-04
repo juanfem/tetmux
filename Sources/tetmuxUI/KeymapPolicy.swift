@@ -9,6 +9,7 @@ import SwiftUI
 /// else — including every bare `Ctrl` chord — forwards to the pane untouched.
 public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
     case launcher
+    case newAppWindow
     case newWindow
     case closeWindow
     case closePane
@@ -22,7 +23,15 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
     public var title: String {
         switch self {
         case .launcher: return "Open Launcher…"
-        case .newWindow: return "New Window"
+        // ⌘N means a window of the application in every other macOS app; it used to open a tmux
+        // window here, which is what made it surprising. The tmux one keeps ⌘T and says which kind
+        // of window it means.
+        //
+        // Deliberately not "New Tab", even though a tmux window is shown as one: AppKit manages menu
+        // items by that exact title itself when automatic window tabbing is on, so a custom item
+        // competing for the name is at its mercy. Naming the domain object avoids the question.
+        case .newAppWindow: return "New Window"
+        case .newWindow: return "New tmux Window"
         case .closeWindow: return "Close Window…"
         case .closePane: return "Close Pane"
         case .splitRight: return "Split Right"
@@ -54,6 +63,7 @@ public struct KeymapPolicy: Sendable {
     /// (kill-line) is untouched (F4.20).
     public static let `default` = KeymapPolicy(bindings: [
         .launcher: KeyBinding("k"),
+        .newAppWindow: KeyBinding("n"),
         .newWindow: KeyBinding("t"),
         .closeWindow: KeyBinding("w", [.command, .shift]),
         .splitRight: KeyBinding("d"),

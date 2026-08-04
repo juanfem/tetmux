@@ -93,8 +93,12 @@ public enum TmuxCommand {
     public static let fieldSeparator = "|"
 
     public static let sessionsFormat = "#{session_id}|#{session_attached}|#{session_name}"
+    /// `automatic-rename` is how tmux says whether a window's name is its own invention or the user's:
+    /// it is `1` while tmux is naming the window after the running command, and renaming a window
+    /// explicitly turns it `0`. There is no `#{window_...}` variable for this — the option name itself
+    /// is the format — and it is the only way to tell a deliberate name from a coincidental one.
     public static let windowsFormat =
-        "#{session_id}|#{window_id}|#{window_active}|#{window_activity_flag}|#{window_layout}|#{window_name}"
+        "#{session_id}|#{window_id}|#{window_active}|#{window_activity_flag}|#{automatic-rename}|#{window_layout}|#{window_name}"
     public static let panesFormat =
         "#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_current_command}|#{pane_current_path}"
     public static let clientsFormat = "#{client_name}|#{client_session}|#{client_flags}"
@@ -126,18 +130,37 @@ public enum TmuxCommand {
 
     // MARK: - Transport invocation
 
+    /// What a channel should do about a session when it opens.
+    ///
+    /// A three-way choice rather than a flag, because the third case is the one that keeps a
+    /// deliberately ended session from coming back: after tmux says `%exit`, the session that was
+    /// named is *gone*, and asking for it by name either fails or — with `new-session -A` — quietly
+    /// recreates the thing the user just closed.
+    public enum AttachMode: Equatable, Sendable {
+        /// `new-session -A -s <name>`: attach if it exists, create it otherwise. The launcher's case.
+        case createOrAttach(sessionName: String)
+        /// `attach-session -t <name>`: that session or nothing.
+        case attach(sessionName: String)
+        /// `attach-session`: whatever the server still has, most recently used first. Fails outright
+        /// when the server is gone, which is exactly the signal that there is nothing left to show.
+        case attachAny
+
+        /// The tmux sub-command and its arguments, already quoted for a remote shell.
+        var arguments: [String] {
+            switch self {
+            case .createOrAttach(let name): return ["new-session", "-A", "-s", name]
+            case .attach(let name): return ["attach-session", "-t", name]
+            case .attachAny: return ["attach-session"]
+            }
+        }
+    }
+
     /// Local channel: `tmux -CC -2 -u new-session -A -s <name>`.
     ///
     /// `-2` forces 256-colour and `-u` UTF-8 (T5.1/T5.2); `new-session -A` attaches if the session
     /// exists and creates it otherwise, which is the behaviour the launcher wants.
-    public static func localArguments(sessionName: String, attachOnly: Bool) -> [String] {
-        var args = ["-CC", "-2", "-u"]
-        if attachOnly {
-            args += ["attach-session", "-t", sessionName]
-        } else {
-            args += ["new-session", "-A", "-s", sessionName]
-        }
-        return args
+    public static func localArguments(mode: AttachMode) -> [String] {
+        ["-CC", "-2", "-u"] + mode.arguments
     }
 
     /// The single shell command string handed to the remote login shell.
@@ -146,13 +169,18 @@ public enum TmuxCommand {
     /// like: ssh joins everything after the destination with spaces and hands the result to the
     /// remote login shell, so `sh -c` receives only the next word and the rest becomes positional
     /// arguments — the tmux invocation never runs at all.
-    public static func remoteCommand(sessionName: String, attachOnly: Bool) -> String {
+    public static func remoteCommand(mode: AttachMode) -> String {
         // Homebrew and ~/.local are common tmux locations that a non-interactive shell misses.
         let path = "PATH=\"$PATH:/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin\""
-        let quotedName = quote(sessionName)
-        let tmuxArgs = attachOnly
-            ? "attach-session -t \(quotedName)"
-            : "new-session -A -s \(quotedName)"
+        // The sub-command and its flags are ours; only the session name is user data, and it is the
+        // one thing quoted. Spelling that out per case rather than filtering the argument list keeps
+        // the rule visible — a name that happens to look like a flag must still be a name.
+        let tmuxArgs: String
+        switch mode {
+        case .createOrAttach(let name): tmuxArgs = "new-session -A -s \(quote(name))"
+        case .attach(let name): tmuxArgs = "attach-session -t \(quote(name))"
+        case .attachAny: tmuxArgs = "attach-session"
+        }
         // `exec` so the shell does not linger between us and tmux, and `command -v` so a missing
         // remote tmux produces a clear message on stderr instead of a generic 127.
         return """

@@ -116,6 +116,22 @@ public actor SessionService {
         var lastSentSize: (cols: Int, rows: Int)?
         var userInitiatedDisconnect = false
 
+        /// Whether tmux said `%exit` before the channel closed.
+        ///
+        /// This is the whole difference between "the session ended" and "the link died", and there is
+        /// no other way to tell them apart from outside: a dropped ssh connection produces EOF and
+        /// nothing else, while tmux ending a client always announces it first. Verified on 3.7b —
+        /// both `kill-session` on the attached session and the last pane exiting emit
+        /// `%sessions-changed` then a bare `%exit`.
+        var serverEnded = false
+
+        /// Whether this channel ever actually landed in a session (`%session-changed`).
+        ///
+        /// Attaching to a server that is gone is not a connection failure: tmux completes the
+        /// handshake, answers `no sessions` as a command error, and exits. Without this the retry
+        /// after an orderly exit would see another `%exit` and try again forever.
+        var attachedToSession = false
+
         /// Whether this session's windows are sized individually (`window-size manual`) rather than
         /// from the client's size. Needs tmux 2.9; below that there is one size for everything.
         var sizesWindowsIndividually = false
@@ -285,7 +301,7 @@ public actor SessionService {
     public func connectHost(
         hostId: String,
         targetSession: String? = nil,
-        attachOnly: Bool = false
+        mode: TmuxCommand.AttachMode? = nil
     ) async throws {
         guard var host = hosts[hostId] else { return }
         if let existing = connections[hostId] {
@@ -294,7 +310,13 @@ public actor SessionService {
         }
 
         let sessionTarget = targetSession ?? reconnectTarget[hostId] ?? defaultSessionName(for: host.config)
-        reconnectTarget[hostId] = sessionTarget
+        // `attachAny` deliberately does not adopt a target: it is used precisely when the remembered
+        // name refers to a session that no longer exists, and writing it back here would put it in
+        // front of the next connect to be recreated.
+        let attachMode = mode ?? .createOrAttach(sessionName: sessionTarget)
+        if mode == nil {
+            reconnectTarget[hostId] = sessionTarget
+        }
         // A refusal belongs to the channel it happened on. Carrying it into a new one would put a
         // banner about a command from ten minutes ago above a session that just came back.
         host.lastCommandFailure = nil
@@ -306,7 +328,7 @@ public actor SessionService {
         let connection = Connection(transport: transport, sessionTarget: sessionTarget)
 
         do {
-            let (executable, arguments) = try invocation(for: host.config, sessionTarget: sessionTarget, attachOnly: attachOnly)
+            let (executable, arguments) = try invocation(for: host.config, mode: attachMode)
             log("[\(hostId)] spawn \(executable) \(arguments.map { "\"\($0)\"" }.joined(separator: " "))")
 
             let stream = try transport.spawn(
@@ -351,17 +373,16 @@ public actor SessionService {
 
     private func invocation(
         for config: HostConfig,
-        sessionTarget: String,
-        attachOnly: Bool
+        mode: TmuxCommand.AttachMode
     ) throws -> (executable: String, arguments: [String]) {
         if config.isLocal {
             guard let tmux = PtyTransport.resolveExecutable("tmux", path: searchPath()) else {
                 throw PtyError.executableNotFound("tmux")
             }
-            return (tmux, TmuxCommand.localArguments(sessionName: sessionTarget, attachOnly: attachOnly))
+            return (tmux, TmuxCommand.localArguments(mode: mode))
         }
 
-        let remoteCommand = TmuxCommand.remoteCommand(sessionName: sessionTarget, attachOnly: attachOnly)
+        let remoteCommand = TmuxCommand.remoteCommand(mode: mode)
 
         if let custom = config.customCommand, !custom.isEmpty {
             // The user's wrapper replaces ssh entirely; we still append our own tmux invocation so
@@ -514,6 +535,11 @@ public actor SessionService {
             withHost(hostId) { host in
                 Self.mutateWindow(&host, windowId: windowId) { $0.name = name }
             }
+            // An automatic rename *is* tmux telling us the foreground command changed. Nothing
+            // announces `pane_current_command`, so this is the closest notification there is, and the
+            // sidebar labels every pane by its command — without this they stayed as they were until
+            // some unrelated structural change happened to refresh them.
+            schedulePaneRefresh(hostId: hostId)
 
         case .windowPaneChanged(let windowId, let paneId):
             withHost(hostId) { host in
@@ -524,8 +550,12 @@ public actor SessionService {
                     }
                 }
             }
+            // Moving between panes is the other moment a label can go stale: a command started in a
+            // pane that was not current renames no window, so nothing else would report it.
+            schedulePaneRefresh(hostId: hostId)
 
         case .sessionChanged(let sessionId, let name):
+            connection.attachedToSession = true
             withHost(hostId) { host in
                 for index in host.sessions.indices {
                     host.sessions[index].isAttached = host.sessions[index].id == sessionId
@@ -592,6 +622,9 @@ public actor SessionService {
 
         case .exit(let reason):
             log("[\(hostId)] %exit \(reason ?? "")")
+            // Orderly: tmux is ending this client on purpose. `channelClosed` needs to know, because
+            // the recovery for this is nothing like the recovery for a dropped link.
+            connection.serverEnded = true
             withHost(hostId) { host in
                 host.connectionState = .degraded(reason: reason ?? "tmux server exited")
             }
@@ -779,6 +812,27 @@ public actor SessionService {
         refreshTopology(hostId: hostId, connection: connection)
     }
 
+    /// Re-reads pane state only.
+    ///
+    /// Separate from `refreshTopology` because it runs far more often — on every automatic rename and
+    /// every pane switch — and the session and window lists have not changed at those moments. Shares
+    /// the same debounce task, so a burst of notifications costs one round trip.
+    private func schedulePaneRefresh(hostId: String) {
+        guard let connection = connections[hostId], connection.handshakeComplete else { return }
+        guard connection.topologyRefreshTask == nil else { return }
+        connection.topologyRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            await self?.runPaneRefresh(hostId: hostId)
+        }
+    }
+
+    private func runPaneRefresh(hostId: String) {
+        guard let connection = connections[hostId] else { return }
+        connection.topologyRefreshTask = nil
+        send("list-panes -a -F \(TmuxCommand.quote(TmuxCommand.panesFormat))",
+             kind: .listPanes, hostId: hostId, connection: connection)
+    }
+
     private func refreshTopology(hostId: String, connection: Connection) {
         send("list-sessions -F \(TmuxCommand.quote(TmuxCommand.sessionsFormat))",
              kind: .listSessions, hostId: hostId, connection: connection)
@@ -837,14 +891,16 @@ public actor SessionService {
         withHost(hostId) { host in
             var seenBySession: [String: Set<String>] = [:]
             for line in lines {
-                let fields = line.split(separator: "|", maxSplits: 5, omittingEmptySubsequences: false)
-                guard fields.count >= 6 else { continue }
+                let fields = line.split(separator: "|", maxSplits: 6, omittingEmptySubsequences: false)
+                guard fields.count >= 7 else { continue }
                 let sessionId = String(fields[0])
                 let windowId = String(fields[1])
                 let isActive = fields[2] == "1"
                 let hasActivity = fields[3] == "1"
-                let layout = String(fields[4])
-                let name = String(fields[5])
+                // `automatic-rename` is 1 while tmux owns the name; 0 once the user has set one.
+                let hasExplicitName = fields[4] == "0"
+                let layout = String(fields[5])
+                let name = String(fields[6])
 
                 seenBySession[sessionId, default: []].insert(windowId)
 
@@ -853,9 +909,13 @@ public actor SessionService {
                     host.sessions[sessionIndex].windows[windowIndex].name = name
                     host.sessions[sessionIndex].windows[windowIndex].isActive = isActive
                     host.sessions[sessionIndex].windows[windowIndex].hasActivity = hasActivity
+                    host.sessions[sessionIndex].windows[windowIndex].hasExplicitName = hasExplicitName
                     host.sessions[sessionIndex].windows[windowIndex].apply(layoutString: layout)
                 } else {
-                    var window = TmuxWindow(id: windowId, name: name, isActive: isActive, hasActivity: hasActivity)
+                    var window = TmuxWindow(
+                        id: windowId, name: name, isActive: isActive, hasActivity: hasActivity,
+                        hasExplicitName: hasExplicitName
+                    )
                     window.apply(layoutString: layout)
                     host.sessions[sessionIndex].windows.append(window)
                 }
@@ -1499,10 +1559,48 @@ public actor SessionService {
         }
 
         let userInitiated = connection.userInitiatedDisconnect
+        let serverEnded = connection.serverEnded
+        let attachedToSession = connection.attachedToSession
         teardown(hostId: hostId, connection: connection)
         guard !userInitiated else { return }
 
         log("[\(hostId)] channel closed: \(reason)")
+
+        // The session ended rather than the link dying, so there is nothing to recover *to*. This is
+        // the path Ctrl+D on the last pane takes, and `kill-session` on the attached session with it:
+        // both end with `%exit`, both used to fall into the backoff below, and the reconnect there
+        // runs `new-session -A -s <reconnectTarget>` — which cheerfully recreated the session the
+        // user had just closed, with a fresh window in it (F4.9's spirit, violated by the recovery
+        // path rather than by any close command).
+        if serverEnded {
+            // The name is dead. Keeping it would resurrect it on the next explicit connect too.
+            reconnectTarget.removeValue(forKey: hostId)
+
+            guard attachedToSession else {
+                // We never landed anywhere: the server is gone and there is nothing to attach to.
+                // Not a failure — the user closed the last session and this is what that looks like.
+                log("[\(hostId)] session ended and the server has nothing left; disconnected")
+                withHost(hostId) { host in
+                    host.connectionState = .disconnected
+                    // The sessions really are gone, unlike a dropped link where they are merely out
+                    // of reach. Leaving them listed offers the user rows that do nothing.
+                    host.sessions = []
+                    host.activeSessionId = nil
+                }
+                broadcastState()
+                return
+            }
+
+            // Our session ended, but the server may still hold others. One attempt to land on
+            // whatever is left — and `attachAny`, never a name, so nothing is created. If the server
+            // is gone that attempt comes straight back here with `attachedToSession` false and stops.
+            log("[\(hostId)] session ended; attaching to whatever the server has left")
+            reconnectAttempts[hostId] = 0
+            Task { [weak self] in
+                try? await self?.connectHost(hostId: hostId, mode: .attachAny)
+            }
+            return
+        }
 
         // F4.14: authentication failures are not retried — retrying just locks the account out.
         if isAuthenticationFailure(reason) {

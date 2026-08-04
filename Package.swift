@@ -35,7 +35,11 @@ let package = Package(
                 "tetmuxCore",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ],
-            path: "Sources/tetmuxUI"
+            path: "Sources/tetmuxUI",
+            // The app icon. Lives here so that one committed .icns serves both consumers: SwiftPM
+            // bundles it for `swift run`, which has no .app around it to carry a CFBundleIconFile,
+            // and Scripts/package-dmg.sh copies the same file into the bundle it assembles.
+            resources: [.process("Resources")]
         ),
         .executableTarget(
             name: "tetmux",

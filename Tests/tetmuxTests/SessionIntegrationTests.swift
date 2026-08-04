@@ -314,6 +314,117 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    // MARK: - A session that ends on purpose
+
+    /// Runs `body` against a tmux server of its own.
+    ///
+    /// Necessary rather than tidy: these tests are about what happens when the *last* session goes
+    /// away, which on a shared server never happens, and about `attach-session` with no target —
+    /// which on a developer's machine would cheerfully attach to their real work. `TMUX_TMPDIR` moves
+    /// the socket, and `SessionService.childEnvironment` inherits the process environment, so the
+    /// service's own spawns land on the same private server. Kept short: socket paths cap at 104
+    /// bytes.
+    private func withPrivateTmuxServer(_ body: () async throws -> Void) async throws {
+        let directory = URL(fileURLWithPath: "/tmp/tetmux-t-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let previous = ProcessInfo.processInfo.environment["TMUX_TMPDIR"]
+        setenv("TMUX_TMPDIR", directory.path, 1)
+        defer {
+            runTmux(["kill-server"])
+            if let previous { setenv("TMUX_TMPDIR", previous, 1) } else { unsetenv("TMUX_TMPDIR") }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try await body()
+    }
+
+    /// Killing the session the client is attached to must not bring it back.
+    ///
+    /// It used to. `kill-session` ends the client, tmux says `%exit`, the channel closes — and the
+    /// recovery path could not tell that from a dropped link, so it reconnected with
+    /// `new-session -A -s <the name it had just been killed under>`, recreating the session with a
+    /// fresh window in it. From the user's side the kill button appeared to open a new window.
+    func testKillingTheAttachedSessionDoesNotRecreateIt() async throws {
+        try await withPrivateTmuxServer {
+            let survivor = "\(sessionName)-survivor"
+            runTmux(["new-session", "-d", "-s", survivor])
+
+            let service = SessionService()
+            await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+            try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+            let attached = sessionName
+            let host = try await waitForHost(service) { $0.activeSession?.name == attached }
+            let doomed = try XCTUnwrap(host.sessions.first { $0.name == attached })
+
+            await service.killSession(hostId: "local", sessionId: doomed.id)
+
+            // The client has to end up on the session that is still there.
+            //
+            // Deliberately not `waitForHost`: that throws `XCTSkip` when it times out, and a skip is
+            // exactly as green as a pass. A regression here has to be a failure.
+            let landedOnSurvivor = try await waitFor(seconds: 15) {
+                await service.getHost("local")?.activeSession?.name == survivor
+            }
+            XCTAssertTrue(landedOnSurvivor, "never attached to the session that outlived the kill")
+
+            let state = await service.getHost("local")
+            let after = try XCTUnwrap(state)
+            XCTAssertFalse(
+                after.sessions.contains { $0.name == attached },
+                "the killed session came back — the reconnect recreated it"
+            )
+            // And tmux must agree: nothing recreated it behind our back either.
+            let live = tmuxSessionNames()
+            XCTAssertFalse(
+                live.contains(attached),
+                "tmux still has the killed session: \(live)"
+            )
+            XCTAssertEqual(live, [survivor], "the server should hold only the surviving session")
+
+            await service.disconnectHost(hostId: "local")
+        }
+    }
+
+    /// The Ctrl+D case: the last pane of the last window of the only session exits, so tmux has
+    /// nothing left and the server goes with it.
+    ///
+    /// The host must simply be disconnected. Previously the backoff recreated the session — pressing
+    /// Ctrl+D produced a *new* shell, which is the opposite of what the keystroke means.
+    func testTheLastSessionEndingLeavesTheHostDisconnected() async throws {
+        try await withPrivateTmuxServer {
+            let service = SessionService()
+            await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+            try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+            let attached = sessionName
+            _ = try await waitForHost(service) { $0.activeSession?.name == attached }
+
+            // The pane exiting of its own accord, exactly as Ctrl+D leaves it.
+            runTmux(["send-keys", "-t", sessionName, "exit", "Enter"])
+
+            // As above: a timeout here must fail rather than skip.
+            let disconnected = try await waitFor(seconds: 20) {
+                await service.getHost("local")?.connectionState == .disconnected
+            }
+            XCTAssertTrue(
+                disconnected,
+                "the host never settled as disconnected — it is still retrying, or it recreated the session"
+            )
+
+            let state = await service.getHost("local")
+            let after = try XCTUnwrap(state)
+            XCTAssertTrue(
+                after.sessions.isEmpty,
+                "sessions that no longer exist are still listed: \(after.sessions.map(\.name))"
+            )
+            // The decisive assertion: nothing was recreated on the server.
+            XCTAssertNil(
+                tmuxQuery(["list-sessions", "-F", "#{session_name}"]),
+                "a session was recreated after the last one exited"
+            )
+        }
+    }
+
     // MARK: - Paste
 
     /// Clipboard text is routinely multi-line, and control-mode commands are newline-framed: under
@@ -623,9 +734,19 @@ final class SessionIntegrationTests: XCTestCase {
         await service.unlinkWindow(hostId: "local", windowId: windowId)
 
         // Gone from the session it was closed in…
-        _ = try await waitForHost(service, timeout: 10) { host in
-            host.sessions.first { $0.name == self.sessionName }?.windows.contains { $0.id == windowId } == false
+        //
+        // "Gone" includes the session itself going: this window was that session's only one, and tmux
+        // destroys a session left with none. That is worth stating explicitly, because the predicate
+        // used to be `session?.windows.contains(...) == false`, which a *missing* session fails — and
+        // it passed anyway only because the recovery path used to resurrect the session under its old
+        // name. When that stopped happening this test was the first thing to notice.
+        let closedIn = sessionName
+        let leftTheSession = try await waitFor(seconds: 10) {
+            guard let host = await service.getHost("local") else { return false }
+            guard let session = host.sessions.first(where: { $0.name == closedIn }) else { return true }
+            return !session.windows.contains { $0.id == windowId }
         }
+        XCTAssertTrue(leftTheSession, "the window is still listed in the session it was closed in")
         // …and still running in the other, with the same process behind it. Filtered rather than
         // listed: that session has a window of its own, so the first line of a plain listing is not
         // the one under test.
@@ -1040,6 +1161,28 @@ final class SessionIntegrationTests: XCTestCase {
     /// "tmux 3.7b" — `TmuxVersion` skips the leading non-digits itself.
     private func installedTmuxVersion() -> String? {
         tmuxQuery(["-V"])
+    }
+
+    /// Every session on the server, as exact names.
+    ///
+    /// `tmuxQuery` returns only the first line, and substring matching over a joined list is a trap:
+    /// a session named `foo-survivor` contains `foo`, so "is `foo` gone?" answers itself wrongly.
+    private func tmuxSessionNames() -> [String] {
+        guard let tmux = PtyTransport.resolveExecutable("tmux") else { return [] }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmux)
+        process.arguments = ["list-sessions", "-F", "#{session_name}"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .sorted()
     }
 
     private func waitForHost(

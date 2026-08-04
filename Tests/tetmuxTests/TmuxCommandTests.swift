@@ -129,14 +129,14 @@ final class TmuxCommandTests: XCTestCase {
     // MARK: - Local invocation
 
     func testLocalArgumentsRequestControlMode() {
-        let args = TmuxCommand.localArguments(sessionName: "work", attachOnly: false)
+        let args = TmuxCommand.localArguments(mode: .createOrAttach(sessionName: "work"))
         XCTAssertEqual(Array(args[0..<3]), ["-CC", "-2", "-u"])
         XCTAssertEqual(args, ["-CC", "-2", "-u", "new-session", "-A", "-s", "work"])
     }
 
     func testLocalAttachOnlyDoesNotCreate() {
         // F4.15: reconnection must never create a session.
-        let args = TmuxCommand.localArguments(sessionName: "work", attachOnly: true)
+        let args = TmuxCommand.localArguments(mode: .attach(sessionName: "work"))
         XCTAssertTrue(args.contains("attach-session"))
         XCTAssertFalse(args.contains("new-session"))
     }
@@ -152,7 +152,7 @@ final class TmuxCommandTests: XCTestCase {
             destination: "devbox",
             port: nil,
             controlPath: "/tmp/tetmux/cm-%C",
-            remoteCommand: TmuxCommand.remoteCommand(sessionName: "work", attachOnly: false)
+            remoteCommand: TmuxCommand.remoteCommand(mode: .createOrAttach(sessionName: "work"))
         )
         guard let separator = args.firstIndex(of: "--") else { return XCTFail("expected a -- separator") }
         XCTAssertEqual(
@@ -163,15 +163,41 @@ final class TmuxCommandTests: XCTestCase {
     }
 
     func testRemoteCommandLaunchesTmuxInControlMode() {
-        let command = TmuxCommand.remoteCommand(sessionName: "work", attachOnly: false)
+        let command = TmuxCommand.remoteCommand(mode: .createOrAttach(sessionName: "work"))
         XCTAssertTrue(command.contains("exec tmux -CC -2 -u new-session -A -s 'work'"), command)
         XCTAssertTrue(command.contains("command -v tmux"), "a missing remote tmux must say so")
         XCTAssertTrue(command.contains("/opt/homebrew/bin"), "non-interactive shells miss Homebrew")
     }
 
     func testRemoteSessionNameIsQuoted() {
-        let command = TmuxCommand.remoteCommand(sessionName: "my project", attachOnly: true)
+        let command = TmuxCommand.remoteCommand(mode: .attach(sessionName: "my project"))
         XCTAssertTrue(command.contains("attach-session -t 'my project'"), command)
+    }
+
+    // MARK: - Attaching to whatever is left
+
+    /// The mode the recovery from `%exit` uses. It must name no session at all: it exists for the
+    /// case where the remembered name refers to a session that has just been destroyed, and any form
+    /// of `new-session` there recreates exactly the thing the user closed.
+    func testAttachAnyNamesNoSessionAndCreatesNothing() {
+        let local = TmuxCommand.localArguments(mode: .attachAny)
+        XCTAssertEqual(local, ["-CC", "-2", "-u", "attach-session"])
+        XCTAssertFalse(local.contains("new-session"))
+        XCTAssertFalse(local.contains("-t"), "attachAny must not target a session by name")
+
+        let remote = TmuxCommand.remoteCommand(mode: .attachAny)
+        XCTAssertTrue(remote.contains("exec tmux -CC -2 -u attach-session"), remote)
+        XCTAssertFalse(remote.contains("new-session"))
+        XCTAssertFalse(remote.contains("-t "), remote)
+    }
+
+    /// A session name that looks like a flag is still a name. The quoting is per case rather than a
+    /// filter over the argument list precisely so this cannot be mistaken for one.
+    func testASessionNameResemblingAFlagIsStillQuoted() {
+        XCTAssertTrue(
+            TmuxCommand.remoteCommand(mode: .attach(sessionName: "-d")).contains("attach-session -t '-d'"),
+            "a name beginning with a dash must reach tmux quoted"
+        )
     }
 
     func testSshArgumentsUseTheStandardInvocation() {

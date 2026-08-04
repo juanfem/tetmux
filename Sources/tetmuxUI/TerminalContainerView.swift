@@ -30,10 +30,18 @@ public struct TerminalContainerView: View {
 
     /// Divider thickness between splits, in points.
     private let dividerWidth: CGFloat = 1
+    /// How wide the *draggable* part of a divider is. The seam stays one point; this is the target.
+    private let grabWidth: CGFloat = 9
 
-    @State private var cellSize: CGSize?
     @State private var containerSize: CGSize = .zero
     @Environment(\.controlActiveState) private var controlActiveState
+
+    /// Pixel density of the screen the panes are on, for snapping the cell size to whole pixels the
+    /// way SwiftTerm does. Wrong only on the first frame of a window dragged between displays of
+    /// different densities, where the cost is at most a sub-pixel of cell width.
+    private var backingScaleFactor: CGFloat {
+        NSScreen.main?.backingScaleFactor ?? 2
+    }
 
     public init(
         hostId: String,
@@ -85,6 +93,12 @@ public struct TerminalContainerView: View {
     private func content(in size: CGSize) -> some View {
         if let tree = window.layoutTree {
             node(tree, size: size)
+                // Every divider in one layer above the whole tree, rather than each inside the
+                // container it belongs to. Nesting them put a handle underneath the pane surfaces of
+                // its *sibling* subtree — the outermost split was draggable and the nested one was
+                // not, silently. One overlay makes the z-order a single fact instead of a per-branch
+                // accident.
+                .overlay(alignment: .topLeading) { dividerOverlay(tree, size: size) }
         } else if let paneId = window.preferredPaneId {
             // Layout has not arrived yet — show the active pane full-bleed rather than nothing.
             pane(paneId, cols: 80, rows: 24)
@@ -125,11 +139,110 @@ public struct TerminalContainerView: View {
                         .frame(width: childSize.width, height: childSize.height, alignment: .topLeading)
                         .offset(x: isRow ? offset : 0, y: isRow ? 0 : offset)
                 }
+
             }
             .frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .separatorColor))
 
             return AnyView(stack)
+        }
+    }
+
+    /// One draggable boundary: where it is, which pane setting its size moves it, and from what.
+    private struct DividerSpec: Identifiable {
+        let id: String
+        let isRow: Bool
+        let rect: CGRect
+        let baseCells: Int
+        let targetPaneId: String
+    }
+
+    @ViewBuilder
+    private func dividerOverlay(_ tree: LayoutNode, size: CGSize) -> some View {
+        let cell = theme.cellSize(backingScaleFactor: backingScaleFactor)
+        ZStack(alignment: .topLeading) {
+            ForEach(dividers(tree, origin: .zero, size: size, path: "")) { spec in
+                PaneDivider(
+                    isRow: spec.isRow,
+                    baseCells: spec.baseCells,
+                    cellExtent: spec.isRow ? cell.width : cell.height
+                ) { cells in
+                    resize(paneId: spec.targetPaneId, isRow: spec.isRow, toCells: cells)
+                }
+                .frame(width: spec.rect.width, height: spec.rect.height)
+                .offset(x: spec.rect.minX, y: spec.rect.minY)
+            }
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+    }
+
+    /// Walks the layout with exactly the arithmetic `node(_:size:)` uses, so the handles land on the
+    /// seams rather than near them.
+    private func dividers(
+        _ node: LayoutNode, origin: CGPoint, size: CGSize, path: String
+    ) -> [DividerSpec] {
+        guard case .container(let direction, _, _, _, _, let children) = node else { return [] }
+        let isRow = direction == .leftRight
+        let gaps = dividerWidth * CGFloat(max(children.count - 1, 0))
+        let available = max((isRow ? size.width : size.height) - gaps, 1)
+        let weights = children.map { isRow ? $0.width : $0.height }
+        let extents = Self.distribute(available, among: weights)
+
+        var specs: [DividerSpec] = []
+        for (index, child) in children.enumerated() {
+            let offset = extents[..<index].reduce(0, +) + dividerWidth * CGFloat(index)
+            let childOrigin = isRow
+                ? CGPoint(x: origin.x + offset, y: origin.y)
+                : CGPoint(x: origin.x, y: origin.y + offset)
+            let childSize = isRow
+                ? CGSize(width: extents[index], height: size.height)
+                : CGSize(width: size.width, height: extents[index])
+            specs += dividers(child, origin: childOrigin, size: childSize, path: "\(path).\(index)")
+
+            // The boundary *before* this child, owned by the child ahead of it.
+            guard index > 0, let paneId = children[index - 1].paneIds.first else { continue }
+            let boundary = extents[..<index].reduce(0, +) + dividerWidth * CGFloat(index - 1)
+            let inset = (grabWidth - dividerWidth) / 2
+            let rect = isRow
+                ? CGRect(x: origin.x + boundary - inset, y: origin.y, width: grabWidth, height: size.height)
+                : CGRect(x: origin.x, y: origin.y + boundary - inset, width: size.width, height: grabWidth)
+            // Identity is the seam's *place in the tree*, and deliberately nothing else.
+            //
+            // Not the target pane: a left/right seam and the top/bottom seam just inside its leading
+            // column both resolve to that column's first pane, and two specs with one identity means
+            // `ForEach` renders one of them — one draggable seam where there should be two.
+            //
+            // And not the position either, tempting as it is. The position changes the instant a drag
+            // resizes anything, which changes the identity, which makes SwiftUI tear the view down and
+            // build a new one mid-gesture — so the drag died after a single cell and the pane moved
+            // one column however far the pointer went.
+            specs.append(DividerSpec(
+                id: "\(path).\(index)|\(isRow ? "v" : "h")",
+                isRow: isRow, rect: rect,
+                baseCells: weights[index - 1], targetPaneId: paneId
+            ))
+        }
+        return specs
+    }
+
+    /// Asks tmux to make `child` `cells` wide or tall.
+    ///
+    /// §3.3 as everywhere else: this only *asks*. Nothing on screen moves until `%layout-change` comes
+    /// back, so a resize tmux refuses — dragging past a pane's minimum, say — simply does not happen
+    /// rather than leaving the view disagreeing with the server.
+    ///
+    /// Targets the first pane inside the child, which is enough for either orientation: in a
+    /// left/right split every pane of a child spans the child's full width, and in a top/bottom split
+    /// every pane spans its full height, so setting one pane's extent moves the boundary itself.
+    private func resize(paneId: String, isRow: Bool, toCells cells: Int) {
+        guard cells >= 1 else { return }
+        let (hostId, service) = (self.hostId, self.service)
+        Task {
+            await service.resizePane(
+                hostId: hostId, paneId: paneId,
+                cols: isRow ? cells : nil,
+                rows: isRow ? nil : cells
+            )
         }
     }
 
@@ -163,11 +276,6 @@ public struct TerminalContainerView: View {
             isFocused: focused,
             theme: theme,
             service: service,
-            onMetrics: { metrics in
-                guard let cell = metrics.cellSize, cell != cellSize else { return }
-                cellSize = cell
-                requestSizes()
-            },
             onFocusRequest: { focus(paneId) }
         )
         .overlay(alignment: .top) {
@@ -202,7 +310,8 @@ public struct TerminalContainerView: View {
     /// which is what makes a torn-off macOS window independent, and `refresh-client -C` sizes the
     /// client, which is all a tmux older than 2.9 understands.
     private func requestSizes() {
-        guard let cell = cellSize, cell.width > 0, cell.height > 0 else { return }
+        let cell = theme.cellSize(backingScaleFactor: backingScaleFactor)
+        guard cell.width > 0, cell.height > 0 else { return }
         guard containerSize.width > 1, containerSize.height > 1 else { return }
         let cols = Int(containerSize.width / cell.width)
         let rows = Int(containerSize.height / cell.height)
@@ -217,6 +326,94 @@ public struct TerminalContainerView: View {
             if drivesClientSize {
                 await service.requestClientSize(hostId: hostId, cols: cols, rows: rows)
             }
+        }
+    }
+}
+
+/// The draggable boundary between two panes.
+///
+/// An `NSView` rather than a SwiftUI gesture, and not by preference. A pane surface is SwiftTerm's
+/// `TerminalView`, a real `NSView` that tracks the mouse for text selection; a `DragGesture` layered
+/// over it in a `ZStack` never sees a single event, whatever the z-order says. Hit-testing at the
+/// AppKit level is the only thing the terminal cannot out-argue — which also gets a proper resize
+/// cursor for free, via `resetCursorRects`.
+///
+/// Reports a target *cell* count rather than points, and only when that count changes, so dragging
+/// across a pane costs one command per column crossed rather than one per frame. tmux remains the
+/// authority: this asks, and the panes move when `%layout-change` says so (§3.3).
+struct PaneDivider: NSViewRepresentable {
+    let isRow: Bool
+    /// The leading child's current extent in cells, which the drag is measured from.
+    let baseCells: Int
+    /// Points per cell along the axis being dragged.
+    let cellExtent: CGFloat
+    let onResize: (Int) -> Void
+
+    func makeNSView(context: Context) -> DividerView {
+        let view = DividerView()
+        view.configure(isRow: isRow, baseCells: baseCells, cellExtent: cellExtent, onResize: onResize)
+        return view
+    }
+
+    func updateNSView(_ view: DividerView, context: Context) {
+        // Not while a drag is in flight: the layout is changing underneath as tmux answers, and
+        // adopting the new base mid-gesture would measure each frame from a moved starting point —
+        // the pane would accelerate away from the pointer.
+        view.configure(isRow: isRow, baseCells: baseCells, cellExtent: cellExtent, onResize: onResize)
+    }
+
+    final class DividerView: NSView {
+        private var isRow = true
+        private var baseCells = 1
+        private var cellExtent: CGFloat = 1
+        private var onResize: ((Int) -> Void)?
+
+        /// Captured at mouse-down and held for the whole drag, for the reason above.
+        private var dragStartCells: Int?
+        private var dragOrigin: NSPoint?
+        private var lastSent: Int?
+
+        func configure(isRow: Bool, baseCells: Int, cellExtent: CGFloat, onResize: @escaping (Int) -> Void) {
+            self.isRow = isRow
+            self.cellExtent = cellExtent
+            self.onResize = onResize
+            // A live drag owns the baseline; anything else is free to update it.
+            if dragStartCells == nil { self.baseCells = baseCells }
+            window?.invalidateCursorRects(for: self)
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: isRow ? .resizeLeftRight : .resizeUpDown)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            dragStartCells = baseCells
+            dragOrigin = event.locationInWindow
+            lastSent = nil
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let start = dragStartCells, let origin = dragOrigin, cellExtent > 0 else { return }
+            let point = event.locationInWindow
+            // AppKit's y grows upward and tmux's rows grow downward, so a downward drag has to read as
+            // *more* rows for the pane above the boundary.
+            let moved = isRow ? (point.x - origin.x) : (origin.y - point.y)
+            let target = max(1, start + Int((moved / cellExtent).rounded()))
+            guard target != lastSent else { return }
+            lastSent = target
+            onResize?(target)
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            dragStartCells = nil
+            dragOrigin = nil
+            lastSent = nil
+        }
+
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            // Only the handle itself; never swallow clicks meant for a pane beside it.
+            bounds.contains(convert(point, from: superview)) ? self : nil
         }
     }
 }

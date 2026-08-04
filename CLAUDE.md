@@ -141,6 +141,38 @@ switches the server to `%extended-output`) **is ours to resume** — nothing els
 paused never moves again. Anything lost is repaired by a repaint, never handed to the emulator as a
 hole in the byte stream. All of it needs tmux 3.2; below that the byte ceiling is the whole mechanism.
 
+**The cell size comes from the font, never from a pane.** A pane can only report its own frame
+divided by its own cell count, and that measurement is circular: the frame comes from the layout, the
+layout comes from the size we asked tmux for, and that size came from the cell size. With one pane the
+circle is stable and invisible. With a split window each pane divides a *different* frame by a
+*different* cell count, so they report different cell sizes — 8.31, 8.39 and 8.46 for one three-pane
+window — whichever reported last won, and the requested width oscillated between 111 and 112 columns
+forever. That was the separator flicker: `%layout-change` on every frame, panes relaid out on every
+one. `TerminalTheme.cellSize(backingScaleFactor:)` mirrors SwiftTerm's `computeFontDimensions` and
+depends on nothing but the font, which breaks the loop at its source. `sizeChanged` from the emulator
+is deliberately ignored for the same reason — it fires when SwiftTerm re-derives its grid from the
+frame we just gave it, so acting on it is reacting to our own last action.
+
+**A resize handle has to be an `NSView`, and its identity must not move.** A pane surface is
+SwiftTerm's `TerminalView`, a real `NSView` that tracks the mouse for selection; a SwiftUI
+`DragGesture` layered over it in a `ZStack` never sees an event, whatever the z-order says. Hence
+`PaneDivider` being an `NSViewRepresentable` with `mouseDown`/`mouseDragged` and a `resetCursorRects`
+resize cursor. Two further traps, both of which produce a handle that *looks* right and silently does
+almost nothing. Every divider is collected into **one overlay above the whole tree** rather than
+nested in the container it belongs to — nested, a handle sits underneath the pane surfaces of its
+sibling subtree, so the outer split dragged and the inner one did not. And the `ForEach` id must be
+the seam's **place in the tree**, never its position and never the target pane: a left/right seam and
+the top/bottom seam inside its leading column resolve to the same first pane, so keying on the pane
+renders one seam where there should be two — and keying on position changes the id the instant a drag
+resizes anything, tearing the view down mid-gesture so the pane moves exactly one cell however far the
+pointer travels. The drag baseline is captured at `mouseDown` for the same reason: the layout moves
+underneath as tmux answers, and re-reading it each frame measures from a moving origin.
+
+**Window tabbing is off (`NSWindow.allowsAutomaticWindowTabbing = false`).** Otherwise a second window
+opens as a *tab* of the first, which is wrong here twice over: ⌥-clicking a session in the menu bar
+asks for a window and got a tab, and a row of macOS tabs sits directly above the tab bar of tmux
+windows, which are the tabs this app is actually about.
+
 **Pane surfaces need explicit `.id(paneId)`.** The layout tree is rendered through `AnyView`, which
 erases structural identity, so without an explicit id SwiftUI rebuilds every `NSView` on each update
 and discards the terminal's contents.
@@ -199,6 +231,28 @@ to the user verbatim when a channel dies.
 invalidates it — and a stale name is worse than a failed lookup, because the reconnect path runs
 `new-session -A -s <old name>` and creates an empty session under it. `syncReconnectTarget` is called
 from `%session-renamed` and after `list-sessions`.
+
+**`%exit` is the only thing separating "the session ended" from "the link died".** A dropped ssh
+connection produces EOF and nothing else; tmux ending a client always announces it first. Verified on
+3.7b: `kill-session` on the attached session and the last pane exiting both emit `%sessions-changed`
+then a bare `%exit`. Without that distinction the recovery path treats a deliberate close as a network
+blip and reconnects with `new-session -A -s <reconnectTarget>` — recreating, with a fresh window, the
+session the user just closed. That was Ctrl+D appearing to open a new shell and the Kill Session
+command appearing to add a window. So `Connection.serverEnded` short-circuits the backoff: the dead
+name is dropped from `reconnectTarget`, and recovery is one attempt at `attachAny` —
+`attach-session` with **no target**, which can only ever land on something that already exists.
+`Connection.attachedToSession` is what stops that from looping: attaching to a server that is gone is
+not a connection failure but a completed handshake answering `no sessions` and exiting, so the second
+`%exit` has to be told from the first. Nothing left to attach to means `.disconnected` with an empty
+session list — the sessions are genuinely gone, unlike a dropped link where they are merely out of
+reach, and listing them offers rows that do nothing.
+
+Two consequences that are easy to miss. **Unlinking a window can destroy its session**: a session left
+with no windows is destroyed by tmux, so closing the last tab of a multi-linked window ends that
+session and moves the client elsewhere — `testUnlinkingAWindowLeavesItRunningInItsOtherSession` asserts
+the window left the session *or* the session went with it. And **a test that waits on a model
+predicate must fail, not skip**: `waitForHost` throws `XCTSkip` on timeout, which is exactly as green
+as a pass, so anything asserting the absence of this bug uses `waitFor` plus an explicit assertion.
 
 ## Protocol gotchas
 
@@ -272,19 +326,104 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   Incomplete rows are dropped rather than passed to ssh (a malformed `-L` makes ssh exit before tmux
   starts), and `ExitOnForwardFailure` is deliberately left at ssh's default — a taken local port must
   not kill the session. ssh's complaint lands in the pre-handshake transcript.
-- **A detached window shares the host's channel (F4.12, option B).** Tearing off a tmux *window* is
-  fully live, because `%output` arrives for every pane of the attached session. A detached *session*
-  cannot be: control mode streams output for one session per client, so a window showing any other
-  session renders one `capture-pane` snapshot, says so, and offers "Attach Here" — which necessarily
-  freezes the previously attached session's windows. Making two sessions of one host live at once needs
-  a second channel, i.e. re-keying `connections`, `outputSubscribers`, `reconnectTarget`, and
-  `reconnectAttempts` from `hostId` to `(hostId, session)`. That is deliberately not done.
-- **Menu commands act on `AppModel.activeScope`, not the sidebar selection.** Menus are
-  application-wide, so ⌘T with a torn-off window in front must open a window in *that* window's session.
-  A detached window sets `frontmostScope` while it is key; the main window clears it. Detached windows
-  also keep their own `focusedPaneId`, selection, and sheet state — sharing the model's would move each
-  other's keyboard focus, and a sheet bound to shared state presents itself in every open window at
-  once.
+- **Every window shares the host's one channel (F4.12), and only one session per host is live.**
+  `%output` arrives for every pane of the *attached* session, so any window showing that session is
+  fully live and any window showing a different session of the same host is a `capture-pane` snapshot.
+  `NotAttachedBanner` is what says so and offers "Attach Here" — which necessarily freezes whatever
+  session was attached before. Making two sessions of one host live at once needs a second channel,
+  i.e. re-keying `connections`, `outputSubscribers`, `reconnectTarget`, and `reconnectAttempts` from
+  `hostId` to `(hostId, session)`. That is deliberately not done. The banner used to live only in the
+  torn-off window because a main window could not reach the situation; with several main windows it is
+  ordinary, and panes that quietly stop moving are the worst possible way to discover it.
+- **There is one kind of window.** "Open in New Window" opens an ordinary window seeded to a session
+  with the sidebar collapsed, not the separate `DetachedScene` type it used to — that had its own view,
+  a reduced feature set, and a button to convert itself into a real window, three things to maintain
+  for a result that wanted to be a normal window all along.
+- **Anything that belongs to a window lives on `WindowState`, not `AppModel`.** Selection, focused
+  pane, and every sheet the user can raise are per macOS window. Sharing them on the model produced two
+  bugs with one cause: clicking a session in one window retargeted all of them, and one
+  `.sheet(item:)` bound to shared state opened the same dialog once per open window. `RootView` owns one per window; the
+  since-deleted detached window had a hand-rolled version of exactly these fields first, and
+  `WindowState` is that generalised so the main window stopped being the special case. A `WindowGroup`
+  could always open several windows — shared state was the only thing that made doing so useless.
+- **Menu commands act on `AppModel.activeScope`, not on any one window's selection.** Menus are
+  application-wide, so ⌘T with any window in front must open a tmux window in *that* window's session.
+  Every window publishes its scope via `focus(_:)` when it becomes key, main windows included; there is
+  no privileged window to fall back to now that there can be several. `activeScope` is never cleared,
+  because a menu can be used while no window is key and the last one to have focus beats nothing.
+  `activeWindowState` is the companion for commands that open a *sheet* rather than act — it says
+  where to ask — and is weak, so a closed window is not kept alive by having once been key.
+- **A sheet nobody asked for is presented by exactly one window.** ssh prompts arrive from the channel
+  and belong to a host, not a window, so `presentsHostLevelSheets` picks the head of `windowOrder` and
+  the others bind `.constant(nil)`. Registration order rather than focus, so the choice does not move
+  mid-typing; closing that window promotes the next, because nothing able to show a prompt means a host
+  stuck at "Connecting…" forever.
+- **⌘N is a macOS window and ⌘T is a tmux window.** ⌘N used to be the tmux one, which is what it means
+  in no other application (item 11). The tmux item is titled "New tmux Window" rather than "New Tab"
+  even though tmux windows are shown as tabs: AppKit manages menu items titled exactly "New Tab" and
+  "Close Tab" itself under automatic window tabbing, and a custom item competing for those names is at
+  its mercy. `NewAppWindowButton` exists because `openWindow` is an `@Environment` action and
+  `Commands` has no environment to read one from.
+- **A window can be asked for but not opened, and not addressed either.** `AppModel.requestedWindow`
+  records the request and any open window performs it — via `claimWindowRequest()`, because *every*
+  window observes it and a plain nil check on the delivered value opens one window per window already
+  on screen. What the new window should show travels separately through `consumeSeed()`, taken once by
+  the next window to appear: `WindowGroup(id:for:)` would key windows on that value and bring the
+  existing one forward instead of making a second, which is right for "show me this session" and wrong
+  for ⌘N. And SwiftUI cannot bring a *particular* window forward at all, so `WindowAccessor` captures
+  each window's `NSWindow` — that is the only way items 5 and 9 can raise the right one.
+- **Showing a session prefers the window already showing it.** `showSession` tries, in order: the
+  window already displaying that session (brought forward), then a new window if asked for one, then
+  the offered fallback — the clicked window for a sidebar double-click, the last-used one for the menu
+  bar extra — then a new window because nothing was open. Retargeting some other window to a session
+  that is already on screen both surprises the user and discards what that window was showing.
+- **A window's label is its name only when the user chose it.** `#{automatic-rename}` is how tmux says
+  which: `1` while it is naming the window after the running command, `0` once someone has renamed it.
+  There is no `#{window_...}` variable for this — the option name itself is the format. Otherwise the
+  label is what is *running*, and for a split window that means every pane, because tmux's automatic
+  name follows whichever pane is current: a split window's label changed as the user moved between
+  panes, and two split windows read identically whenever their active panes matched. `displayLabel`
+  lives on `TmuxWindow` so the sidebar and the tab cannot disagree about what a window is called.
+- **Nothing announces `pane_current_command`.** It only arrives with a `list-panes`, and topology
+  refreshes fire on structural changes — so pane-derived labels sat stale until something unrelated
+  happened to refresh them. `schedulePaneRefresh` runs on `%window-renamed` (an automatic rename *is*
+  tmux reporting that the foreground command changed) and on `%window-pane-changed` (a command started
+  in a pane that was not current renames nothing). A background pane changing command while nobody
+  switches or renames is still not reported; there is no notification for it.
+- **Creating something shows it, and that takes a round trip.** Control mode's `new-session` and
+  `new-window` answer with no id, so the thing created is not selectable until the topology refresh
+  brings it back. `AppModel` records the intent and satisfies it on the next snapshot — a session by
+  *name*, since tmux allocates the `$id`, and a window by *not having been there before*, since
+  selecting whichever window tmux made active would hand the selection to a window opened elsewhere in
+  the meantime. Requests hold the asking window weakly and expire after 15 s: one kept indefinitely
+  would eventually match an unrelated session of the same name and move somebody's window. ⌥ on the
+  menu bar's **New Session** means what ⌥ means on a session row — a window of its own — and has to
+  travel the same way rather than opening one at the click: there is no id to seed a window with until
+  tmux answers. So the reveal request carries the intent, opens the window when the session arrives,
+  and is the one kind of reveal that does *not* need the asking window to still be there.
+- **The menu bar extra says what ⌥ would do, by polling.** `MenuBarExtra` hands its content no event
+  and SwiftUI has no `isAlternate`, so the items' icons are swapped by hand while ⌥ is down —
+  otherwise the modifier is invisible until after the click that used it. It cannot be watched with an
+  event monitor: a menu tracks events in a run loop of its own where a local monitor sees nothing, and
+  a global monitor for a keyboard event needs Accessibility, which this app needs for nothing else.
+  `OptionKeyMonitor` therefore reads the hardware flags on a `Timer` added to the **common** run-loop
+  modes — the default mode never fires during menu tracking — and only between `NSMenu`'s
+  begin/end-tracking notifications, so nothing wakes up while no menu is open. The *action* still
+  reads `NSEvent.modifierFlags` at click time; a 20 Hz poll is for display and can be a frame behind.
+- **Focusing a window attaches it.** Only the attached session receives `%output` and there is one
+  channel per host, so a window showing another session of that host is a still frame. Clicking into a
+  window already says "I want to work here"; making the user then notice a banner and press a button
+  asks twice. `AppModel.focus` calls `switchSession` when the focused window's session is not the
+  attached one — which necessarily turns whatever *was* attached into snapshots, and that is the whole
+  job `NotAttachedBanner` is left doing. It has no button: the action it would offer is the one that
+  just ran.
+- **tmux ids collide across hosts.** Sessions and windows are numbered per *server*, so `$0` and `@1`
+  exist on every host at once — and that is the common case, not the odd one, because the ordinary way
+  to reach a second host is to ssh into it and its tmux starts numbering from zero exactly like the
+  first. Anything keyed on a tmux id alone therefore has to carry the host too: `WindowState.isShowing`
+  for row selection, and the sidebar's `key(_:_:)` for hover. Without it a window row lit up on every
+  connected host simultaneously. The commands behind the row buttons were always host-qualified and
+  were never affected; only the display was.
 - **Network *switches* never report `.unsatisfied`.** `NetworkStateMonitor` compares
   `path.availableInterfaces` as well as the satisfied flag; watching only the flag misses Wi-Fi to a
   different Wi-Fi, which is exactly when a host that was unreachable becomes reachable again.

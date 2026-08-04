@@ -81,6 +81,19 @@ for bundle in "$BUILD_DIR"/*.bundle; do
 done
 shopt -u nullglob
 
+# The icon is committed rather than built here. Compiling Design/tetmux.icon — the Icon Composer
+# document that is the real source — needs `actool` from a full Xcode, and CI runs on CommandLineTools;
+# see Scripts/make-icon.swift, which regenerates this from the render when the artwork changes.
+ICON_SRC="$REPO_ROOT/Sources/tetmuxUI/Resources/$APP_NAME.icns"
+if [[ -f "$ICON_SRC" ]]; then
+    echo "    icon: $(basename "$ICON_SRC")"
+    cp "$ICON_SRC" "$APP/Contents/Resources/$APP_NAME.icns"
+else
+    # Not fatal: a bundle with no icon still runs. But it ships with the blank-page placeholder, and
+    # that is worth one line of warning rather than being discovered on the download.
+    echo "==> WARNING: no icon at $ICON_SRC; bundle will use the generic placeholder"
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -89,6 +102,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
+    <string>$APP_NAME</string>
+    <key>CFBundleIconFile</key>
     <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
