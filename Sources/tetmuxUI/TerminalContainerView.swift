@@ -269,17 +269,18 @@ public struct TerminalContainerView: View {
 
     /// How far an unfocused pane drops back when the window is split.
     ///
-    /// Chosen so that default-coloured text composites onto the spec's inactive grey: the pane sits on
-    /// `textBackgroundColor`, so this blend puts black-on-white text at `#75757a` and does the
-    /// equivalent thing in dark mode instead of inverting into a light-mode constant. It is *up* from
-    /// the 0.45 it was, which is the point of turn 4 — the frame got quieter, so the panes it is not
-    /// pointing at no longer have to be washed out for it to be found.
+    /// Raised twice now, and for the same reason each time: the frame around the focused pane is what
+    /// answers "which one am I typing into", so the other panes only have to be *quieter* than it, not
+    /// hard to read. At 0.54 black-on-white text composited to about `#75757a` — legible in isolation
+    /// but noticeably washed out beside the focused pane, and the panes you are not typing into are
+    /// usually still the ones you are watching, which is the whole reason the window is split. This
+    /// puts them near `#474747`: clearly recessive, still comfortably readable.
     ///
     /// This is a composite rather than a foreground colour on the emulator, which is what the spec's
     /// wording asks for and SwiftTerm cannot honestly give: `nativeForegroundColor` recolours only text
     /// the program left at the default, so a pane running `ls --color` or an editor would not dim at
     /// all, and setting it repaints nothing already on screen.
-    private static let inactivePaneOpacity: Double = 0.54
+    private static let inactivePaneOpacity: Double = 0.72
 
     /// The active pane's frame: the accent with most of its saturation taken out, so it sits below the
     /// pane's own text in contrast rather than competing with it.

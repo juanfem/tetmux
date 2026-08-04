@@ -524,6 +524,37 @@ private struct WindowTab: View {
         model.select(in: state, host: state.selectedHostId ?? "", session: session.id, window: window.id)
     }
 
+    /// The window's label, with the focused pane's part in medium.
+    ///
+    /// A split window is labelled by what is running in *every* pane — `zsh · vim · tail` — which says
+    /// what the window holds but not which of them the keyboard is pointing at. Weight rather than
+    /// colour: the tab strip already spends colour on selection and on the activity dot, and a third
+    /// colour there would be one signal too many. Medium is also the smallest step that survives the
+    /// tab's size, where a colour shift would not.
+    ///
+    /// One `Text` built by concatenation rather than an `HStack` of several, so the label truncates as
+    /// a single run — an HStack would shrink the parts independently and put an ellipsis in the middle
+    /// of each.
+    private var title: Text {
+        guard let segments = window.displayLabelSegments, segments.count > 1 else {
+            return Text(window.displayLabel)
+        }
+        // For the tab in front, the pane the user is actually typing into; for the others, the pane
+        // tmux considers current, which is where typing would go if the tab were selected.
+        let focused = isSelected
+            ? (state.focusedPaneId ?? window.activePaneId)
+            : window.activePaneId
+
+        return segments.enumerated().reduce(Text("")) { partial, entry in
+            let (index, segment) = entry
+            let separator = index > 0 ? Text(TmuxWindow.labelSeparator) : Text("")
+            let piece = segment.paneId == focused
+                ? Text(segment.text).fontWeight(.medium)
+                : Text(segment.text)
+            return partial + separator + piece
+        }
+    }
+
     var body: some View {
         HStack(spacing: 5) {
             Button(action: select) {
@@ -533,7 +564,7 @@ private struct WindowTab: View {
                     }
                     // The same text the sidebar shows. A tab and its row naming the window
                     // differently is the sort of thing that makes a tree feel unrelated to its content.
-                    Text(window.displayLabel).lineLimit(1).truncationMode(.tail)
+                    title.lineLimit(1).truncationMode(.tail)
                     if window.paneCount > 1 {
                         Text("\(window.paneCount)")
                             .font(.caption2)

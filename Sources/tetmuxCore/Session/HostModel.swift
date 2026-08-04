@@ -108,6 +108,30 @@ public struct TmuxWindow: Identifiable, Equatable, Sendable {
         return commands.isEmpty ? name : commands.joined(separator: " · ")
     }
 
+    /// One label part per pane, when the label is made of what is running rather than of a name.
+    ///
+    /// `nil` whenever `displayLabel` is a single name — a window the user named, or one with a single
+    /// pane — because there is nothing to attribute to a pane in that case.
+    ///
+    /// Exists so a tab can weight the part belonging to the focused pane without deciding for itself
+    /// what a window is called. Built from the same panes and the same filter as `displayLabel`, and
+    /// joined with the same separator, so the two cannot describe a window differently.
+    public var displayLabelSegments: [LabelSegment]? {
+        guard !hasExplicitName, paneCount > 1 else { return nil }
+        let segments = panes
+            .filter { !$0.command.isEmpty }
+            .map { LabelSegment(paneId: $0.id, text: $0.command) }
+        return segments.isEmpty ? nil : segments
+    }
+
+    public static let labelSeparator = " · "
+
+    public struct LabelSegment: Equatable, Sendable, Identifiable {
+        public let paneId: String
+        public let text: String
+        public var id: String { paneId }
+    }
+
     public init(
         id: String,
         name: String,

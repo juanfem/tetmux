@@ -756,6 +756,31 @@ private struct WindowPaneIcon: View {
     var body: some View {
         RoundedRectangle(cornerRadius: 2)
             .strokeBorder(lineWidth: TreeIcon.stroke)
+            // Half the box is filled when the window is split.
+            //
+            // A hairline rule was the only difference between split and not, and at 13px on a row
+            // that may also be tinted by selection it was very nearly nothing — the two icons read as
+            // the same rectangle. A filled half is a difference in *area* rather than in one line, so
+            // it survives the size, the tint, and a quick glance down the list. The fill's edge is
+            // the seam, and the rule stays on top of it to keep that edge crisp against the tint.
+            .background(alignment: split == .leftRight ? .leading : .top) {
+                if let split {
+                    GeometryReader { geometry in
+                        Rectangle()
+                            // Weighted by eye at 13px rather than picked as a round number: at 0.22
+                            // the fill was legible when magnified and very nearly absent at the size
+                            // it is actually drawn, which is the failure this change exists to undo.
+                            .fill(.primary.opacity(0.32))
+                            .frame(
+                                width: split == .leftRight ? geometry.size.width / 2 : geometry.size.width,
+                                height: split == .leftRight ? geometry.size.height : geometry.size.height / 2
+                            )
+                    }
+                }
+            }
+            // Composited, so the fill is clipped to the same rounded corners as the border rather
+            // than squaring them off.
+            .clipShape(RoundedRectangle(cornerRadius: 2))
             .overlay {
                 if let split {
                     // Centred rather than placed at the real ratio: the rule is the *fact* of a split,
