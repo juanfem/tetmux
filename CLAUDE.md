@@ -113,7 +113,13 @@ focused view; the loser renders the grid tmux gave the owner. Below 2.9 there is
 at all and `window-size latest` + `refresh-client -C` remains the only mechanism — without *something*
 there an old or small client clamps every window toward 80×24 (F4.17). `window-size` is a session
 option, so it is re-applied after `%session-changed` and put back with `set-option -u` on a deliberate
-disconnect.
+disconnect — and **that last command has to be waited for, not merely written**. `teardown` hangs the
+channel up with `SIGHUP`, so the tmux client must have read the line out of the pty before that lands;
+writing and terminating in the same breath is a race an idle machine wins and a loaded one loses,
+leaving `manual` on the user's session for the next plain `tmux attach` to find. It passed here six
+runs in a row and failed in CI on a commit that had passed there minutes earlier. `sendAndAwait` waits
+for tmux's own `%end` — with a timeout, because a channel can accept a write and never answer, and a
+disconnect that hangs is worse than an option left set.
 
 **A repaint for a second viewer must be addressed to it alone.** `capture-pane`'s payload starts with
 `ESC[H ESC[2J ESC[3J` — screen *and* scrollback. The same pane can be on screen in two macOS windows,

@@ -146,6 +146,13 @@ public actor SessionService {
         var windowSizeOwners: [String: UUID] = [:]
         var windowResizeTask: Task<Void, Never>?
 
+        /// Callers waiting for tmux to answer a command they sent, by command id.
+        ///
+        /// Only for the handful of commands whose *effect* has to have landed before we do something
+        /// irreversible — putting `window-size` back before hanging the channel up is the whole list.
+        /// Everything else is fire-and-forget by design.
+        var acknowledgements: [UUID: CheckedContinuation<Void, Never>] = [:]
+
         init(transport: PtyTransport, sessionTarget: String) {
             self.transport = transport
             self.sessionTarget = sessionTarget
@@ -185,6 +192,9 @@ public actor SessionService {
             /// broadcasting a late joiner's repaint would wipe the history the other window is holding.
             case capturePane(paneId: String, target: UUID?)
             case roundTrip(sentAt: ContinuousClock.Instant)
+            /// Like `.ignore`, but somebody is waiting to hear that tmux ran it. A refusal counts:
+            /// the point is that the command has been *dealt with*, not that it succeeded.
+            case acknowledged(UUID)
         }
     }
 
@@ -246,8 +256,8 @@ public actor SessionService {
         hosts[hostId]
     }
 
-    public func removeHost(hostId: String) {
-        disconnectHost(hostId: hostId)
+    public func removeHost(hostId: String) async {
+        await disconnectHost(hostId: hostId)
         finishSubscribers(hostId: hostId)
         reconnectTarget.removeValue(forKey: hostId)
         hosts.removeValue(forKey: hostId)
@@ -358,10 +368,14 @@ public actor SessionService {
         }
     }
 
-    public func disconnectHost(hostId: String) {
+    public func disconnectHost(hostId: String) async {
         guard let connection = connections[hostId] else { return }
         connection.userInitiatedDisconnect = true
-        restoreWindowSizePolicy(hostId: hostId, connection: connection)
+        await restoreWindowSizePolicy(hostId: hostId, connection: connection)
+        // The channel can end while we wait — the link drops, or tmux exits — and whichever path
+        // noticed has already torn it down and set the state. Tearing down a *replacement* channel,
+        // or marking a freshly reconnected host disconnected, is the failure this avoids.
+        guard connections[hostId]?.epoch == connection.epoch else { return }
         teardown(hostId: hostId, connection: connection)
         reconnectAttempts[hostId] = 0
         withHost(hostId) { $0.connectionState = .disconnected }
@@ -496,6 +510,10 @@ public actor SessionService {
                         message: message.isEmpty ? "tmux rejected the command" : message
                     )
                 }
+            case .acknowledged(let id):
+                // A refusal is an answer. The waiter is holding a channel open until tmux has dealt
+                // with the command, and it has.
+                resumeAcknowledgement(id, connection: connection)
             default:
                 break
             }
@@ -772,6 +790,9 @@ public actor SessionService {
             let milliseconds = Double(elapsed.components.seconds) * 1000
                 + Double(elapsed.components.attoseconds) / 1e15
             withHost(hostId) { $0.rttMilliseconds = milliseconds }
+
+        case .acknowledged(let id):
+            resumeAcknowledgement(id, connection: connection)
         }
     }
 
@@ -1020,12 +1041,45 @@ public actor SessionService {
         if !connection.transport.write(data) {
             connection.pending.removeLast()
             log("[\(hostId)] write failed for: \(text)")
+            // Nothing will ever answer a command that was never written.
+            if case .acknowledged(let id) = kind { resumeAcknowledgement(id, connection: connection) }
         }
     }
 
     private func send(_ text: String, kind: PendingCommand.Kind = .ignore, hostId: String) {
         guard let connection = connections[hostId] else { return }
         send(text, kind: kind, hostId: hostId, connection: connection)
+    }
+
+    /// Sends `text` and returns once tmux has answered it, or once `timeout` has passed.
+    ///
+    /// The timeout is not a formality: a channel can be alive enough to accept a write and never
+    /// answer — a wedged ssh link takes ~45 s to become EOF — and a disconnect that hangs on one is
+    /// worse than a session option left set. Every other path that could strand the waiter resumes
+    /// it instead: a write that fails, an `%error`, and `teardown`.
+    private func sendAndAwait(
+        _ text: String,
+        hostId: String,
+        connection: Connection,
+        timeout: Duration = .seconds(2)
+    ) async {
+        let id = UUID()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            connection.acknowledgements[id] = continuation
+            send(text, kind: .acknowledged(id), hostId: hostId, connection: connection)
+            Task { [weak connection] in
+                try? await Task.sleep(for: timeout)
+                guard let connection else { return }
+                // Inherits this actor's isolation, so it lands back here to touch the dictionary.
+                self.resumeAcknowledgement(id, connection: connection)
+            }
+        }
+    }
+
+    /// Resumes one waiter, at most once. Every path that can end a command's life calls this, so the
+    /// removal is what makes a second call harmless.
+    private func resumeAcknowledgement(_ id: UUID, connection: Connection) {
+        connection.acknowledgements.removeValue(forKey: id)?.resume()
     }
 
     // MARK: - Pane output
@@ -1366,16 +1420,20 @@ public actor SessionService {
     /// `window-size manual` is a change to the user's own session, and a manual size persists — a later
     /// plain `tmux attach` would find windows that no longer follow the terminal.
     ///
-    /// Best-effort by construction, in two ways. It can only run on a *deliberate* disconnect, so a
-    /// channel that dies with the network leaves the option set (tetmux sets it again on the next
-    /// attach, so the visible effect is limited to attaching with something else in the meantime). And
-    /// the write races teardown: locally the client reads it first, but over ssh the bytes may still be
-    /// in flight when the transport is terminated. `tmux set-option -u -t <session> window-size` is the
-    /// remedy either way.
-    private func restoreWindowSizePolicy(hostId: String, connection: Connection) {
+    /// **Waited for**, which is the only reason it works. `teardown` hangs the channel up with
+    /// `SIGHUP`, and the tmux client has to have *read* the line out of the pty before that lands —
+    /// writing it and immediately terminating is a race the local client usually wins and a loaded
+    /// machine loses outright, leaving `window-size manual` on the user's session for the next plain
+    /// `tmux attach` to find. Over ssh there is a whole network in the gap. So this waits for tmux's
+    /// own `%end`, which says the server ran it, and only then may the caller tear anything down.
+    ///
+    /// Still best-effort in one direction: it can only run on a *deliberate* disconnect, so a channel
+    /// that dies with the network leaves the option set. tetmux sets it again on the next attach, so
+    /// the visible effect is limited to attaching with something else in the meantime.
+    private func restoreWindowSizePolicy(hostId: String, connection: Connection) async {
         guard connection.sizesWindowsIndividually, connection.handshakeComplete else { return }
         let target = TmuxCommand.quote(reconnectTarget[hostId] ?? connection.sessionTarget)
-        send("set-option -u -t \(target) window-size", kind: .ignore, hostId: hostId, connection: connection)
+        await sendAndAwait("set-option -u -t \(target) window-size", hostId: hostId, connection: connection)
     }
 
     /// Claims the right to size a tmux window. Called by a view when its macOS window takes focus.
@@ -1644,6 +1702,10 @@ public actor SessionService {
         connection.cancelTimers()
         connection.readTask?.cancel()
         connection.transport.terminate()
+        // Nothing is going to answer anything now. A waiter left here would sit out its whole
+        // timeout for an answer that cannot arrive.
+        for (_, continuation) in connection.acknowledgements { continuation.resume() }
+        connection.acknowledgements.removeAll()
         // A prompt belongs to the channel that asked; there is nothing left to answer.
         withHost(hostId) { $0.authenticationPrompt = nil }
         if connections[hostId]?.epoch == connection.epoch {

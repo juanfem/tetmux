@@ -638,13 +638,14 @@ final class SessionIntegrationTests: XCTestCase {
 
         await service.disconnectHost(hostId: "local")
 
-        // The write races the channel teardown, so allow a moment for tmux to act on it.
-        var restored = false
-        for _ in 0..<20 {
-            if windowSizeOption() != "manual" { restored = true; break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        XCTAssertTrue(restored, "window-size was left at manual on the user's session")
+        // No polling: `disconnectHost` waits for tmux's `%end` before hanging the channel up, so the
+        // option is already back by the time it returns. It used to write and terminate in the same
+        // breath, which is a race the tmux client wins on an idle machine and loses on a loaded one —
+        // so this passed locally and failed in CI, on the same commit that had passed there minutes
+        // before. A poll here would hide that from the next person to break it.
+        XCTAssertNotEqual(
+            windowSizeOption(), "manual", "window-size was left at manual on the user's session"
+        )
     }
 
     /// `show-options -w` inherits, so this reports the session's effective value.
