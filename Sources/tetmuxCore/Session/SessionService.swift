@@ -120,6 +120,19 @@ public actor SessionService {
         var pending: [PendingCommand] = []
         var current: PendingCommand?
 
+        /// The number the open block's `%begin` carried, and the last one seen on this channel.
+        ///
+        /// Ordering is what correlates a response to its command, so nothing here is *needed* to
+        /// match them — but a FIFO with no integrity check fails silently and permanently when it
+        /// slips, and the slip is invisible for the life of the channel: repaints land in the wrong
+        /// pane, `list-panes` output reaches `applyWindows`, and an internal command's refusal is
+        /// reported to the user as some unrelated thing they asked for. The numbers arrive on every
+        /// block already. They are server-wide, so they are not consecutive for *us* — another
+        /// client's commands consume them too — but they are strictly increasing, and a response
+        /// with nothing pending is a desync however it happened.
+        var currentNumber: Int?
+        var lastCommandNumber: Int?
+
         /// tmux emits one `%begin`/`%end` block of its own on attach, before we can write anything.
         /// Writing before it lands would misalign `pending` by one for the life of the channel, so
         /// commands wait here until the handshake completes.
@@ -585,6 +598,25 @@ public actor SessionService {
         withHost(hostId) { $0.connectionState = .disconnected }
     }
 
+    /// Disconnects every host, putting each session's `window-size` back before the channel goes.
+    ///
+    /// Quitting is the ordinary way people close a Mac application, and until this existed it was the
+    /// one exit that skipped `restoreWindowSizePolicy` entirely — so ⌘Q left `manual` set on the
+    /// user's sessions for the next plain `tmux attach` to find windows that no longer follow the
+    /// terminal. `disconnectHost` already does the work and already waits for tmux's own `%end`
+    /// rather than merely writing the line; all that was missing was somebody to call it on the way
+    /// out.
+    ///
+    /// Hosts go concurrently. They are independent channels and a slow or wedged one must not decide
+    /// how long the others take — the caller is holding a quit open while this runs.
+    public func shutdown() async {
+        await withTaskGroup(of: Void.self) { group in
+            for hostId in Set(connections.keys).union(followerChannels.keys) {
+                group.addTask { await self.disconnectHost(hostId: hostId) }
+            }
+        }
+    }
+
     private func defaultSessionName(for config: HostConfig) -> String {
         "tetmux-main"
     }
@@ -700,22 +732,48 @@ public actor SessionService {
         switch event {
         case .begin(_, let number, _):
             log("[\(hostId)] %begin \(number)")
-            connection.current = connection.pending.isEmpty ? PendingCommand(text: "", kind: .ignore) : connection.pending.removeFirst()
+            if let last = connection.lastCommandNumber, number <= last {
+                // Server-wide numbers only ever go up. A repeat means we are reading something that
+                // is not the frame we think it is.
+                log("[\(hostId)] protocol desync: %begin \(number) after \(last)")
+            }
+            connection.lastCommandNumber = number
+            connection.currentNumber = number
+            if connection.pending.isEmpty {
+                // Expected exactly once — tmux's own block on attach, before the handshake completes.
+                // Any later occurrence means the FIFO has slipped and every subsequent response will
+                // be attributed to the wrong command, so it is worth a line in the log even though
+                // there is nothing to do about it here.
+                if connection.handshakeComplete {
+                    log("[\(hostId)] protocol desync: %begin \(number) with no command pending")
+                }
+                connection.current = PendingCommand(text: "", kind: .ignore)
+            } else {
+                connection.current = connection.pending.removeFirst()
+            }
 
         case .commandResultLine(_, _, let bytes):
             connection.current?.lines.append(bytes)
 
-        case .end:
+        case .end(_, let number, _):
+            if let open = connection.currentNumber, open != number {
+                log("[\(hostId)] protocol desync: %end \(number) closing block \(open)")
+            }
             let completed = connection.current
             connection.current = nil
+            connection.currentNumber = nil
             if let completed {
                 complete(completed, hostId: hostId, connection: connection)
             }
             completeHandshakeIfNeeded(hostId: hostId, connection: connection)
 
         case .error(_, let number, _):
+            if let open = connection.currentNumber, open != number {
+                log("[\(hostId)] protocol desync: %error \(number) closing block \(open)")
+            }
             let failed = connection.current
             connection.current = nil
+            connection.currentNumber = nil
             let message = (failed?.lines ?? []).map { String(decoding: $0, as: UTF8.self) }
                 .joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -737,6 +795,16 @@ public actor SessionService {
                 // A refusal is an answer. The waiter is holding a channel open until tmux has dealt
                 // with the command, and it has.
                 resumeAcknowledgement(id, connection: connection)
+            case nil:
+                // No command matched this block, so nothing above knows what failed — and tmux only
+                // ever sends `%error` because something did. Dropping the text left the one case
+                // where a failure is certain as the one case that said nothing at all.
+                withHost(hostId) { host in
+                    host.lastCommandFailure = CommandFailure(
+                        action: "tmux reported an error",
+                        message: message.isEmpty ? "tmux rejected a command" : message
+                    )
+                }
             default:
                 break
             }
@@ -935,8 +1003,10 @@ public actor SessionService {
         // ssh reads a line from the tty. It disables echo itself, so nothing comes back.
         guard var bytes = secret.data(using: .utf8) else { return }
         bytes.append(0x0a)
-        let written = connection.transport.write(bytes)
-        log("[\(hostId)] answered ssh prompt (\(written ? "written" : "write failed"))")
+        // Deliberately not logging which outcome carried what: this is the one write whose payload
+        // is a secret, and the count of bytes that reached the tty is the length of the password.
+        let outcome = connection.transport.write(bytes)
+        log("[\(hostId)] answered ssh prompt (\(outcome == .complete ? "written" : "write failed"))")
     }
 
     /// Abandons a prompt: no secret is available, so the connection cannot proceed.
@@ -1306,11 +1376,29 @@ public actor SessionService {
         // Enqueue before writing: tmux answers in order, and the reply can arrive before this
         // function returns if the actor suspends.
         connection.pending.append(command)
-        if !connection.transport.write(data) {
+        switch connection.transport.write(data) {
+        case .complete:
+            break
+
+        case .nothingWritten:
             connection.pending.removeLast()
             log("[\(hostId)] write failed for: \(text)")
             // Nothing will ever answer a command that was never written.
             if case .acknowledged(let id) = kind { resumeAcknowledgement(id, connection: connection) }
+
+        case .partial(let bytesWritten):
+            // A fragment with no newline is now in front of tmux's parser, and the next command
+            // written will be concatenated onto it — tmux answers one block for two commands and the
+            // FIFO is misaligned for good. Unqueueing the command would only decide *which* responses
+            // are misattributed, so the channel goes instead and recovery reattaches on a clean one.
+            // The reachable cause is a large paste over a congested link, which is exactly when the
+            // chunks are big enough for the pty buffer to fill mid-command.
+            log("[\(hostId)] partial write (\(bytesWritten)/\(data.count)) for: \(text)")
+            channelClosed(
+                hostId: hostId,
+                epoch: connection.epoch,
+                error: PtyError.writeTruncated(bytesWritten: bytesWritten, of: data.count)
+            )
         }
     }
 

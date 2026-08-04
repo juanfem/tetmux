@@ -71,6 +71,32 @@ public struct ControlCodec: Sendable {
             }
         }
 
+        // Framing outranks dispatch. Inside a `%begin` block every line is response content — even
+        // one starting with `%` — and the only thing that ends the block is tmux's own `%end`/`%error`
+        // carrying the number the `%begin` opened with.
+        //
+        // Verified on 3.7b under a pty, with a pane emitting continuously while commands with large
+        // responses were issued: `%output` never appears between a `%begin` and its `%end`. tmux
+        // writes a block as a unit, so anything that looks like a notification in there came from the
+        // command's own output and is not protocol.
+        //
+        // Dispatching first was silent corruption in both directions. Result lines starting with `%`
+        // were dropped — and `capture-pane -p -e -J` replays scrollback as result lines, so a repaint
+        // lost every line of a tcsh or zsh session whose prompt is `%` (and `%<pane-id>` leads a
+        // `list-panes` line the moment a format string starts with `#{pane_id}`). Worse, captured
+        // content could forge protocol: a scrollback holding `%exit` set `serverEnded`, so the next
+        // close looked like an orderly session end and no reconnect was attempted.
+        //
+        // A terminator whose number does *not* match cannot close the block: matching is what
+        // distinguishes tmux's own frame from captured text that happens to look like one.
+        if let active = activeCommandNumber {
+            if let event = Self.blockTerminator(bytes, matching: active) {
+                activeCommandNumber = nil
+                return event
+            }
+            return .commandResultLine(commandNumber: active, line: Self.decode(bytes), bytes: Data(bytes))
+        }
+
         // %output payloads are handled on bytes: the escaped form is ASCII, but the decoded
         // payload is arbitrary binary and must never round-trip through String.
         if Self.hasPrefix(bytes, "%output ") {
@@ -82,13 +108,7 @@ public struct ControlCodec: Sendable {
 
         let line = Self.decode(bytes)
 
-        guard line.hasPrefix("%") else {
-            // A bare line only means something inside a command's response block.
-            if let commandNumber = activeCommandNumber {
-                return .commandResultLine(commandNumber: commandNumber, line: line, bytes: Data(bytes))
-            }
-            return nil
-        }
+        guard line.hasPrefix("%") else { return nil }
 
         var fields = line.split(separator: " ", omittingEmptySubsequences: false)
         let verb = String(fields.removeFirst())
@@ -191,6 +211,27 @@ public struct ControlCodec: Sendable {
         default:
             return .unknownNotification(line: line)
         }
+    }
+
+    /// `%end <ts> <num> [flags]` / `%error <ts> <num> [flags]`, and only for the command whose block
+    /// is open. Returns nil for anything else, including a well-formed terminator carrying a
+    /// different number — that is content, not framing.
+    private static func blockTerminator(_ bytes: [UInt8], matching commandNumber: Int) -> ControlEvent? {
+        let isEnd = hasPrefix(bytes, "%end ")
+        guard isEnd || hasPrefix(bytes, "%error ") else { return nil }
+
+        var fields = decode(bytes).split(separator: " ", omittingEmptySubsequences: false)
+        fields.removeFirst()
+        guard fields.count >= 2,
+              let ts = Int64(fields[0]),
+              let num = Int(fields[1]),
+              num == commandNumber
+        else { return nil }
+
+        let flags = fields.count > 2 ? String(fields[2]) : "0"
+        return isEnd
+            ? .end(timestamp: ts, commandNumber: num, flags: flags)
+            : .error(timestamp: ts, commandNumber: num, flags: flags)
     }
 
     // MARK: - Output payloads

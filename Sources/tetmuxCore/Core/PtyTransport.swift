@@ -13,6 +13,8 @@ public enum PtyError: Error, CustomStringConvertible, Sendable {
     /// The child exited before or during the session. `code` 127 means exec itself failed.
     case childExited(code: Int32)
     case childSignalled(signal: Int32)
+    /// A command reached tmux in part. The framing is broken and cannot be repaired from this side.
+    case writeTruncated(bytesWritten: Int, of: Int)
 
     public var description: String {
         switch self {
@@ -30,6 +32,8 @@ public enum PtyError: Error, CustomStringConvertible, Sendable {
                 : "Process exited with status \(code)"
         case .childSignalled(let signal):
             return "Process terminated by signal \(signal)"
+        case .writeTruncated(let written, let total):
+            return "Only \(written) of \(total) bytes reached tmux; the command stream is out of frame"
         }
     }
 }
@@ -231,20 +235,38 @@ public final class PtyTransport: @unchecked Sendable {
         return .childExited(code: (status >> 8) & 0xff)
     }
 
+    /// What became of a write. The distinction between the two failures is the whole point:
+    /// control-mode commands are newline-framed, so a command that went out *in part* has put a
+    /// fragment with no terminator in front of tmux's parser. The next command written concatenates
+    /// onto it and tmux answers one block for what the caller counted as two — which misaligns the
+    /// pending-command FIFO for the life of the channel, silently. Nothing can retract those bytes
+    /// and nothing can discover how many of them tmux consumed, so a partial write is not a failed
+    /// command: it is a channel that can no longer be spoken on.
+    public enum WriteOutcome: Sendable, Equatable {
+        case complete
+        /// Not one byte left, so the command simply did not happen and the caller can unqueue it.
+        case nothingWritten
+        /// A fragment is in tmux's input and the framing is broken. The channel must be torn down.
+        case partial(bytesWritten: Int)
+    }
+
     /// Writes a control-mode command. Short writes and a temporarily full PTY buffer are handled;
     /// a genuinely wedged channel gives up rather than blocking the caller forever.
     @discardableResult
-    public func write(_ data: Data) -> Bool {
+    public func write(_ data: Data) -> WriteOutcome {
         lock.lock()
         let fd = masterFd
         let alive = !terminated
         lock.unlock()
-        guard fd >= 0, alive, !data.isEmpty else { return false }
+        guard fd >= 0, alive, !data.isEmpty else { return .nothingWritten }
 
-        return data.withUnsafeBytes { raw -> Bool in
-            guard let base = raw.baseAddress else { return false }
+        return data.withUnsafeBytes { raw -> WriteOutcome in
+            guard let base = raw.baseAddress else { return .nothingWritten }
             var written = 0
             var retries = 0
+            func give(up: Void = ()) -> WriteOutcome {
+                written == 0 ? .nothingWritten : .partial(bytesWritten: written)
+            }
             while written < raw.count {
                 let n = Darwin.write(fd, base.advanced(by: written), raw.count - written)
                 if n > 0 {
@@ -254,14 +276,14 @@ public final class PtyTransport: @unchecked Sendable {
                     continue
                 } else if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
                     retries += 1
-                    if retries > 1000 { return false }  // ~1 s of a jammed channel
+                    if retries > 1000 { return give() }  // ~1 s of a jammed channel
                     var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
                     _ = poll(&pfd, 1, 1)
                 } else {
-                    return false
+                    return give()
                 }
             }
-            return true
+            return .complete
         }
     }
 

@@ -124,6 +124,42 @@ public final class TetmuxAppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    /// Hands `window-size` back before the process goes.
+    ///
+    /// tetmux sets `window-size manual` on each session it displays so that a torn-off macOS window
+    /// can size its tmux window independently — a change to the *user's* session, which persists
+    /// after tetmux is gone. `disconnectHost` puts it back and waits for tmux's own `%end` before
+    /// hanging the channel up, but until now only a deliberate per-host disconnect reached it. ⌘Q,
+    /// which is how a Mac application is normally closed, skipped all of it and left every attached
+    /// session `manual` for the next plain `tmux attach` to find.
+    ///
+    /// `.terminateLater` because the work is a round trip per host and `applicationWillTerminate`
+    /// cannot wait for one. The timeout is the point of the whole arrangement being here rather than
+    /// in the model: a channel can accept a write and never answer, and a quit that hangs is worse
+    /// than an option left set. `sendAndAwait` already bounds each command; this bounds the lot, so a
+    /// host that is wedged at the transport layer cannot hold the app open either.
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let model else { return .terminateNow }
+        Task { @MainActor in
+            let cleanup = Task { await model.service.shutdown() }
+            let deadline = Task { try? await Task.sleep(for: .seconds(3)) }
+            // A race, not a wait-then-check: quitting must cost whatever the cleanup actually costs
+            // — a few milliseconds against local tmux — and the deadline exists only for the channel
+            // that never answers. Cancelling `cleanup` is not enough on its own to guarantee that,
+            // since a task parked on a continuation does not resume on cancellation, so the reply is
+            // sent by whichever of the two finishes first.
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { _ = await cleanup.result }
+                group.addTask { _ = await deadline.result }
+                await group.next()
+                group.cancelAll()
+            }
+            cleanup.cancel()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     /// The Dock icon's menu.
     ///
     /// One item, and it is the one the Dock cannot otherwise offer: with every window closed the app

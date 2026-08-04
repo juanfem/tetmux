@@ -64,6 +64,81 @@ final class ControlCodecTests: XCTestCase {
         XCTAssertEqual(number, 7)
     }
 
+    /// Framing outranks dispatch: inside a block, a line starting with `%` is content.
+    ///
+    /// `capture-pane -p -e -J` replays scrollback as result lines, so this is not a contrived input —
+    /// tcsh and zsh's classic prompt is `%`, and every such line used to be parsed as an unknown
+    /// notification and dropped from the repaint.
+    func testResultLinesStartingWithPercentAreContentNotNotifications() {
+        var codec = ControlCodec()
+        let events = codec.feed(Array(
+            "%begin 1 4237 1\r\n%148 80x24 padpadpadpadpad\r\n%9 136x55 padpadpadpadpad\r\n%end 1 4237 1\r\n".utf8
+        ))
+
+        XCTAssertEqual(events.count, 4)
+        guard case .commandResultLine(_, let first, _) = events[1] else {
+            return XCTFail("expected .commandResultLine, got \(events[1])")
+        }
+        guard case .commandResultLine(_, let second, _) = events[2] else {
+            return XCTFail("expected .commandResultLine, got \(events[2])")
+        }
+        XCTAssertEqual(first, "%148 80x24 padpadpadpadpad")
+        XCTAssertEqual(second, "%9 136x55 padpadpadpadpad")
+    }
+
+    /// The severe half of the same bug. A scrollback holding a line like `%exit` used to be parsed as
+    /// the server announcing the session had ended — which sets `serverEnded`, so the next close was
+    /// treated as deliberate and no reconnect was attempted. Captured `%output` could likewise inject
+    /// bytes into a pane nobody wrote to.
+    func testCapturedContentCannotForgeNotifications() {
+        var codec = ControlCodec()
+        let events = codec.feed(Array(
+            "%begin 1 20 1\r\n%exit\r\n%output %3 forged\r\n%session-changed $9 evil\r\n%end 1 20 1\r\n".utf8
+        ))
+
+        XCTAssertEqual(events.count, 5)
+        for event in events[1...3] {
+            guard case .commandResultLine = event else {
+                return XCTFail("captured content parsed as protocol: \(event)")
+            }
+        }
+        guard case .end = events[4] else { return XCTFail("expected .end") }
+    }
+
+    /// Only the matching number closes the block. A terminator for some other command is text that
+    /// happens to look like framing — which is exactly what a captured tmux transcript contains.
+    func testTerminatorWithAnotherCommandNumberDoesNotCloseTheBlock() {
+        var codec = ControlCodec()
+        let events = codec.feed(Array(
+            "%begin 1 100 1\r\n%end 1 99 1\r\nstill inside\r\n%end 1 100 1\r\n".utf8
+        ))
+
+        XCTAssertEqual(events.count, 4)
+        guard case .commandResultLine(_, let impostor, _) = events[1] else {
+            return XCTFail("expected the mismatched terminator to be content, got \(events[1])")
+        }
+        XCTAssertEqual(impostor, "%end 1 99 1")
+        guard case .commandResultLine(_, let after, _) = events[2] else {
+            return XCTFail("expected .commandResultLine, got \(events[2])")
+        }
+        XCTAssertEqual(after, "still inside")
+        guard case .end(_, let number, _) = events[3] else { return XCTFail("expected .end") }
+        XCTAssertEqual(number, 100)
+    }
+
+    /// Notifications outside a block still dispatch — the fix must not cost the ordinary path.
+    func testNotificationsOutsideABlockAreStillParsed() {
+        var codec = ControlCodec()
+        let events = codec.feed(Array(
+            "%begin 1 5 1\r\n%end 1 5 1\r\n%output %3 hi\r\n%exit\r\n".utf8
+        ))
+        XCTAssertEqual(events.count, 4)
+        guard case .output(let paneId, let data) = events[2] else { return XCTFail("expected .output") }
+        XCTAssertEqual(paneId, "%3")
+        XCTAssertEqual(data, Data("hi".utf8))
+        guard case .exit = events[3] else { return XCTFail("expected .exit") }
+    }
+
     /// tmux command numbers are server-wide and start wherever the server happens to be — never
     /// at zero. Anything that predicts them is wrong.
     func testCommandNumbersAreTakenFromTheStreamNotAssumed() {
