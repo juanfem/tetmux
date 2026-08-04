@@ -290,6 +290,11 @@ struct SidebarView: View {
                     Task { await model.service.detachOtherClients(hostId: host.id) }
                 }
                 Divider()
+                // F4.11's two ways of letting go, and they are not the same thing. "Detach" says so
+                // to tmux and leaves the session running for the next client; "Disconnect" also puts
+                // `window-size` back and stops the reconnect backoff, which is what the user means
+                // when they are done with a host rather than done with this client.
+                Button("Detach This Client") { model.detachThisClient(host.id) }
                 Button("Disconnect") { model.disconnect(host.id) }
             } else {
                 Button("Reconnect") { model.reconnect(host.id) }
@@ -629,6 +634,11 @@ private struct RowButton: View {
     var isArmed: Bool = false
     let action: () -> Void
 
+    /// §7 — Reduce Motion. The reveal is the only animation in the tree, and its whole job is to keep
+    /// a button from appearing abruptly under the pointer; with the preference on, appearing abruptly
+    /// is what the user has asked for.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     @State private var isHovered = false
 
     var body: some View {
@@ -644,7 +654,7 @@ private struct RowButton: View {
         }
         .buttonStyle(.plain)
         .opacity(isVisible ? 1 : 0)
-        .animation(RowAction.reveal, value: isVisible)
+        .animation(reduceMotion ? nil : RowAction.reveal, value: isVisible)
         .allowsHitTesting(isVisible)
         .onHover { isHovered = $0 && isVisible }
         .help(help)

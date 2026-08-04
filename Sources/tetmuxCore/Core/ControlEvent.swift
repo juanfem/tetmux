@@ -54,6 +54,20 @@ public enum ControlEvent: Equatable, Sendable {
     case pause(paneId: String)
     case continuePane(paneId: String)
 
+    /// `%subscription-changed <name> <session> <window> <window-index> <pane> : <value>`, tmux ≥ 3.2.
+    ///
+    /// The supported way to watch a format without polling. Captured from 3.7b:
+    /// `%subscription-changed cmd $250 @257 0 %265 : sleep` — and crucially that arrived for a pane
+    /// that was *not* current, which is the change nothing else reports.
+    case subscriptionChanged(
+        name: String,
+        sessionId: String,
+        windowId: String,
+        windowIndex: String,
+        paneId: String,
+        value: String
+    )
+
     /// `%pane-mode-changed %<pane>` — the pane entered or left copy/view mode.
     ///
     /// Modes are a per-client screen overlay and control mode is not streamed one, so a pane that

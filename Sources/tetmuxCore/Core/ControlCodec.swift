@@ -205,6 +205,22 @@ public struct ControlCodec: Sendable {
             guard let id = args.first else { return nil }
             return .continuePane(paneId: id)
 
+        case "%subscription-changed":
+            // `<name> <session> <window> <window-index> <pane> : <value>`. The colon is a field of
+            // its own, exactly as in `%extended-output`, and the value is everything after it — so it
+            // is taken by position rather than by splitting, since a format's output may contain
+            // spaces or colons of its own.
+            guard args.count >= 6, args[5] == ":" else { return nil }
+            let value = args.count > 6 ? args[6...].joined(separator: " ") : ""
+            return .subscriptionChanged(
+                name: args[0],
+                sessionId: args[1],
+                windowId: args[2],
+                windowIndex: args[3],
+                paneId: args[4],
+                value: value
+            )
+
         case "%pane-mode-changed":
             guard let id = args.first else { return nil }
             return .paneModeChanged(paneId: id)

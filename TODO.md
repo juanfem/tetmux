@@ -225,12 +225,15 @@ What is left falls into three groups, and they are not equally blocked:
   Only OSC 8 hyperlinks open, so the URL `git push` prints is not clickable.
   `Sources/tetmuxUI/TerminalSurface.swift:195-200`
 
-- [ ] Reduce Motion and Increase Contrast are not honoured; animations are unconditional.
+- [~] Reduce Motion and Increase Contrast are not honoured; animations are unconditional.
   `Sources/tetmuxUI/LauncherOverlay.swift:85`
+  *Reduce Motion is honoured now at all three animation sites — the launcher's scroll, the tab
+  strip's scroll-to-selection, and the sidebar's row-action reveal — each keeping the outcome and
+  dropping the movement. Increase Contrast is still unhandled.*
 
 ## Requirements shipped as stubs
 
-- [ ] **F4.17 stale-client reconciliation — "the single most common failure mode" — is a probe with
+- [x] **F4.17 stale-client reconciliation — "the single most common failure mode" — is a probe with
   no consumer.** `list-clients -F` is sent on every attach and the response is passed to `log()`.
   No distinctive client name is ever set, nothing identifies a non-live tetmux client, and nothing
   detaches one. The only detach is a menu action that detaches *every* other client, the user's
@@ -242,12 +245,16 @@ What is left falls into three groups, and they are not equally blocked:
   disabled.
   `Sources/tetmuxCore/Session/SessionService.swift:1013-1019`
 
-- [ ] **R3.8 version table: three of five rows absent.** `refresh-client -B` subscriptions are never
+- [~] **R3.8 version table: three of five rows absent.** `refresh-client -B` subscriptions are never
   issued (`TmuxVersion.supportsSubscriptions` is dead code); there is no once-per-host warning for
   2.4–2.9; tmux being absent produces a raw stderr line rather than the offer of a plain shell.
   Subscriptions are also the supported way to observe `pane_current_command` and
   `window_zoomed_flag` — without them the code polls `list-panes` on a debounce.
   `Sources/tetmuxCore/Session/HostModel.swift:489`
+  *Two of the three are done: `refresh-client -B` subscribes to `pane_current_command` for every
+  pane on ≥3.2, which is what finally reports a command started in a background pane, and 2.4–2.9
+  now warns once per host. Still absent: the tmux-absent row's "offer a plain shell to that host",
+  which is the passthrough surface below and not a separate small job.*
 
 - [ ] **R3.5 checksum validation defaults to off** and both production callers take the default, so
   the validation exists only in tests.
@@ -263,8 +270,11 @@ What is left falls into three groups, and they are not equally blocked:
   already-attached channel, so the only way to see what is on a host is `connectHost`, which
   attaches and can create.
 
-- [ ] **F4.11** has no `detach-client`: disconnect tears the pty down with `SIGHUP` instead. And
+- [~] **F4.11** has no `detach-client`: disconnect tears the pty down with `SIGHUP` instead. And
   `newSession` accepts a start directory that no caller passes.
+  *`detach-client` is done, as "Detach This Client" beside Disconnect, and waited for rather than
+  merely written so `SIGHUP` cannot beat it out of the pty. The start directory and the optional
+  command still have no UI to set them from.*
 
 ## Infrastructure
 
@@ -292,7 +302,7 @@ What is left falls into three groups, and they are not equally blocked:
   rendering-acceptance corpus — so T5.7's Unicode 15 width and ZWJ correctness is delegated entirely
   to SwiftTerm and asserted nowhere.
 
-- [ ] **Non-ASCII typed input is untested.** `send-keys -H` with bytes ≥ 0x80 relies on modern tmux
+- [x] **Non-ASCII typed input is untested.** `send-keys -H` with bytes ≥ 0x80 relies on modern tmux
   ORing `KEYC_LITERAL`; older builds may re-encode per byte and produce mojibake. Add the test
   before reading it as either safe or broken.
   `Sources/tetmuxCore/Session/SessionService.swift:1607-1608`

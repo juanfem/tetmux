@@ -32,6 +32,8 @@ struct LauncherOverlay: View {
     @State private var query = ""
     @State private var selection = 0
     @FocusState private var isSearchFocused: Bool
+    /// §7 — Reduce Motion. The list still scrolls to the selection; it just stops sliding there.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var matches: [LauncherItem] {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
@@ -82,7 +84,9 @@ struct LauncherOverlay: View {
                         }
                         .frame(maxHeight: 340)
                         .onChange(of: selection) { _, new in
-                            withAnimation(.linear(duration: 0.08)) { scroll.scrollTo(new) }
+                            withAnimation(reduceMotion ? nil : .linear(duration: 0.08)) {
+                                scroll.scrollTo(new)
+                            }
                         }
                     }
                 }

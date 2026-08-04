@@ -423,6 +423,9 @@ struct WindowTabBar: View {
     let state: WindowState
     let session: TmuxSession
     @Environment(\.openWindow) private var openWindow
+    /// §7 — Reduce Motion is a system preference about vestibular comfort, not a style choice, so
+    /// the movement is dropped and the outcome kept: the tab still ends up on screen.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -451,7 +454,7 @@ struct WindowTabBar: View {
                 }
                 .onChange(of: state.selectedWindowId) { _, selected in
                     guard let selected else { return }
-                    withAnimation(.easeOut(duration: 0.15)) {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
                         scroller.scrollTo(selected, anchor: .center)
                     }
                 }

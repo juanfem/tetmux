@@ -131,6 +131,48 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// Typed non-ASCII survives `send-keys -H` byte for byte.
+    ///
+    /// Keystrokes are delivered as hex, one pair per byte of UTF-8, so an accented letter or an emoji
+    /// is several `send-keys` arguments rather than one. Modern tmux ORs `KEYC_LITERAL` for `-H` and
+    /// passes each byte straight through, which makes that correct; older builds re-encoded each byte
+    /// as a Unicode key and produced mojibake. Nothing here covered it either way — every existing
+    /// round-trip test types ASCII — so the behaviour was an assumption rather than a fact.
+    ///
+    /// Sent as one batch on purpose: the flush coalesces a frame's keystrokes into a single
+    /// `send-keys`, so this also covers a multi-byte character split across the hex list.
+    func testNonAsciiKeystrokesRoundTripByteForByte() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        // Two-byte, three-byte and four-byte UTF-8, plus a combining sequence.
+        let payload = "héllo — 日本語 🎉 e\u{0301}"
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
+        let collected = Task { () -> String in
+            var text = ""
+            for await chunk in stream {
+                text += String(decoding: chunk, as: UTF8.self)
+                if text.contains("tetmux-utf8:\(payload)") { break }
+            }
+            return text
+        }
+
+        try await Task.sleep(for: .milliseconds(500))
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "echo tetmux-utf8:\(payload)\r")
+
+        let output = try await withTimeout(seconds: 10) { await collected.value }
+        XCTAssertTrue(
+            output.contains("tetmux-utf8:\(payload)"),
+            "non-ASCII did not survive send-keys -H; got:\n\(output)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     func testSplittingAWindowUpdatesTheLayoutTree() async throws {
         let service = SessionService()
         await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
@@ -939,6 +981,171 @@ final class SessionIntegrationTests: XCTestCase {
         firstReader.cancel()
         secondReader.cancel()
         await service.disconnectHost(hostId: "local")
+    }
+
+    // MARK: - Subscriptions (R3.8, tmux ≥ 3.2)
+
+    /// A command started in a pane that is *not* current is reported, without any refresh.
+    ///
+    /// This is the gap subscriptions exist to close. `pane_current_command` is announced by nothing:
+    /// it arrives only with a `list-panes`, and the refreshes that trigger one fire on renames and
+    /// pane switches — so a background pane that started a long job kept its old label until
+    /// something unrelated happened to refresh. The test deliberately never switches pane, renames
+    /// anything, or splits after subscribing, so a `list-panes` has no reason to run.
+    func testACommandInABackgroundPaneIsReportedWithoutARefresh() async throws {
+        let version = try XCTUnwrap(TmuxVersion(installedTmuxVersion() ?? ""))
+        try XCTSkipUnless(version.supportsSubscriptions, "subscriptions need tmux 3.2; have \(version.raw)")
+
+        runTmux(["new-session", "-d", "-s", sessionName, "-x", "100", "-y", "30"])
+        // A second pane, made before connecting so that nothing after the handshake changes topology.
+        runTmux(["split-window", "-d", "-t", sessionName])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { host in
+            (host.activeSession?.activeWindow?.panes.count ?? 0) >= 2
+        }
+        let window = try XCTUnwrap(host.activeSession?.activeWindow)
+        let current = window.activePaneId
+        let background = try XCTUnwrap(window.panes.first { $0.id != current }?.id)
+
+        // Started from outside the channel, in the pane that is not current.
+        runTmux(["send-keys", "-t", background, "sleep 47", "Enter"])
+
+        // `waitFor` plus an explicit assertion, never `waitForHost`: that one throws `XCTSkip` on
+        // timeout, and a skip is exactly as green as a pass — which would retire the only test that
+        // proves subscriptions are doing anything.
+        let reported = try await waitFor(seconds: 10) {
+            await service.getHost("local")?
+                .activeSession?.activeWindow?.panes.first { $0.id == background }?.command == "sleep"
+        }
+        XCTAssertTrue(
+            reported,
+            "the background pane's command was never reported; subscriptions are not being applied"
+        )
+
+        runTmux(["send-keys", "-t", background, "C-c"])
+        await service.disconnectHost(hostId: "local")
+    }
+
+    // MARK: - Stale client reconciliation (F4.17)
+
+    /// An orphaned control-mode client is detached on attach; the user's own terminal is not.
+    ///
+    /// The orphan here is real rather than simulated: a second `tmux -CC` client is spawned on its
+    /// own pty and then simply abandoned — never read, never closed — which is exactly the state an
+    /// ssh link dropping leaves behind. tmux still counts it as attached, and below 2.9 that is what
+    /// drags every window in the session down to the orphan's 80×24.
+    func testAnOrphanedControlClientIsDetachedOnAttach() async throws {
+        runTmux(["new-session", "-d", "-s", sessionName, "-x", "100", "-y", "30"])
+
+        // The orphan. Held for the whole test so nothing but the reconciliation can end it.
+        let orphan = PtyTransport()
+        let orphanStream = try orphan.spawn(
+            executable: try XCTUnwrap(PtyTransport.resolveExecutable("tmux")),
+            arguments: TmuxCommand.localArguments(mode: .attach(sessionName: sessionName)),
+            environment: Self.childLikeEnvironment(),
+            initialSize: (cols: 80, rows: 24)
+        )
+        // The stream has to be held and drained. Dropping it releases the `AsyncThrowingStream`,
+        // whose `onTermination` calls `terminate()` — so a discarded stream kills the very client the
+        // test is about, and the test then fails saying nothing ever attached.
+        let orphanDrain = Task { for try await _ in orphanStream {} }
+        defer { orphanDrain.cancel(); orphan.terminate() }
+
+        let session = sessionName
+        let attached = try await waitFor(seconds: 10) {
+            !Self.clientTtys(of: session).isEmpty
+        }
+        XCTAssertTrue(attached, "the orphan never attached, so there is nothing to reconcile")
+        let orphanTtys = Set(Self.clientTtys(of: session))
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        _ = try await waitForHost(service) { $0.connectionState == .connected }
+
+        // The orphan's tty is gone; ours is not. Asserted on the specific tty rather than on a count,
+        // because "one client left" is also what detaching the wrong one looks like.
+        let reconciled = try await waitFor(seconds: 10) {
+            let now = Set(Self.clientTtys(of: session))
+            return now.isDisjoint(with: orphanTtys) && !now.isEmpty
+        }
+        XCTAssertTrue(
+            reconciled,
+            "the orphan \(orphanTtys) was not detached; clients now \(Self.clientTtys(of: session))"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// The other half: a plain `tmux attach` is not control mode and must never be touched, however
+    /// stale it looks. `detachOtherClients` is still there for when the user asks for exactly that.
+    func testAnOrdinaryTerminalClientIsLeftAlone() async throws {
+        runTmux(["new-session", "-d", "-s", sessionName, "-x", "100", "-y", "30"])
+
+        // A non-control client: `tmux attach` on a pty, with no `-CC`.
+        let terminal = PtyTransport()
+        let terminalStream = try terminal.spawn(
+            executable: try XCTUnwrap(PtyTransport.resolveExecutable("tmux")),
+            arguments: ["attach-session", "-t", sessionName],
+            environment: Self.childLikeEnvironment(),
+            initialSize: (cols: 80, rows: 24)
+        )
+        let terminalDrain = Task { for try await _ in terminalStream {} }
+        defer { terminalDrain.cancel(); terminal.terminate() }
+
+        let session = sessionName
+        _ = try await waitFor(seconds: 10) { !Self.clientTtys(of: session).isEmpty }
+        let terminalTtys = Set(Self.clientTtys(of: session))
+        XCTAssertFalse(terminalTtys.isEmpty)
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        _ = try await waitForHost(service) { $0.connectionState == .connected }
+
+        // Give reconciliation every chance to misbehave before asserting it did not.
+        try await Task.sleep(for: .seconds(2))
+        let survivors = Set(Self.clientTtys(of: session))
+        XCTAssertTrue(
+            terminalTtys.isSubset(of: survivors),
+            "a plain terminal client was detached: had \(terminalTtys), now \(survivors)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// The environment the service itself would hand a channel. A hand-written minimal one is not
+    /// enough — tmux inherits things from it that decide which server it even talks to.
+    private static func childLikeEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = "xterm-256color"
+        env["LANG"] = env["LANG"] ?? "en_US.UTF-8"
+        return env
+    }
+
+    /// Every client tty currently attached to `session`.
+    ///
+    /// Static so the polling closures in `waitFor`, which are `@Sendable`, can call it without
+    /// capturing the (non-Sendable) test case.
+    private static func clientTtys(of session: String) -> [String] {
+        guard let tmux = PtyTransport.resolveExecutable("tmux") else { return [] }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmux)
+        process.arguments = ["list-clients", "-t", session, "-F", "#{client_tty}"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 
     // MARK: - Closing a window (F4.9)

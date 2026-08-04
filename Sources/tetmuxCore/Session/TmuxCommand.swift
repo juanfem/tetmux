@@ -105,7 +105,39 @@ public enum TmuxCommand {
         + "|#{window_layout}|#{window_visible_layout}|#{window_flags}|#{window_name}"
     public static let panesFormat =
         "#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_current_command}|#{pane_current_path}"
-    public static let clientsFormat = "#{client_name}|#{client_session}|#{client_flags}"
+    /// F4.17 — enough to tell one of tetmux's own clients from the user's terminal, and to name a
+    /// client precisely enough to detach it.
+    ///
+    /// The SRD asks for "a distinctive client name", and tmux has none to give: `client_name` is the
+    /// tty and there is no command to set it (verified on 3.7b — `display-message -p '#{client_name}'`
+    /// from a control client answers `/dev/ttys007`). `client_control_mode` is the tag that actually
+    /// exists. Every tetmux channel is a control-mode client and an ordinary terminal is not, so
+    /// "control-mode, and not one of the ttys we are holding" is the orphan.
+    public static let clientsFormat =
+        "#{client_tty}|#{client_control_mode}|#{client_session}|#{client_flags}"
+
+    /// The tty of the client on the other end of *this* channel, which is how a channel recognises
+    /// itself in the list above.
+    public static let clientTtyQuery = "display-message -p '#{client_tty}'"
+
+    /// The name tetmux subscribes its pane-command watch under. Distinctive so a `%subscription-changed`
+    /// from something else attached to the same server is ignored rather than parsed as ours.
+    public static let paneCommandSubscription = "tetmuxPaneCommand"
+
+    /// `refresh-client -B name:what:format` — R3.8's ≥3.2 mechanism (tmux 3.2).
+    ///
+    /// Subscribing to `pane_current_command` for every pane (`%*`) is what makes a window's label
+    /// follow what is *running* without polling. Nothing announces `pane_current_command` otherwise:
+    /// it arrives only with a `list-panes`, and the refreshes that trigger one fire on renames and
+    /// pane switches — so a background pane that started a long job kept its old label until
+    /// something unrelated happened. Verified on 3.7b: a `sleep` started in a non-current pane
+    /// produced `%subscription-changed … %265 : sleep` immediately.
+    ///
+    /// The format is double-quoted the way it was captured. tmux stores it and evaluates it per pane
+    /// rather than expanding it when the command is parsed.
+    public static func subscribePaneCommand() -> String {
+        "refresh-client -B \(paneCommandSubscription):%*:\"#{pane_current_command}\""
+    }
 
     // MARK: - Flow control (P6.5)
 

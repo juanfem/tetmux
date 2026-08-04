@@ -208,6 +208,10 @@ public actor SessionService {
         var lastSentSize: (cols: Int, rows: Int)?
         var userInitiatedDisconnect = false
 
+        /// This channel's own `client_tty`, learned at handshake. F4.17's reconciliation is "every
+        /// control-mode client that is not one of ours", and this is the "ours".
+        var clientTty: String?
+
         /// Whether this channel was a recovery attach to the remembered session name, so a death
         /// before the handshake can be read as "that session is gone" rather than "the host is down".
         var attachedByRememberedName = false
@@ -285,6 +289,8 @@ public actor SessionService {
             case listWindows
             case listPanes
             case listClients
+            /// This channel's own `client_tty`, so it can exclude itself from the list above.
+            case clientTty
             /// `target` scopes the repaint to a single subscriber. The same pane can be on screen in
             /// two macOS windows, and the payload begins by clearing the screen *and* the scrollback —
             /// broadcasting a late joiner's repaint would wipe the history the other window is holding.
@@ -299,6 +305,8 @@ public actor SessionService {
     private var reconnectAttempts: [String: Int] = [:]
     /// Pending backoff retries, so an explicit decision by the user can cancel one.
     private var reconnectTasks: [String: Task<Void, Never>] = [:]
+    /// Hosts already told their tmux is older than 2.9 (R3.8). Once per host, not per channel.
+    private var warnedAboutOldServer: Set<String> = []
     /// Hosts whose remembered session name failed to resolve on a recovery attach, so the next
     /// attempt takes whatever the server still has instead. Cleared by a successful handshake and by
     /// any explicit connect, both of which mean the name question has been settled.
@@ -1065,6 +1073,14 @@ public actor SessionService {
             connection.lossyPanes.remove(paneId)
             requestRepaintAfterLoss(hostId: hostId, paneId: paneId)
 
+        case .subscriptionChanged(let name, _, _, _, let paneId, let value):
+            // Ours or nobody's: another control client on the same server can hold subscriptions of
+            // its own, and their names are the only thing separating them.
+            guard name == TmuxCommand.paneCommandSubscription else { break }
+            withHost(hostId) { host in
+                Self.mutatePane(&host, paneId: paneId) { $0.command = value }
+            }
+
         case .paneModeChanged(let paneId):
             // A mode is a per-client screen overlay and control mode is not streamed one, so the
             // bytes for what is now on that pane never arrive: entering copy mode from another client
@@ -1200,6 +1216,9 @@ public actor SessionService {
         connection.outbox.removeAll()
 
         send("display-message -p '#{version}'", kind: .version, hostId: hostId, connection: connection)
+        // Before `list-clients`, so this channel knows which of the listed clients is itself by the
+        // time the answer arrives — responses come back in order.
+        send(TmuxCommand.clientTtyQuery, kind: .clientTty, hostId: hostId, connection: connection)
         // The `window-size` policy waits for that version: which of the two sizing models is available
         // depends on it, and choosing wrongly either collapses every pane toward 80x24 or leaves a
         // torn-off window unable to size itself. See `applyWindowSizePolicy`.
@@ -1257,6 +1276,8 @@ public actor SessionService {
             connection.lastSentSize = nil
             applyWindowSizePolicy(hostId: hostId, connection: connection)
             applyFlowControlPolicy(hostId: hostId, connection: connection)
+            applySubscriptionPolicy(hostId: hostId, connection: connection)
+            warnIfServerIsOld(hostId: hostId, version: version)
             flushResize(hostId: hostId)
 
         case .listSessions:
@@ -1268,8 +1289,11 @@ public actor SessionService {
         case .listPanes:
             applyPanes(text(), hostId: hostId)
 
+        case .clientTty:
+            connection.clientTty = text().first?.trimmingCharacters(in: .whitespaces)
+
         case .listClients:
-            log("[\(hostId)] clients: \(text().joined(separator: ", "))")
+            reconcileStaleClients(text(), hostId: hostId)
 
         case .capturePane(let paneId, let target):
             deliver(Self.repaintPayload(from: command.lines), hostId: hostId, paneId: paneId, target: target)
@@ -1517,6 +1541,22 @@ public actor SessionService {
     }
 
     /// Finds a window anywhere in the host, creating it in the active session if it is new.
+    /// Applies `body` to a pane wherever it lives, and does nothing if it is not known yet.
+    ///
+    /// Unlike `mutateWindow` there is no create-if-missing branch: a pane arrives with a layout, and
+    /// inventing one from a subscription would put a pane in the model with no place in any tree.
+    private static func mutatePane(_ host: inout HostState, paneId: String, _ body: (inout TmuxPane) -> Void) {
+        for sessionIndex in host.sessions.indices {
+            for windowIndex in host.sessions[sessionIndex].windows.indices {
+                if let paneIndex = host.sessions[sessionIndex].windows[windowIndex].panes
+                    .firstIndex(where: { $0.id == paneId }) {
+                    body(&host.sessions[sessionIndex].windows[windowIndex].panes[paneIndex])
+                    return
+                }
+            }
+        }
+    }
+
     private static func mutateWindow(_ host: inout HostState, windowId: String, _ body: (inout TmuxWindow) -> Void) {
         for sessionIndex in host.sessions.indices {
             if let windowIndex = host.sessions[sessionIndex].windows.firstIndex(where: { $0.id == windowId }) {
@@ -2009,6 +2049,37 @@ public actor SessionService {
              kind: .ignore, hostId: hostId, connection: connection)
     }
 
+    /// R3.8's ≥3.2 row: subscribe to what is running in every pane instead of polling for it.
+    ///
+    /// Only the primary. A subscription is per client and the values are server-wide, so one channel
+    /// asking is the whole answer; every follower subscribing would multiply identical notifications
+    /// by the number of sessions on screen.
+    private func applySubscriptionPolicy(hostId: String, connection: Connection) {
+        guard connection.isPrimary,
+              let version = connection.version,
+              version.supportsSubscriptions
+        else { return }
+        send(TmuxCommand.subscribePaneCommand(), kind: .ignore, hostId: hostId, connection: connection)
+    }
+
+    /// R3.8's 2.4–2.9 row: say once, per host, that the server is old enough to lose features.
+    ///
+    /// Once per host and not per channel: a follower opening is not news, and a reconnect every
+    /// thirty seconds on a flaky link would otherwise re-raise the same banner forever.
+    private func warnIfServerIsOld(hostId: String, version: TmuxVersion) {
+        guard version.supportsControlMode, !version.sizesWindowsIndividually else { return }
+        guard !warnedAboutOldServer.contains(hostId) else { return }
+        warnedAboutOldServer.insert(hostId)
+        log("[\(hostId)] tmux \(version.raw) is below 2.9; per-window sizing and flow control are unavailable")
+        withHost(hostId) { host in
+            host.lastCommandFailure = CommandFailure(
+                action: "tmux \(version.raw)",
+                message: "This server is older than 2.9. Windows are sized by the smallest attached "
+                    + "client, and panes cannot be paused when output outruns the display."
+            )
+        }
+    }
+
     /// Puts `window-size` back to whatever the session inherited, on the way out.
     ///
     /// `window-size manual` is a change to the user's own session, and a manual size persists — a later
@@ -2120,6 +2191,54 @@ public actor SessionService {
         }
     }
 
+    /// F4.17 — detaches tetmux clients left behind by a dropped connection.
+    ///
+    /// An ssh link that dies takes our end of the channel with it, but the tmux client on the far
+    /// side keeps its pty and stays attached until something tells it otherwise. It then counts as a
+    /// live client of the session, and below tmux 2.9 — where `window-size latest` is the only sizing
+    /// mechanism there is (F4.17, and see `applyWindowSizePolicy`) — an orphan sized 80×24 drags every
+    /// window in the session down to 80×24 with it. The SRD calls this the single most common failure
+    /// mode in applications of this class, and until now the probe was sent on every attach and its
+    /// answer went to `log()` and nowhere else.
+    ///
+    /// Two things keep this from detaching something it should not:
+    ///
+    /// **Control-mode only.** Every tetmux channel is a control-mode client and an ordinary terminal
+    /// running `tmux attach` is not, so the user's own terminals are never candidates. This is the
+    /// nearest thing to the SRD's "distinctive client name": tmux has no settable client name —
+    /// `client_name` *is* the tty and no command changes it — so `client_control_mode` is the only
+    /// tag on offer. It is not perfect, and the two cases to know about are another `tmux -CC`
+    /// application on the same server (iTerm2's tmux integration is the one that exists) and a second
+    /// *live* copy of tetmux — two of those would each read the other's channels as orphans and
+    /// detach them in turn. A packaged app cannot normally be launched twice, but `swift run`
+    /// alongside an installed build can, which is worth knowing before diagnosing it as a dropped
+    /// connection. Both are still a far narrower blast radius than `detachOtherClients`, which the
+    /// menu offers and which detaches everything including the user's own terminals.
+    ///
+    /// **Never while one of our own channels is still handshaking.** A follower that has not yet
+    /// answered `#{client_tty}` is indistinguishable from an orphan, and detaching it would kill a
+    /// client we opened a moment ago. If any channel of this host has no tty yet, the whole pass is
+    /// skipped — the next attach runs it again.
+    private func reconcileStaleClients(_ lines: [String], hostId: String) {
+        let ours = channels(of: hostId).map(\.clientTty)
+        guard !ours.contains(where: { $0 == nil }) else {
+            log("[\(hostId)] skipping client reconciliation: a channel has not identified itself yet")
+            return
+        }
+        let ourTtys = Set(ours.compactMap { $0 })
+
+        for line in lines {
+            let fields = line.split(separator: "|", maxSplits: 3, omittingEmptySubsequences: false)
+            guard fields.count >= 2 else { continue }
+            let tty = String(fields[0])
+            let isControlMode = fields[1] == "1"
+            guard isControlMode, !tty.isEmpty, !ourTtys.contains(tty) else { continue }
+
+            log("[\(hostId)] detaching orphaned control-mode client \(tty)")
+            send("detach-client -t \(TmuxCommand.quote(tty))", kind: .ignore, hostId: hostId)
+        }
+    }
+
     private func forgetWindowGeometry(hostId: String, windowId: String) {
         guard let connection = connections[hostId] else { return }
         connection.desiredWindowSizes.removeValue(forKey: windowId)
@@ -2216,6 +2335,22 @@ public actor SessionService {
     public func detachOtherClients(hostId: String) {
         guard let connection = connections[hostId] else { return }
         send("detach-client -a -s \(TmuxCommand.quote(connection.sessionTarget))", kind: .ignore, hostId: hostId, connection: connection)
+    }
+
+    /// F4.11 — detaches *this* client, leaving the session running.
+    ///
+    /// The polite half of the pair above, and the one F4.11 asked for and did not have: disconnecting
+    /// tears the pty down with `SIGHUP` and lets tmux notice, which works but leaves the server to
+    /// clean up after a client that vanished. `detach-client` with no target says so, and the `%exit`
+    /// it produces is the ordinary end-of-session path the recovery logic already understands.
+    ///
+    /// Waited for rather than merely written, for the same reason `restoreWindowSizePolicy` is: the
+    /// caller is about to hang the channel up, and a `detach-client` still sitting in the pty when
+    /// `SIGHUP` lands did not happen at all.
+    public func detachThisClient(hostId: String) async {
+        guard let connection = connections[hostId] else { return }
+        connection.userInitiatedDisconnect = true
+        await sendAndAwait("detach-client", hostId: hostId, connection: connection)
     }
 
     /// Toggles zoom on a pane (`resize-pane -Z`), the app's equivalent of `prefix-z`.

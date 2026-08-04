@@ -401,6 +401,11 @@ public final class AppModel {
         Task { await service.disconnectHost(hostId: hostId) }
     }
 
+    /// F4.11 — let go of this client without ending the session or the host.
+    public func detachThisClient(_ hostId: String) {
+        Task { await service.detachThisClient(hostId: hostId) }
+    }
+
     /// §7 — the user has read the refusal.
     public func dismissCommandFailure(_ hostId: String) {
         Task { await service.dismissCommandFailure(hostId: hostId) }

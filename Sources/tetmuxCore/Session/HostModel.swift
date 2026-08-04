@@ -558,4 +558,8 @@ public struct TmuxVersion: Comparable, Sendable {
     public var supportsFlowControl: Bool { self >= TmuxVersion("3.2")! }
     /// Below this, control mode is too different to drive; §4.6 passthrough applies.
     public var supportsControlMode: Bool { self >= TmuxVersion("2.4")! }
+    /// `window-size manual` plus `resize-window -t @id`, which is what lets one macOS window size its
+    /// tmux window independently of another's. Below it, `window-size latest` and `refresh-client -C`
+    /// are the only mechanism and every client's size is a vote (F4.17).
+    public var sizesWindowsIndividually: Bool { self >= TmuxVersion("2.9")! }
 }
