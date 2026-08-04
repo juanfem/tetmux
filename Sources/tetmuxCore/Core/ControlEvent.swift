@@ -54,6 +54,20 @@ public enum ControlEvent: Equatable, Sendable {
     case pause(paneId: String)
     case continuePane(paneId: String)
 
+    /// `%pane-mode-changed %<pane>` — the pane entered or left copy/view mode.
+    ///
+    /// Modes are a per-client screen overlay and control mode is not streamed one, so a pane that
+    /// another client puts into copy mode simply stops changing here. Without this the pane looks
+    /// frozen and nothing ever repaints it; with it there is at least a repaint to ask for.
+    case paneModeChanged(paneId: String)
+
+    /// `%config-error <error>` — a syntax error in the user's `tmux.conf`, reported here and nowhere
+    /// else. Ignoring it left the user with bindings and options that silently did not work.
+    case configError(message: String)
+
+    /// `%message <message>` — tmux's own message line, as other clients would see it.
+    case message(text: String)
+
     /// `%exit [reason]` — the server is going away.
     case exit(reason: String?)
 

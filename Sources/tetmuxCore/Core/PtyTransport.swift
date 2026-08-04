@@ -3,7 +3,25 @@ import Foundation
 import Darwin
 #else
 import Glibc
+// `forkpty` lives in libutil on glibc and is not re-exported by the Glibc module.
+import CUtil
 #endif
+
+/// `write(2)`, named unambiguously.
+///
+/// Swift resolves a bare `write` to `PtyTransport.write(_:)` inside the type, which is why the call
+/// site qualified it — but it qualified it as `Darwin.write`, outside any `#if`, fifteen lines after
+/// the file carefully chose between Darwin and Glibc. That single unqualified reference was enough to
+/// make `tetmuxCore` fail to build on Linux, which is the whole §2.4 hedge, and nothing noticed
+/// because CI had no Linux job to notice with.
+@inline(__always)
+private func posixWrite(_ fd: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int {
+    #if canImport(Darwin)
+    return Darwin.write(fd, buffer, count)
+    #else
+    return Glibc.write(fd, buffer, count)
+    #endif
+}
 
 public enum PtyError: Error, CustomStringConvertible, Sendable {
     case alreadySpawned
@@ -15,6 +33,8 @@ public enum PtyError: Error, CustomStringConvertible, Sendable {
     case childSignalled(signal: Int32)
     /// A command reached tmux in part. The framing is broken and cannot be repaired from this side.
     case writeTruncated(bytesWritten: Int, of: Int)
+    /// The process started but never spoke the control protocol.
+    case handshakeTimedOut(seconds: Int)
 
     public var description: String {
         switch self {
@@ -34,6 +54,8 @@ public enum PtyError: Error, CustomStringConvertible, Sendable {
             return "Process terminated by signal \(signal)"
         case .writeTruncated(let written, let total):
             return "Only \(written) of \(total) bytes reached tmux; the command stream is out of frame"
+        case .handshakeTimedOut(let seconds):
+            return "No response from tmux within \(seconds)s"
         }
     }
 }
@@ -208,6 +230,17 @@ public final class PtyTransport: @unchecked Sendable {
                     }
                 }
 
+                // The reader owns the descriptor and is the only thing that closes it.
+                //
+                // `terminate()` used to close it while this thread was sitting in a 1000 ms `poll` on
+                // the number — so a reconnect fast enough to be handed the same fd back had its bytes
+                // read by the *old* stream and yielded into a channel that was already finished. The
+                // new channel then saw a stream with a hole in it, which is a missing `%begin` and a
+                // permanently misaligned command queue, or a missing handshake and a host that never
+                // finishes connecting. Closing here instead means the number cannot be reissued until
+                // nothing is using it. The cost is that the fd outlives `terminate` by up to the poll
+                // timeout, which nothing depends on.
+                close(fd)
                 let status = self?.reapChild() ?? 0
                 if let error = Self.exitError(status: status) {
                     continuation.finish(throwing: error)
@@ -268,7 +301,7 @@ public final class PtyTransport: @unchecked Sendable {
                 written == 0 ? .nothingWritten : .partial(bytesWritten: written)
             }
             while written < raw.count {
-                let n = Darwin.write(fd, base.advanced(by: written), raw.count - written)
+                let n = posixWrite(fd, base.advanced(by: written), raw.count - written)
                 if n > 0 {
                     written += n
                     retries = 0
@@ -298,6 +331,14 @@ public final class PtyTransport: @unchecked Sendable {
         _ = ioctl(fd, TIOCSWINSZ, &ws)
     }
 
+    /// Whether this transport still holds `pid` — i.e. nothing has waited on it yet, so the number
+    /// still refers to our child rather than to whatever the kernel has since reissued it to.
+    private func stillOwns(pid: pid_t) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return childPid == pid
+    }
+
     /// Blocks briefly to collect the child's exit status so it does not linger as a zombie.
     @discardableResult
     private func reapChild() -> Int32 {
@@ -322,22 +363,26 @@ public final class PtyTransport: @unchecked Sendable {
             return
         }
         terminated = true
-        let fd = masterFd
         let pid = childPid
+        // Stops any further writes. The descriptor itself is closed by the read thread, which is the
+        // only thing still touching it — see `makeReadStream`.
         masterFd = -1
         lock.unlock()
 
         if pid > 0 {
             // SIGHUP first: ssh and tmux both treat it as "the terminal went away" and exit
-            // cleanly, detaching rather than killing anything on the remote side.
+            // cleanly, detaching rather than killing anything on the remote side. It is also what
+            // makes the read thread's poll return EOF, so it stops promptly rather than at its
+            // timeout.
             kill(pid, SIGHUP)
-        }
-        if fd >= 0 {
-            close(fd)
         }
         if pid > 0 {
             // Give it a moment, then insist. Reaped either way by the read thread or here.
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [weak self] in
+                // Only if this pid is still ours. `reapChild` clears `childPid` once it has waited on
+                // it, and after that the number belongs to the kernel to reissue — signalling it would
+                // eventually land on an unrelated process of the user's.
+                guard let self, self.stillOwns(pid: pid) else { return }
                 if kill(pid, 0) == 0 {
                     kill(pid, SIGKILL)
                 }

@@ -1,0 +1,11 @@
+// `forkpty` is declared in <pty.h> and lives in libutil on glibc, and the Glibc module re-exports
+// neither. Without this, `tetmuxCore` cannot build on Linux at all — which is the §2.4 portability
+// hedge, the thing CI is supposed to be proving stays true.
+//
+// Linux only: macOS declares forkpty in <util.h> and the Darwin module already provides it, so
+// nothing depends on this target there.
+module CUtil [system] {
+    header "shim.h"
+    link "util"
+    export *
+}

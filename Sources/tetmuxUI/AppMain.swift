@@ -30,6 +30,13 @@ public struct TetmuxApp: App {
         MenuBarExtra("tetmux", systemImage: "terminal.fill") {
             MenuBarContent(model: model)
         }
+
+        // Without a `Settings` scene macOS shows no "Settings…" item at all, so `TerminalTheme` —
+        // whose own comment called itself the thing "the eventual settings pane" would write to —
+        // had no way of ever being written to. ⌘, is AppKit's, not ours to bind.
+        Settings {
+            SettingsView(model: model)
+        }
     }
 
     /// Menu items are built from `KeymapPolicy` so the documented keymap and what the application
@@ -51,11 +58,30 @@ public struct TetmuxApp: App {
             Button(ApplicationShortcut.splitDown.title) { model.split(leftRight: false) }
                 .keyboardShortcut(.splitDown, in: keymap)
         }
-        CommandGroup(replacing: .textEditing) {
-            // Pastes go through tmux's buffer commands, not send-keys, so a large paste is one
-            // round trip rather than a megabyte of command line (§3.2).
+        // Replacing `.pasteboard` rather than `.textEditing`: AppKit's own Paste lives in the
+        // pasteboard group and comes first in menu order, so leaving it there put two ⌘V items in the
+        // Edit menu and let the standard one win. SwiftTerm validates `paste(_:)` as always enabled,
+        // so that route fed the clipboard through per-keystroke `send-keys` and bypassed the buffer
+        // chunking whose own comment says a megabyte of `send-keys` will wedge the channel.
+        CommandGroup(replacing: .pasteboard) {
             Button(ApplicationShortcut.paste.title) { model.pasteIntoFocusedPane() }
                 .keyboardShortcut(.paste, in: keymap)
+        }
+        // Find lives in `.textEditing`, which used to be replaced wholesale by the Paste button
+        // above — which is what unplugged SwiftTerm's find bar. It is reachable only through the
+        // standard `performTextFinderAction` responder chain, so this hands it back.
+        CommandGroup(replacing: .textEditing) {
+            Button(ApplicationShortcut.find.title) { model.showFindBar() }
+                .keyboardShortcut(.find, in: keymap)
+        }
+        CommandGroup(after: .toolbar) {
+            Button(ApplicationShortcut.increaseFontSize.title) { model.adjustFontSize(by: 1) }
+                .keyboardShortcut(.increaseFontSize, in: keymap)
+            Button(ApplicationShortcut.decreaseFontSize.title) { model.adjustFontSize(by: -1) }
+                .keyboardShortcut(.decreaseFontSize, in: keymap)
+            Button(ApplicationShortcut.resetFontSize.title) { model.resetFontSize() }
+                .keyboardShortcut(.resetFontSize, in: keymap)
+            Divider()
         }
         CommandMenu("Session") {
             Button(ApplicationShortcut.launcher.title) { model.toggleLauncherFromMenu() }
@@ -73,6 +99,20 @@ public struct TetmuxApp: App {
                 .keyboardShortcut(.closeWindow, in: keymap)
             Button(ApplicationShortcut.closePane.title) { model.closePane() }
                 .keyboardShortcut(.closePane, in: keymap)
+        }
+        CommandMenu("Pane") {
+            Button(ApplicationShortcut.zoomPane.title) { model.toggleZoom() }
+                .keyboardShortcut(.zoomPane, in: keymap)
+            Divider()
+            Button(ApplicationShortcut.focusNextPane.title) { model.focusAdjacentPane(offset: 1) }
+                .keyboardShortcut(.focusNextPane, in: keymap)
+            Button(ApplicationShortcut.focusPreviousPane.title) { model.focusAdjacentPane(offset: -1) }
+                .keyboardShortcut(.focusPreviousPane, in: keymap)
+            Divider()
+            Button(ApplicationShortcut.nextWindow.title) { model.selectAdjacentWindow(offset: 1) }
+                .keyboardShortcut(.nextWindow, in: keymap)
+            Button(ApplicationShortcut.previousWindow.title) { model.selectAdjacentWindow(offset: -1) }
+                .keyboardShortcut(.previousWindow, in: keymap)
         }
     }
 }
@@ -319,22 +359,29 @@ struct RootView: View {
                 NotAttachedBanner(host: host, session: session)
                 WindowTabBar(model: model, state: state, session: session)
                 Divider()
-                TerminalContainerView(
-                    hostId: host.id,
-                    window: window,
-                    theme: model.theme,
-                    service: model.service,
-                    focusedPaneId: $state.focusedPaneId,
-                    owner: state.id,
-                    // §3.3 — a client has exactly one size, so exactly one window may drive it. The
-                    // per-*window* size is owned per tmux window by `windowSizeOwners`; this is the
-                    // client-wide fallback that matters below tmux 2.9, where it is the only sizing
-                    // mechanism there is. Two windows driving it trade `%layout-change`es forever.
-                    // Keyed on the last-focused window rather than on `controlActiveState`, which is
-                    // false for every window when the app itself is not frontmost — that would leave
-                    // the client size with no owner at all.
-                    drivesClientSize: model.activeWindowState?.id == state.id
-                )
+                // Every window of the session is built, and the ones that are not selected are hidden
+                // rather than omitted.
+                //
+                // Building only the selected one tore down its `TerminalView`s on every tab switch,
+                // and with them the entire local scrollback — the return trip replays `capture-pane`,
+                // whose payload begins `ESC[H ESC[2J ESC[3J`: screen *and* scrollback, capped at the
+                // capture budget. So "scroll up to see what that build printed" worked until you
+                // looked at another tab, which is when you would want it.
+                //
+                // Hidden with `opacity`, never with `if`: a ZStack hands every child the same frame,
+                // so a background tab keeps measuring the size it would really have and keeps asking
+                // tmux for that grid. Dropping it from the tree instead would resize its tmux window
+                // to nothing and reflow everything running in it.
+                ZStack {
+                    ForEach(session.windows) { candidate in
+                        terminalContainer(host: host, window: candidate, state: state)
+                            .opacity(candidate.id == window.id ? 1 : 0)
+                            .allowsHitTesting(candidate.id == window.id)
+                            // Keeps AppKit from moving focus into a pane nobody can see.
+                            .accessibilityHidden(candidate.id != window.id)
+                            .id(candidate.id)
+                    }
+                }
                 Divider()
                 StatusBarView(host: host, session: session, window: window, focusedPaneId: state.focusedPaneId)
             }
@@ -345,6 +392,29 @@ struct RootView: View {
         }
     }
 
+    private func terminalContainer(host: HostState, window: TmuxWindow, state: WindowState) -> some View {
+        TerminalContainerView(
+            hostId: host.id,
+            window: window,
+            theme: model.theme,
+            service: model.service,
+            focusedPaneId: $state.focusedPaneId,
+            owner: state.id,
+            // §3.3 — a client has exactly one size, so exactly one window may drive it. The
+            // per-*window* size is owned per tmux window by `windowSizeOwners`; this is the
+            // client-wide fallback that matters below tmux 2.9, where it is the only sizing
+            // mechanism there is. Two windows driving it trade `%layout-change`es forever.
+            // Keyed on the last-focused window rather than on `controlActiveState`, which is
+            // false for every window when the app itself is not frontmost — that would leave
+            // the client size with no owner at all.
+            //
+            // Below 2.9 that also has to mean the *selected* tab and not merely the focused macOS
+            // window, now that every tab is built: the hidden ones are real views with real frames,
+            // and letting them drive the one client size would put the last one laid out in charge.
+            drivesClientSize: model.activeWindowState?.id == state.id
+                && state.selectedWindowId == window.id
+        )
+    }
 }
 
 /// F4.6 — one application tab per tmux window.
@@ -356,23 +426,35 @@ struct WindowTabBar: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
-                    ForEach(session.windows) { window in
-                        tab(window)
-                    }
+            // The selected tab has to be brought into view, because the selection moves from places
+            // that are nowhere near the tab strip — the launcher, the sidebar, ⇧⌘], the reveal after
+            // creating a window. With a dozen tmux windows the strip scrolls, and a plain `ScrollView`
+            // left the newly selected one off-screen with nothing to say it had moved.
+            ScrollViewReader { scroller in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) {
+                        ForEach(session.windows) { window in
+                            tab(window).id(window.id)
+                        }
                     // Inside the scroller and after the last tab, not pinned to the far right: the
                     // button means "another one of these", and it only reads that way when it sits
                     // where the next tab would appear.
-                    Button { model.newWindow() } label: {
-                        Image(systemName: "plus").font(.caption)
+                        Button { model.newWindow() } label: {
+                            Image(systemName: "plus").font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .padding(.leading, 2)
+                        .help("New window (⌘T)")
+                        .accessibilityLabel("New window")
                     }
-                    .buttonStyle(.borderless)
-                    .padding(.leading, 2)
-                    .help("New window (⌘T)")
-                    .accessibilityLabel("New window")
+                    .padding(.horizontal, 6)
                 }
-                .padding(.horizontal, 6)
+                .onChange(of: state.selectedWindowId) { _, selected in
+                    guard let selected else { return }
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        scroller.scrollTo(selected, anchor: .center)
+                    }
+                }
             }
 
             Divider().frame(height: 18)

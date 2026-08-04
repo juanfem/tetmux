@@ -91,7 +91,9 @@ public struct TerminalContainerView: View {
 
     @ViewBuilder
     private func content(in size: CGSize) -> some View {
-        if let tree = window.layoutTree {
+        // `renderTree`, not `layoutTree`: while a pane is zoomed those differ, and tmux is emitting
+        // output sized to the visible one.
+        if let tree = window.renderTree {
             node(tree, size: size)
                 // Every divider in one layer above the whole tree, rather than each inside the
                 // container it belongs to. Nesting them put a handle underneath the pane surfaces of

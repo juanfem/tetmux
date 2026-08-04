@@ -63,6 +63,25 @@ public struct TmuxWindow: Identifiable, Equatable, Sendable {
     /// Whether the user named this window, rather than tmux naming it after what is running.
     public var hasExplicitName: Bool
 
+    /// What is actually on screen, which differs from `layoutString` exactly when a pane is zoomed.
+    ///
+    /// `%layout-change` has carried three fields since tmux 2.5 and the third is the window's flags;
+    /// the second is this. tmux keeps `window_layout` as the layout the window would have *unzoomed*,
+    /// so a client that renders it while a pane is zoomed paints the wrong grid — and worse, forces
+    /// each surface to its unzoomed cell size while tmux is emitting output sized to the whole
+    /// window. The result is wrapped and truncated content that cannot be recovered without
+    /// unzooming from somewhere else.
+    public var visibleLayoutString: String = ""
+    public var visibleLayoutTree: LayoutNode?
+    /// `Z` in the window flags. Also carried in `#{window_flags}` from `list-windows`, because a
+    /// window that was already zoomed when tetmux attached never sends a `%layout-change` at all.
+    public var isZoomed: Bool = false
+
+    /// The tree a view should render: what tmux is actually drawing, falling back to the full layout.
+    public var renderTree: LayoutNode? {
+        isZoomed ? (visibleLayoutTree ?? layoutTree) : layoutTree
+    }
+
     public var paneCount: Int {
         panes.isEmpty ? (layoutTree?.paneIds.count ?? 0) : panes.count
     }
@@ -106,17 +125,37 @@ public struct TmuxWindow: Identifiable, Equatable, Sendable {
         self.hasExplicitName = hasExplicitName
         self.layoutString = layoutString
         self.layoutTree = layoutString.isEmpty ? nil : try? LayoutParser.parse(layoutString)
+        self.visibleLayoutString = layoutString
+        self.visibleLayoutTree = self.layoutTree
         self.panes = panes
         self.activePaneId = activePaneId ?? self.layoutTree?.paneIds.first
     }
 
     /// Applies a layout string from `%layout-change` or `list-windows`, keeping the pane list and
     /// the active pane consistent with the tree tmux just told us about.
-    public mutating func apply(layoutString newLayout: String) {
-        guard newLayout != layoutString || layoutTree == nil else { return }
+    ///
+    /// - Parameters:
+    ///   - visibleLayout: `#{window_visible_layout}`, which differs only while a pane is zoomed.
+    ///   - flags: `#{window_flags}`; `Z` is the zoom.
+    public mutating func apply(layoutString newLayout: String, visibleLayout: String? = nil, flags: String? = nil) {
+        let newVisible = visibleLayout ?? newLayout
+        let newZoomed = flags.map { $0.contains("Z") } ?? isZoomed
+        let unchanged = newLayout == layoutString
+            && newVisible == visibleLayoutString
+            && newZoomed == isZoomed
+            && layoutTree != nil
+        guard !unchanged else { return }
+
         layoutString = newLayout
         layoutTree = try? LayoutParser.parse(newLayout)
+        isZoomed = newZoomed
+        visibleLayoutString = newVisible
+        // Only worth a second parse when it actually differs, which is only while zoomed.
+        visibleLayoutTree = newVisible == newLayout ? layoutTree : (try? LayoutParser.parse(newVisible))
 
+        // Membership comes from the *full* layout even while zoomed: the other panes still exist, and
+        // taking the visible tree here would drop them from `paneCount` and from `displayLabel`, so a
+        // zoomed split window would relabel itself and claim to hold one pane.
         guard let tree = layoutTree else { return }
         let ids = tree.paneIds
         panes.removeAll { !ids.contains($0.id) }
@@ -125,8 +164,11 @@ public struct TmuxWindow: Identifiable, Equatable, Sendable {
         }
         // Keep pane order matching the layout so the inspector and the view agree.
         panes.sort { a, b in (ids.firstIndex(of: a.id) ?? 0) < (ids.firstIndex(of: b.id) ?? 0) }
+        // Sizes, though, come from what is on screen — that is what tmux is emitting output for. A
+        // hidden pane keeps whatever it last had; nothing is painting it.
+        let sizing = renderTree ?? tree
         for index in panes.indices {
-            if let size = tree.cellSize(ofPane: panes[index].id) {
+            if let size = sizing.cellSize(ofPane: panes[index].id) {
                 panes[index].cols = size.cols
                 panes[index].rows = size.rows
             }

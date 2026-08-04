@@ -72,6 +72,15 @@ public actor SessionService {
     private let paneBufferChunks = 65536
     /// How far behind this client may fall before tmux pauses a pane on its own.
     private let pauseAfterSeconds = 3
+    /// Commands that may wait for the attach handshake before the oldest are dropped.
+    private static let maxOutboxCommands = 256
+    /// How long a channel may take to get from spawned to handshaken before it is given up on.
+    ///
+    /// Generous, because it covers a real ssh login: a `ProxyCommand`, a slow DNS lookup, a large
+    /// MOTD. What it rules out is the state that had no bound at all — a login shell blocked on
+    /// "press any key", a wedged remote tmux — where the UI sat on "Connecting…" for the life of the
+    /// process with no error, no retry, and nothing to distinguish it from a slow link.
+    private static let handshakeTimeout = Duration.seconds(45)
 
     public init() {}
 
@@ -137,6 +146,8 @@ public actor SessionService {
         /// Writing before it lands would misalign `pending` by one for the life of the channel, so
         /// commands wait here until the handshake completes.
         var handshakeComplete = false
+        /// Fails the channel if the handshake never arrives. Cancelled the moment it does.
+        var handshakeWatchdog: Task<Void, Never>?
         var outbox: [PendingCommand] = []
         /// Raw bytes seen before the protocol started — an ssh banner, a password prompt, a
         /// host-key warning. Surfaced verbatim if the channel dies without ever speaking tmux.
@@ -176,16 +187,30 @@ public actor SessionService {
         /// Panes that lost bytes to a full buffer and owe the emulator a repaint.
         var lossyPanes: Set<String> = []
 
-        enum PauseOrigin {
+        enum PauseOrigin: Equatable {
             /// We asked, because a view fell behind. Ours to undo once it catches up.
             case viewer
             /// tmux's own `pause-after`: this client is behind on the wire. Resuming is still ours to
-            /// do — nothing else will.
-            case server
+            /// do — nothing else will — but not *immediately*, which is what `since` is for.
+            ///
+            /// The evidence for a server pause is inside tmux: a backlog on the socket that the local
+            /// `outstanding` counter cannot see. So the viewer's own low-water mark is not a reason to
+            /// undo one — with a drained viewer it is satisfied at once, and the resume was going out
+            /// in the same breath as the pause arrived. tmux then falls behind again, pauses again,
+            /// and each cycle costs a full `capture-pane -S -2000` repaint. `yes` over a slow link
+            /// turned backpressure into a repaint storm. A pane held for a moment is what backpressure
+            /// is supposed to feel like.
+            case server(since: ContinuousClock.Instant)
         }
+        /// How long a server-origin pause is left alone before the viewer's watermark may lift it.
+        static let serverPauseHoldDown = Duration.seconds(2)
         var desiredSize: (cols: Int, rows: Int)?
         var lastSentSize: (cols: Int, rows: Int)?
         var userInitiatedDisconnect = false
+
+        /// Whether this channel was a recovery attach to the remembered session name, so a death
+        /// before the handshake can be read as "that session is gone" rather than "the host is down".
+        var attachedByRememberedName = false
 
         /// Whether tmux said `%exit` before the channel closed.
         ///
@@ -236,6 +261,7 @@ public actor SessionService {
             resizeTask?.cancel()
             windowResizeTask?.cancel()
             topologyRefreshTask?.cancel()
+            handshakeWatchdog?.cancel()
         }
     }
 
@@ -273,6 +299,10 @@ public actor SessionService {
     private var reconnectAttempts: [String: Int] = [:]
     /// Pending backoff retries, so an explicit decision by the user can cancel one.
     private var reconnectTasks: [String: Task<Void, Never>] = [:]
+    /// Hosts whose remembered session name failed to resolve on a recovery attach, so the next
+    /// attempt takes whatever the server still has instead. Cleared by a successful handshake and by
+    /// any explicit connect, both of which mean the name question has been settled.
+    private var recoveryLostItsSession: Set<String> = []
 
     /// One view's claim on a pane's output, and how far behind that view is.
     ///
@@ -387,10 +417,17 @@ public actor SessionService {
     ///
     /// Idempotent: calling it for a host that is already connecting or connected does nothing, so
     /// wake/network notifications and impatient clicking cannot spawn duplicate channels.
+    /// - Parameter isRecovery: whether this is the link coming back rather than the user asking for
+    ///   the host. It decides whether a session may be *created*, which is F4.15: a reconnect must
+    ///   never manufacture one. `new-session -A -s <name>` cannot tell "the session is still there"
+    ///   from "the server restarted while you were away" — it simply makes an empty session under the
+    ///   remembered name and hands it over as though it were the user's work. An explicit connect is
+    ///   the opposite case: a host with no sessions is exactly when the user wants one made.
     public func connectHost(
         hostId: String,
         targetSession: String? = nil,
-        mode: TmuxCommand.AttachMode? = nil
+        mode: TmuxCommand.AttachMode? = nil,
+        isRecovery: Bool = false
     ) async throws {
         guard var host = hosts[hostId] else { return }
         if let existing = connections[hostId] {
@@ -402,8 +439,20 @@ public actor SessionService {
         // `attachAny` deliberately does not adopt a target: it is used precisely when the remembered
         // name refers to a session that no longer exists, and writing it back here would put it in
         // front of the next connect to be recreated.
-        let attachMode = mode ?? .createOrAttach(sessionName: sessionTarget)
-        if mode == nil {
+        let attachMode: TmuxCommand.AttachMode
+        if let mode {
+            attachMode = mode
+        } else if isRecovery {
+            // Attach by name; and if that name has already failed to resolve once, take whatever the
+            // server still has. Both can only ever land on something that already exists.
+            attachMode = recoveryLostItsSession.contains(hostId)
+                ? .attachAny
+                : .attach(sessionName: sessionTarget)
+        } else {
+            attachMode = .createOrAttach(sessionName: sessionTarget)
+            recoveryLostItsSession.remove(hostId)
+        }
+        if mode == nil, attachMode != .attachAny {
             reconnectTarget[hostId] = sessionTarget
         }
         // A refusal belongs to the channel it happened on. Carrying it into a new one would put a
@@ -417,6 +466,7 @@ public actor SessionService {
             let connection = try spawnChannel(
                 host: host.config, sessionTarget: sessionTarget, mode: attachMode, role: .primary
             )
+            connection.attachedByRememberedName = isRecovery && attachMode != .attachAny
             connections[hostId] = connection
         } catch {
             host.connectionState = .failed(reason: describe(error))
@@ -460,7 +510,32 @@ public actor SessionService {
                 await self?.channelClosed(hostId: hostId, epoch: epoch, error: error)
             }
         }
+        connection.handshakeWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: Self.handshakeTimeout)
+            guard !Task.isCancelled else { return }
+            await self?.handshakeTimedOut(hostId: hostId, epoch: epoch)
+        }
         return connection
+    }
+
+    /// Gives up on a channel that spawned but never spoke tmux.
+    ///
+    /// Nothing bounded this before. `connectHost` set `.connecting` and returned as soon as the
+    /// process existed, and the only timeout anywhere in the service was `sendAndAwait`'s two
+    /// seconds — which is never reached, because the command that would use it is queued in the
+    /// outbox behind the handshake. A login shell blocked on "press any key", a `ProxyCommand` that
+    /// hangs, or a wedged remote tmux therefore left the host on "Connecting…" for the life of the
+    /// process, with no error and nothing to retry. Failing the channel puts it on the ordinary
+    /// recovery path, which is the same one a dropped link takes.
+    private func handshakeTimedOut(hostId: String, epoch: UUID) {
+        guard let connection = channel(of: hostId, epoch: epoch), !connection.handshakeComplete else { return }
+        // Whatever ssh printed is the real diagnosis, exactly as it is for a channel that dies —
+        // `channelClosed` builds that message from `preHandshakeLog`, so this only has to say why.
+        log("[\(hostId)] no tmux handshake within \(Self.handshakeTimeout); giving up on the channel")
+        channelClosed(
+            hostId: hostId, epoch: epoch,
+            error: PtyError.handshakeTimedOut(seconds: Int(Self.handshakeTimeout.components.seconds))
+        )
     }
 
     // MARK: - A client per displayed session
@@ -861,9 +936,11 @@ public actor SessionService {
             guard claimsPane(hostId: hostId, paneId: paneId, epoch: connection.epoch) else { break }
             deliver(data, hostId: hostId, paneId: paneId, from: connection)
 
-        case .layoutChange(let windowId, let layout, _, _):
+        case .layoutChange(let windowId, let layout, let visibleLayout, let flags):
             withHost(hostId) { host in
-                Self.mutateWindow(&host, windowId: windowId) { $0.apply(layoutString: layout) }
+                Self.mutateWindow(&host, windowId: windowId) {
+                    $0.apply(layoutString: layout, visibleLayout: visibleLayout, flags: flags)
+                }
             }
 
         case .windowAdd(let windowId):
@@ -973,7 +1050,11 @@ public actor SessionService {
             // `applyFlowControl` is the only thing that will, once the viewer has drained.
             log("[\(hostId)] tmux paused \(paneId): this client is behind")
             if connection.pausedPanes[paneId] == nil {
-                connection.pausedPanes[paneId] = .server
+                connection.pausedPanes[paneId] = .server(since: .now)
+                // Deliberately no `applyFlowControl` here. It would find a drained viewer and resume
+                // at once, which is the cycle the hold-down exists to break; the next acknowledgement
+                // or chunk calls it anyway, by which time the hold-down can actually be judged.
+                break
             }
             applyFlowControl(hostId: hostId, paneId: paneId)
 
@@ -983,6 +1064,29 @@ public actor SessionService {
             // Whatever was dropped while paused has to come from the pane itself.
             connection.lossyPanes.remove(paneId)
             requestRepaintAfterLoss(hostId: hostId, paneId: paneId)
+
+        case .paneModeChanged(let paneId):
+            // A mode is a per-client screen overlay and control mode is not streamed one, so the
+            // bytes for what is now on that pane never arrive: entering copy mode from another client
+            // (or from a `prefix [` that reached tmux) leaves the pane showing the screen from before
+            // and no notification ever corrects it. A repaint is the only way to see the mode at all,
+            // and leaving it is the pane looking frozen with nothing wrong.
+            log("[\(hostId)] pane mode changed on \(paneId); repainting")
+            requestRepaintAfterLoss(hostId: hostId, paneId: paneId)
+
+        case .configError(let text):
+            // Reported here and nowhere else. Not `.ignore`-worthy: the user is looking at a tmux
+            // whose configuration did not fully load, and every symptom of that is baffling.
+            log("[\(hostId)] tmux config error: \(text)")
+            withHost(hostId) { host in
+                host.lastCommandFailure = CommandFailure(
+                    action: "tmux configuration",
+                    message: text.isEmpty ? "tmux reported an error in its configuration" : text
+                )
+            }
+
+        case .message(let text):
+            log("[\(hostId)] tmux message: \(text)")
 
         case .clientDetached, .clientSessionChanged:
             break
@@ -1071,6 +1175,8 @@ public actor SessionService {
     private func completeHandshakeIfNeeded(hostId: String, connection: Connection) {
         guard !connection.handshakeComplete else { return }
         connection.handshakeComplete = true
+        connection.handshakeWatchdog?.cancel()
+        connection.handshakeWatchdog = nil
         connection.preHandshakeLog.removeAll()
 
         // A follower is one session's output, nothing more. It does not decide that the host is
@@ -1079,6 +1185,8 @@ public actor SessionService {
         // it does need is the version — the sizing and flow-control policies it applies to its own
         // session are chosen from it — and a repaint of what it is now responsible for.
         if connection.isPrimary {
+            // Landed, so the name question is settled either way.
+            recoveryLostItsSession.remove(hostId)
             // Whatever ssh asked for, it got: the protocol is speaking.
             withHost(hostId) { $0.authenticationPrompt = nil }
             withHost(hostId) { host in
@@ -1124,7 +1232,18 @@ public actor SessionService {
             break
 
         case .version:
-            guard let raw = text().first, let version = TmuxVersion(raw) else { break }
+            // A version that will not parse used to `break` and leave `connection.version` nil for
+            // good — and every sizing path guards on it, so `applyWindowSizePolicy` returned at its
+            // first line, `sizesWindowsIndividually` stayed false, and `flushWindowResizes` dropped
+            // every resize for the life of the channel. Silently, and for a string tmux is entitled
+            // to change. Falling back to the control-mode floor is the conservative reading: it uses
+            // `window-size latest` and `refresh-client -C`, which every version that can speak to us
+            // at all understands.
+            let raw = text().first ?? ""
+            let version = TmuxVersion(raw) ?? {
+                log("[\(hostId)] could not parse tmux version \(raw.isEmpty ? "(no answer)" : "'\(raw)'"); assuming 2.4")
+                return TmuxVersion("2.4")!
+            }()
             connection.version = version
             withHost(hostId) { $0.tmuxVersion = version.raw }
             if !version.supportsControlMode {
@@ -1301,8 +1420,9 @@ public actor SessionService {
         withHost(hostId) { host in
             var seenBySession: [String: Set<String>] = [:]
             for line in lines {
-                let fields = line.split(separator: "|", maxSplits: 6, omittingEmptySubsequences: false)
-                guard fields.count >= 7 else { continue }
+                // The name is last and may itself contain `|`, so it takes whatever is left.
+                let fields = line.split(separator: "|", maxSplits: 8, omittingEmptySubsequences: false)
+                guard fields.count >= 9 else { continue }
                 let sessionId = String(fields[0])
                 let windowId = String(fields[1])
                 let isActive = fields[2] == "1"
@@ -1310,7 +1430,9 @@ public actor SessionService {
                 // `automatic-rename` is 1 while tmux owns the name; 0 once the user has set one.
                 let hasExplicitName = fields[4] == "0"
                 let layout = String(fields[5])
-                let name = String(fields[6])
+                let visibleLayout = String(fields[6])
+                let flags = String(fields[7])
+                let name = String(fields[8])
 
                 seenBySession[sessionId, default: []].insert(windowId)
 
@@ -1320,13 +1442,15 @@ public actor SessionService {
                     host.sessions[sessionIndex].windows[windowIndex].isActive = isActive
                     host.sessions[sessionIndex].windows[windowIndex].hasActivity = hasActivity
                     host.sessions[sessionIndex].windows[windowIndex].hasExplicitName = hasExplicitName
-                    host.sessions[sessionIndex].windows[windowIndex].apply(layoutString: layout)
+                    host.sessions[sessionIndex].windows[windowIndex].apply(
+                        layoutString: layout, visibleLayout: visibleLayout, flags: flags
+                    )
                 } else {
                     var window = TmuxWindow(
                         id: windowId, name: name, isActive: isActive, hasActivity: hasActivity,
                         hasExplicitName: hasExplicitName
                     )
-                    window.apply(layoutString: layout)
+                    window.apply(layoutString: layout, visibleLayout: visibleLayout, flags: flags)
                     host.sessions[sessionIndex].windows.append(window)
                 }
                 if isActive {
@@ -1379,6 +1503,9 @@ public actor SessionService {
                 }
             }
         }
+        // `list-panes -a` is the authoritative pane census, so this is the one moment the service can
+        // tell a pane that is gone from one it has simply not heard about yet.
+        pruneVanishedPanes(hostId: hostId)
     }
 
     // MARK: - Model helpers
@@ -1420,7 +1547,17 @@ public actor SessionService {
     private func send(_ text: String, kind: PendingCommand.Kind, hostId: String, connection: Connection) {
         let command = PendingCommand(text: text, kind: kind)
         guard connection.handshakeComplete else {
+            // Bounded, and the *oldest* go first. A surface still has focus while its host reconnects,
+            // so everything typed into it queues here — and the whole queue is replayed the moment the
+            // handshake lands. Unbounded, a host that took minutes to come back injected minutes of
+            // keystrokes into the pane at once, which is both a surprise and a hazard. Keeping the
+            // newest is the right end to keep: it is what the user typed most recently.
             connection.outbox.append(command)
+            if connection.outbox.count > Self.maxOutboxCommands {
+                let dropped = connection.outbox.count - Self.maxOutboxCommands
+                connection.outbox.removeFirst(dropped)
+                log("[\(hostId)] outbox full; dropped \(dropped) command(s) queued before the handshake")
+            }
             return
         }
         guard let data = (text + "\n").data(using: .utf8) else { return }
@@ -1601,9 +1738,14 @@ public actor SessionService {
                      kind: .ignore, hostId: hostId, connection: connection)
                 return
             }
+            // A pane tmux paused on its own is still ours to resume — nothing else will, and a pane
+            // left paused never moves again — but not before the hold-down has run, or the pause is
+            // undone in the same breath it arrived in.
+            if case .server(let since) = connection.pausedPanes[paneId],
+               since.duration(to: .now) < Connection.serverPauseHoldDown {
+                return
+            }
             if isPaused, outstanding <= paneLowWaterBytes {
-                // A pane tmux paused on its own is resumed on the same terms. Nothing else will do
-                // it, and a pane left paused never moves again.
                 connection.pausedPanes.removeValue(forKey: paneId)
                 // tmux discards a paused pane's output rather than queueing it, so the emulator now
                 // holds a snapshot with a gap after it. The `%continue` this triggers repaints, which
@@ -1946,6 +2088,38 @@ public actor SessionService {
 
     /// Forgets a window that no longer exists, so its size and owner do not accumulate for the life of
     /// the channel.
+    /// Drops per-pane bookkeeping for panes the host no longer has.
+    ///
+    /// `paneOwners`, `repaintedPanes`, `pausedPanes` and `lossyPanes` gain an entry for every pane
+    /// that ever produced output, and the only removals were by channel epoch or on `removeHost` —
+    /// there was a `forgetWindowGeometry` for windows and no pane-level equivalent, so killing panes
+    /// on a long-lived connection grew all four without bound. tmux never reuses a pane id, so it was
+    /// monotonic.
+    ///
+    /// Driven from the model rather than from `%window-close`, which cannot distinguish a window that
+    /// was killed from one that was merely unlinked (F4.9) and is still alive in another session.
+    /// Anything still in the topology is left alone, so an unlink prunes nothing.
+    private func pruneVanishedPanes(hostId: String) {
+        guard let host = hosts[hostId] else { return }
+        // Never prune from an empty topology: at handshake, and for the moment after a reattach
+        // before `list-panes` answers, "no panes" means "not yet known", not "all gone".
+        let live = Set(host.sessions.flatMap { $0.windows.flatMap { window in
+            window.panes.map(\.id) + (window.layoutTree?.paneIds ?? [])
+        } })
+        guard !live.isEmpty else { return }
+
+        for paneId in (paneOwners[hostId] ?? [:]).keys where !live.contains(paneId) {
+            paneOwners[hostId]?.removeValue(forKey: paneId)
+        }
+        for channel in channels(of: hostId) {
+            channel.repaintedPanes.formIntersection(live)
+            channel.lossyPanes.formIntersection(live)
+            for paneId in channel.pausedPanes.keys where !live.contains(paneId) {
+                channel.pausedPanes.removeValue(forKey: paneId)
+            }
+        }
+    }
+
     private func forgetWindowGeometry(hostId: String, windowId: String) {
         guard let connection = connections[hostId] else { return }
         connection.desiredWindowSizes.removeValue(forKey: windowId)
@@ -2044,6 +2218,15 @@ public actor SessionService {
         send("detach-client -a -s \(TmuxCommand.quote(connection.sessionTarget))", kind: .ignore, hostId: hostId, connection: connection)
     }
 
+    /// Toggles zoom on a pane (`resize-pane -Z`), the app's equivalent of `prefix-z`.
+    ///
+    /// Nothing needs to be tracked here: tmux answers with a `%layout-change` carrying the new
+    /// visible layout and flags, and the model takes the zoom from those. That is also why a zoom
+    /// toggled from another client or from a plain `tmux` prefix key arrives the same way.
+    public func toggleZoom(hostId: String, paneId: String) {
+        send("resize-pane -Z -t \(paneId)", kind: .userCommand("Zoom pane"), hostId: hostId)
+    }
+
     public func resizePane(hostId: String, paneId: String, cols: Int?, rows: Int?) {
         var command = "resize-pane -t \(paneId)"
         if let cols { command += " -x \(cols)" }
@@ -2075,6 +2258,14 @@ public actor SessionService {
         let userInitiated = connection.userInitiatedDisconnect
         let serverEnded = connection.serverEnded
         let attachedToSession = connection.attachedToSession
+        // A recovery attach that died before tmux ever spoke is the remembered session failing to
+        // resolve — `attach-session -t <name>` exits when there is no such session. The next attempt
+        // takes whatever the server still has rather than retrying a name that will never come back.
+        // It cannot fall back to creating one: that is precisely what F4.15 forbids.
+        if connection.attachedByRememberedName, !connection.handshakeComplete {
+            log("[\(hostId)] the remembered session did not resolve; next attempt will take any session")
+            recoveryLostItsSession.insert(hostId)
+        }
         teardown(hostId: hostId, connection: connection)
         guard !userInitiated else { return }
 
@@ -2147,7 +2338,7 @@ public actor SessionService {
         reconnectTasks[hostId] = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
-            try? await self?.connectHost(hostId: hostId)
+            try? await self?.connectHost(hostId: hostId, isRecovery: true)
         }
     }
 
@@ -2235,7 +2426,9 @@ public actor SessionService {
         // later on top of the connection this call is about to make.
         cancelScheduledReconnect(hostId: hostId)
         reconnectAttempts[hostId] = 0
-        try? await connectHost(hostId: hostId)
+        // Still a recovery, not a fresh connect: the user is asserting the host is reachable, not
+        // asking for a new session to be made if theirs has gone (F4.15).
+        try? await connectHost(hostId: hostId, isRecovery: true)
     }
 
     /// Called on wake and on network path changes (F4.18). Probes rather than waiting for a
@@ -2251,7 +2444,7 @@ public actor SessionService {
             case .reconnecting, .failed:
                 cancelScheduledReconnect(hostId: hostId)
                 reconnectAttempts[hostId] = 0
-                try? await connectHost(hostId: hostId)
+                try? await connectHost(hostId: hostId, isRecovery: true)
             case .disconnected, .connecting:
                 break
             }

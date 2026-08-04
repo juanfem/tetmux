@@ -12,7 +12,16 @@ public final class AppModel {
     public let store = HostConfigStore()
 
     public var hosts: [HostState] = []
-    public var theme = TerminalTheme.default
+    /// Written by the settings pane and by ⌘+/⌘−, and persisted on every change.
+    ///
+    /// `didSet` rather than an explicit save at each call site: there are several writers now and one
+    /// that forgot would look exactly like a setting that does not stick.
+    public var theme = TerminalTheme.load() {
+        didSet {
+            guard theme != oldValue else { return }
+            theme.save()
+        }
+    }
     public var keymap = KeymapPolicy.default
 
     /// An ssh prompt waiting on the user, when it could not be answered from the Keychain.
@@ -680,6 +689,79 @@ public final class AppModel {
         let scope = activeScope
         guard let hostId = scope.hostId, let paneId = scope.paneId else { return }
         Task { await service.killPane(hostId: hostId, paneId: paneId) }
+    }
+
+    // MARK: - Appearance
+
+    /// ⌘+ / ⌘−. Every pane reflows, because the cell size comes from the font and the grid comes from
+    /// the cell size — the views measure again and ask tmux for a new one (§3.3).
+    public func adjustFontSize(by delta: CGFloat) {
+        theme.fontSize = TerminalTheme.clampedFontSize(theme.fontSize + delta)
+    }
+
+    public func resetFontSize() {
+        theme.fontSize = TerminalTheme.default.fontSize
+    }
+
+    /// Opens SwiftTerm's find bar on the focused pane.
+    ///
+    /// It is driven through AppKit's text-finder responder chain — `showFindBar` is private in
+    /// SwiftTerm and reachable only this way — so the message goes to the first responder, which is
+    /// the focused `TerminalView`. The tag is `NSTextFinder.Action.showFindInterface`, which is what
+    /// the standard Find menu item carries.
+    public func showFindBar() {
+        let item = NSMenuItem(title: ApplicationShortcut.find.title, action: nil, keyEquivalent: "")
+        item.tag = NSTextFinder.Action.showFindInterface.rawValue
+        NSApp.sendAction(#selector(NSResponder.performTextFinderAction(_:)), to: nil, from: item)
+    }
+
+    /// `prefix z`, as a menu command. tmux answers with the new visible layout and the model takes
+    /// the zoom from that, so nothing is tracked here.
+    public func toggleZoom() {
+        let scope = activeScope
+        guard let hostId = scope.hostId, let paneId = scope.paneId else { return }
+        Task { await service.toggleZoom(hostId: hostId, paneId: paneId) }
+    }
+
+    /// Moves the focused pane within the current window, in layout order and wrapping.
+    ///
+    /// Layout order rather than geometry: it is what tmux's own `select-pane -t :.+` does, it matches
+    /// the order the sidebar lists panes in, and it cannot get stuck the way a directional walk can
+    /// in an uneven split.
+    public func focusAdjacentPane(offset: Int) {
+        let scope = activeScope
+        guard let state = activeWindowState,
+              let window = hosts.first(where: { $0.id == scope.hostId })?
+                  .sessions.first(where: { $0.id == scope.sessionId })?
+                  .windows.first(where: { $0.id == scope.windowId })
+        else { return }
+
+        // The rendered tree, so that while a pane is zoomed the cycle is over what is on screen.
+        let ids = window.renderTree?.paneIds ?? window.panes.map(\.id)
+        guard !ids.isEmpty else { return }
+        let current = ids.firstIndex(of: scope.paneId ?? "") ?? 0
+        let next = ids[(current + offset % ids.count + ids.count) % ids.count]
+        state.focusedPaneId = next
+        activeScope.paneId = next
+        // tmux tracks its own active pane, and a rename or a new split resolves against it.
+        if let hostId = scope.hostId {
+            Task { await service.selectPane(hostId: hostId, paneId: next) }
+        }
+    }
+
+    /// Moves to the next or previous tmux window of the current session, wrapping.
+    public func selectAdjacentWindow(offset: Int) {
+        let scope = activeScope
+        guard let state = activeWindowState,
+              let session = hosts.first(where: { $0.id == scope.hostId })?
+                  .sessions.first(where: { $0.id == scope.sessionId })
+        else { return }
+
+        let ids = session.windows.map(\.id)
+        guard !ids.isEmpty, let hostId = scope.hostId else { return }
+        let current = ids.firstIndex(of: scope.windowId ?? "") ?? 0
+        let next = ids[(current + offset % ids.count + ids.count) % ids.count]
+        select(in: state, host: hostId, session: scope.sessionId, window: next)
     }
 
     public func killWindow(hostId: String, windowId: String) {

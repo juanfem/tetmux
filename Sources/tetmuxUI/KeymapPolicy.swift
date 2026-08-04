@@ -15,6 +15,15 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
     case closePane
     case splitRight
     case splitDown
+    case zoomPane
+    case focusNextPane
+    case focusPreviousPane
+    case nextWindow
+    case previousWindow
+    case find
+    case increaseFontSize
+    case decreaseFontSize
+    case resetFontSize
     case paste
     case sendNextLiteral
     case renameWindow
@@ -36,6 +45,15 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
         case .closePane: return "Close Pane"
         case .splitRight: return "Split Right"
         case .splitDown: return "Split Down"
+        case .zoomPane: return "Zoom Pane"
+        case .focusNextPane: return "Select Next Pane"
+        case .focusPreviousPane: return "Select Previous Pane"
+        case .nextWindow: return "Next tmux Window"
+        case .previousWindow: return "Previous tmux Window"
+        case .find: return "Find…"
+        case .increaseFontSize: return "Bigger"
+        case .decreaseFontSize: return "Smaller"
+        case .resetFontSize: return "Actual Size"
         case .paste: return "Paste"
         case .sendNextLiteral: return "Send Next Chord Literally"
         case .renameWindow: return "Rename Window…"
@@ -66,8 +84,25 @@ public struct KeymapPolicy: Sendable {
         .newAppWindow: KeyBinding("n"),
         .newWindow: KeyBinding("t"),
         .closeWindow: KeyBinding("w", [.command, .shift]),
+        // Declared since the first keymap and never bound, so its menu item rendered with no chord.
+        // ⌥⌘W rather than anything nearer ⌘W: the three of them are a window of the application, a
+        // tmux window, and one pane, in increasing order of how much they take with them.
+        .closePane: KeyBinding("w", [.command, .option]),
         .splitRight: KeyBinding("d"),
         .splitDown: KeyBinding("d", [.command, .shift]),
+        // tmux's own `prefix z`, in Cmd space. Not ⌘Z, which is Undo everywhere in macOS.
+        .zoomPane: KeyBinding("z", [.command, .shift]),
+        // The bracket pair macOS uses for "move within the document" — Safari and Xcode both.
+        .focusNextPane: KeyBinding("]", [.command, .option]),
+        .focusPreviousPane: KeyBinding("[", [.command, .option]),
+        .nextWindow: KeyBinding("]", [.command, .shift]),
+        .previousWindow: KeyBinding("[", [.command, .shift]),
+        .find: KeyBinding("f"),
+        // `+` is what the key is labelled and `=` is what it sends unshifted; binding the unshifted
+        // one is what every Mac application does, so ⌘= and ⌘+ both work.
+        .increaseFontSize: KeyBinding("="),
+        .decreaseFontSize: KeyBinding("-"),
+        .resetFontSize: KeyBinding("0"),
         .paste: KeyBinding("v"),
         .sendNextLiteral: KeyBinding("v", [.command, .option]),
         // tmux's own rename bindings are prefix-based (`prefix ,` and `prefix $`), which never reach

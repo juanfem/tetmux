@@ -25,8 +25,14 @@ let package = Package(
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.0.7")
     ],
     targets: [
+        // `forkpty` is in libutil on glibc and is not exposed by the Glibc module. Linux-only: the
+        // Darwin module already provides it, and `pty.h` does not exist on macOS.
+        .systemLibrary(name: "CUtil", path: "Sources/CUtil"),
         .target(
             name: "tetmuxCore",
+            dependencies: [
+                .target(name: "CUtil", condition: .when(platforms: [.linux])),
+            ],
             path: "Sources/tetmuxCore"
         ),
         .target(

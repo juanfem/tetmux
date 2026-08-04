@@ -205,6 +205,16 @@ public struct ControlCodec: Sendable {
             guard let id = args.first else { return nil }
             return .continuePane(paneId: id)
 
+        case "%pane-mode-changed":
+            guard let id = args.first else { return nil }
+            return .paneModeChanged(paneId: id)
+
+        case "%config-error":
+            return .configError(message: args.joined(separator: " "))
+
+        case "%message":
+            return .message(text: args.joined(separator: " "))
+
         case "%exit":
             return .exit(reason: args.isEmpty ? nil : args.joined(separator: " "))
 
@@ -260,10 +270,22 @@ public struct ControlCodec: Sendable {
             age = parsed
             // tmux writes `%extended-output %p <age> : <data>`. The colon is a reserved slot for
             // future fields; skip everything up to and including it so it never lands in the payload.
+            //
+            // Failing the parse when it is absent, rather than running off the end: consuming the
+            // whole line looking for a colon that is not there used to leave `i == n`, so the event
+            // was emitted with *empty data* and the pane went silently dead. A build that varies the
+            // reserved fields would have stopped every pane at once with nothing in the log. A parse
+            // failure at least says so, and `pause-after` — which is what switches the server into
+            // this mode — is only enabled on 3.2 and above.
+            var sawColon = false
             while i < n {
-                guard let field = nextField() else { return nil }
-                if field == [UInt8(ascii: ":")] { break }
+                guard let field = nextField() else { break }
+                if field == [UInt8(ascii: ":")] {
+                    sawColon = true
+                    break
+                }
             }
+            guard sawColon else { return nil }
         }
 
         let payload = i < n ? Array(bytes[i...]) : []

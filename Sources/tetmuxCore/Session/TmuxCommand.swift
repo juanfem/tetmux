@@ -98,7 +98,11 @@ public enum TmuxCommand {
     /// explicitly turns it `0`. There is no `#{window_...}` variable for this — the option name itself
     /// is the format — and it is the only way to tell a deliberate name from a coincidental one.
     public static let windowsFormat =
-        "#{session_id}|#{window_id}|#{window_active}|#{window_activity_flag}|#{automatic-rename}|#{window_layout}|#{window_name}"
+        // `window_visible_layout` and `window_flags` carry the zoom. A window that was already zoomed
+        // when tetmux attached never sends a `%layout-change`, so without them here a reattach paints
+        // the unzoomed grid and stays that way.
+        "#{session_id}|#{window_id}|#{window_active}|#{window_activity_flag}|#{automatic-rename}"
+        + "|#{window_layout}|#{window_visible_layout}|#{window_flags}|#{window_name}"
     public static let panesFormat =
         "#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_current_command}|#{pane_current_path}"
     public static let clientsFormat = "#{client_name}|#{client_session}|#{client_flags}"

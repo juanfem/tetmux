@@ -3,8 +3,12 @@ import SwiftTerm
 import SwiftUI
 import tetmuxCore
 
-/// User-visible terminal appearance. Kept in one place so the eventual settings pane has a single
-/// thing to write to, and so both backends behind `TerminalSurface` would read the same values.
+extension ClosedRange where Bound == CGFloat {
+    func clamping(_ value: CGFloat) -> CGFloat { Swift.min(Swift.max(value, lowerBound), upperBound) }
+}
+
+/// User-visible terminal appearance. Kept in one place so the settings pane has a single thing to
+/// write to, and so both backends behind `TerminalSurface` would read the same values.
 public struct TerminalTheme: Equatable, Sendable {
     public var fontName: String
     public var fontSize: CGFloat
@@ -14,12 +18,55 @@ public struct TerminalTheme: Equatable, Sendable {
     /// OSC 52 writes are denied unless the user opts in per host. Reads are never permitted.
     public var allowRemoteClipboardWrite: Bool
 
+    /// How much scrollback a pane keeps locally.
+    ///
+    /// Not the same thing as tmux's history: control mode streams `%output` and the emulator on this
+    /// side is what holds it, so this is the number that decides whether scrolling up finds anything.
+    /// It was never set at all, which meant SwiftTerm's default of 500 lines — about one `ls -R`.
+    public var scrollbackLines: Int
+
     public static let `default` = TerminalTheme(
         fontName: "SF Mono",
         fontSize: 12,
         ligatures: false,
-        allowRemoteClipboardWrite: false
+        allowRemoteClipboardWrite: false,
+        scrollbackLines: 10_000
     )
+
+    /// The bounds the settings pane offers, and what ⌘+/⌘− clamp to.
+    public static let fontSizeRange: ClosedRange<CGFloat> = 8...32
+
+    // MARK: - Persistence
+
+    /// `UserDefaults` rather than a file beside `hosts.json`: this is application preference data,
+    /// not part of the user's host configuration, and macOS already has the right place for it.
+    private enum Key {
+        static let fontName = "terminal.fontName"
+        static let fontSize = "terminal.fontSize"
+        static let ligatures = "terminal.ligatures"
+        static let scrollback = "terminal.scrollbackLines"
+    }
+
+    public static func load(from defaults: UserDefaults = .standard) -> TerminalTheme {
+        var theme = TerminalTheme.default
+        if let name = defaults.string(forKey: Key.fontName) { theme.fontName = name }
+        // `double(forKey:)` answers 0 for a key that was never written, which is not a font size.
+        let size = defaults.double(forKey: Key.fontSize)
+        if size > 0 { theme.fontSize = fontSizeRange.clamping(CGFloat(size)) }
+        if defaults.object(forKey: Key.ligatures) != nil {
+            theme.ligatures = defaults.bool(forKey: Key.ligatures)
+        }
+        let scrollback = defaults.integer(forKey: Key.scrollback)
+        if scrollback > 0 { theme.scrollbackLines = scrollback }
+        return theme
+    }
+
+    public func save(to defaults: UserDefaults = .standard) {
+        defaults.set(fontName, forKey: Key.fontName)
+        defaults.set(Double(fontSize), forKey: Key.fontSize)
+        defaults.set(ligatures, forKey: Key.ligatures)
+        defaults.set(scrollbackLines, forKey: Key.scrollback)
+    }
 
     public func resolvedFont() -> NSFont {
         NSFont(name: fontName, size: fontSize)
@@ -41,6 +88,12 @@ public struct TerminalTheme: Equatable, Sendable {
     /// source. Mirrors SwiftTerm's own `computeFontDimensions` so the grid we ask for is the grid it
     /// draws: ascent + descent + leading for the height, the advancement of `W` for the width, both
     /// snapped up to the pixel grid to avoid sub-pixel seams between cells.
+    /// Applies the font-size bounds. Written here so the slider, the menu commands, and the values
+    /// read back from `UserDefaults` cannot disagree about what a legal size is.
+    public static func clampedFontSize(_ size: CGFloat) -> CGFloat {
+        fontSizeRange.clamping(size)
+    }
+
     public func cellSize(backingScaleFactor scale: CGFloat) -> CGSize {
         let font = resolvedFont()
         let height = ceil(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font))
@@ -70,12 +123,24 @@ struct TerminalPaneView: NSViewRepresentable {
     let onFocusRequest: () -> Void
 
     func makeNSView(context: Context) -> TerminalView {
-        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), font: theme.resolvedFont())
         view.terminalDelegate = context.coordinator
-        view.font = theme.resolvedFont()
+        // SwiftTerm's macOS view has no options-taking initialiser, so the buffer is made with the
+        // default 500 lines and resized here. `changeScrollback` is the supported way to do it after
+        // instantiation, and it is what lets the setting apply to panes already on screen rather than
+        // only to ones opened afterwards.
+        view.getTerminal().changeScrollback(theme.scrollbackLines)
         view.allowMouseReporting = true   // T5.3
         view.optionAsMetaKey = true
         view.configureNativeColors()
+
+        // The pane is the terminal, and VoiceOver had nothing at all to say about it — SwiftTerm's
+        // own accessibility service is an empty stub, so every piece of chrome around the pane was
+        // announced and the pane itself was silent. This does not make the grid navigable, but it
+        // does mean the element has a name and a role instead of being invisible.
+        view.setAccessibilityElement(true)
+        view.setAccessibilityRole(NSAccessibility.Role.textArea)
+        view.setAccessibilityLabel("Terminal pane \(paneId)")
 
         context.coordinator.attach(view: view, hostId: hostId, paneId: paneId, service: service)
         if cols > 0 && rows > 0 {
@@ -89,6 +154,11 @@ struct TerminalPaneView: NSViewRepresentable {
 
         if view.font.fontName != theme.resolvedFont().fontName || view.font.pointSize != theme.fontSize {
             view.font = theme.resolvedFont()
+        }
+
+        let terminalForOptions = view.getTerminal()
+        if terminalForOptions.options.scrollback != theme.scrollbackLines {
+            terminalForOptions.changeScrollback(theme.scrollbackLines)
         }
 
         // Snap the emulator to the size tmux reported. If the view's own pixel-derived size drifts
@@ -189,7 +259,17 @@ struct TerminalPaneView: NSViewRepresentable {
         func setTerminalTitle(source: TerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
-        func bell(source: TerminalView) { NSSound.beep() }
+        /// F4.31 — a bell from a pane nobody is looking at is worth a notification, not just a beep.
+        ///
+        /// The beep alone was the whole handler, and a beep is useless in the case that matters: the
+        /// long build finishing in a background window, which is the reason a terminal rings at all.
+        /// The notification is posted only when the app is not frontmost, because a banner for a pane
+        /// the user is watching is noise.
+        func bell(source: TerminalView) {
+            NSSound.beep()
+            guard !NSApp.isActive else { return }
+            BellNotifier.shared.post(paneId: parent.paneId)
+        }
 
         /// T5.5 — OSC 8 hyperlinks open in the default handler.
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {

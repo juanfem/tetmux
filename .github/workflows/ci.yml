@@ -59,6 +59,19 @@ jobs:
             grep -B1 -E "was skipped|skipped \(" test.log | tail -20
           fi
 
+  # §2.4: the portability hedge is only a hedge if something exercises it. It had already stopped
+  # being true — `PtyTransport` called `Darwin.write` outside any `#if`, and `forkpty` needs libutil
+  # on glibc — and nothing caught it, because every job here ran on macOS. Builds `tetmuxCore` alone:
+  # `tetmuxUI` is AppKit and SwiftTerm by design, and the test target links it.
+  portability:
+    name: Build tetmuxCore on Linux
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the portable core
+        run: swift build --target tetmuxCore
+
   package:
     name: Package .dmg
     needs: test

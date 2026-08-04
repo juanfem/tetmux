@@ -186,6 +186,45 @@ final class ControlCodecTests: XCTestCase {
         XCTAssertNoThrow(try LayoutParser.parse(layout), "the captured layout must actually parse")
     }
 
+    /// Zoom, captured verbatim from 3.7b: two panes side by side, `resize-pane -Z`, then back.
+    ///
+    /// The point of the fixture is that `window_layout` does **not** change when a pane is zoomed —
+    /// it stays the layout the window would have unzoomed — so a client rendering it paints the wrong
+    /// grid and sizes every surface wrongly while tmux emits output for the whole window. Only the
+    /// visible layout and the `Z` flag say what is actually on screen.
+    func testZoomIsCarriedByTheVisibleLayoutAndTheFlags() {
+        var codec = ControlCodec()
+        let unzoomed = "8c52,80x24,0,0{40x24,0,0,261,39x24,41,0,262}"
+        let events = codec.feed(Array((
+            "%layout-change @246 \(unzoomed) \(unzoomed) *\r\n"
+            + "%layout-change @246 \(unzoomed) ece4,80x24,0,0,262 *Z\r\n"
+            + "%layout-change @246 \(unzoomed) \(unzoomed) *\r\n"
+        ).utf8))
+
+        XCTAssertEqual(events.count, 3)
+
+        var window = TmuxWindow(id: "@246", name: "zsh")
+        for event in events {
+            guard case .layoutChange(_, let layout, let visible, let flags) = event else {
+                return XCTFail("expected .layoutChange, got \(event)")
+            }
+            window.apply(layoutString: layout, visibleLayout: visible, flags: flags)
+
+            if flags?.contains("Z") == true {
+                XCTAssertTrue(window.isZoomed)
+                // What gets rendered is the single full-size pane…
+                XCTAssertEqual(window.renderTree?.paneIds, ["%262"])
+                XCTAssertEqual(window.renderTree?.cellSize(ofPane: "%262").map { [$0.cols, $0.rows] }, [80, 24])
+                // …while the window still knows it holds two, so its label and count do not change.
+                XCTAssertEqual(window.paneCount, 2)
+            } else {
+                XCTAssertFalse(window.isZoomed)
+                XCTAssertEqual(window.renderTree?.paneIds, ["%261", "%262"])
+                XCTAssertEqual(window.renderTree?.cellSize(ofPane: "%262").map { [$0.cols, $0.rows] }, [39, 24])
+            }
+        }
+    }
+
     func testLayoutChangeWithOnlyTwoFieldsStillParses() {
         var codec = ControlCodec()
         let events = codec.feed(Array("%layout-change @1 bc62,80x24,0,0,1\r\n".utf8))
