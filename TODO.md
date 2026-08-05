@@ -1,557 +1,168 @@
 # TODO
 
-From the audit of 2026-08-04. Ordered by what actually breaks for a user, not by effort.
-Each item names the evidence, because the ones that matter here are all silent failures — nothing
-in this list announces itself, which is why they survived this long.
+Rewritten from scratch on 2026-08-05 against `tetmux-srd.md` v2.1, which absorbed the audit's
+history: everything the old file recorded as done is now either an invariant in `CLAUDE.md` or an
+amended requirement in the SRD, and repeating it here would be a second copy that drifts. This file
+holds only what is **open**, with the evidence that it is open and instructions concrete enough
+that the work can start from the entry alone. An unlisted requirement reads as done — that is the
+failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
+belongs here.
 
-**42 done, 1 partial, 3 open, 1 parked.**
+**8 features, 1 blocked, 2 parked.** The six small items this file opened with were closed on
+2026-08-05; what they turned into is recorded in `CLAUDE.md`, not here.
 
-References on **done** items are as they were when the audit ran, so they point into the commit
-before each fix rather than into current `main` — they are kept because the evidence is the useful
-part of the entry. References on **open and partial** items are refreshed against current `main`,
-since those are meant to be walked to.
-
-What is left falls into three groups, and they are not equally blocked:
-
-- **Needs credentials or hardware nobody here has.** Developer ID signing and notarisation need an
-  Apple Developer account; an updater needs somewhere to host an appcast and a key to sign it; the
-  P6 wants latency measured in CI on real hardware. These are decisions before they are work.
-  (The R3.6 matrix was in this group and is out of it: the binaries turned out to build from source
-  in about a minute each, so nothing was needed but the script to do it.)
-- **Real features, sized like features.** Copy mode and the §8 test infrastructure — a containerised
-  sshd matrix, chaos tests, a full geometry suite, a rendering corpus. (Passthrough left this group,
-  along with R3.8's "offer a plain shell" row, which was the same surface, and F4.4's discovery,
-  which turned out to be one command and a rule about when it may run.)
-- **Small and unblocked.** Nothing, for the moment. The four that were here — per-host OSC 52, an
-  editable keymap, ⌘⌥V's literal escape, and a start directory for localhost — are done, along with
-  tab reordering, `move-window`, and workspace restoration from the group above.
-- **Parked by decision, not by difficulty.** VoiceOver in a pane, on 2026-08-05: the pane's contents
-  are readable, and the rest — announcing output as it arrives, per-line navigation — is on hold
-  until somebody needs it. There is one user and they do not. Recorded rather than deleted, because
-  the entry says what is missing and why it is hard, which is the expensive half of the work.
-
-## Protocol correctness
-
-- [x] **Notification dispatch outranks command-block framing.** `ControlCodec.parseLine` tests
-  `%output`, `%extended-output`, and the whole `%verb` switch before it consults
-  `activeCommandNumber`, which is read in exactly one place — the bare-line branch. So any line
-  *inside* a `%begin`/`%end` block that starts with `%` is parsed as a notification. The routine
-  damage is loss: `capture-pane` replays scrollback as result lines, and tcsh/zsh's classic prompt
-  is `%`, so every prompt line in a repaint falls into `default:` and is dropped from the restored
-  screen. The severe damage is forgery: a captured `%exit` sets `serverEnded` and the next close is
-  treated as an orderly session end with no reconnect; a captured `%end`/`%error` closes the block
-  early; a captured `%output %3 …` injects bytes into a pane. While a block is open, only
-  `%end`/`%error` *with the matching number* may leave it.
-  `Sources/tetmuxCore/Core/ControlCodec.swift:76-97`
-
-- [x] **Responses are matched positionally and the number that would catch a desync is discarded.**
-  `%begin` pops the head of `pending` and throws `commandNumber` away; `%end`/`%error` never check
-  it. One lost or spurious block shifts the queue for the life of the channel, silently:
-  `capture-pane` payloads land in the wrong pane (with their `ESC[3J`), `list-panes` output reaches
-  `applyWindows`, and an internal `resize-window` failure surfaces as "Rename session failed". The
-  value needed to detect this already arrives on every block.
-  `Sources/tetmuxCore/Session/SessionService.swift:701-716`
-  *Correlation is still by order — the numbers are server-wide and cannot be predicted at send time,
-  so ordering remains the only thing that can match a response to its command. What was added is the
-  integrity check: a `%begin` with nothing pending after the handshake, a terminator closing a block
-  it did not open, and a number that fails to increase are logged as a desync. Detecting it is not
-  the same as recovering from it, and there is still no recovery.*
-
-- [x] **An `%error` with no matched command is discarded entirely**, message text and all — the one
-  case where something already went wrong is the one case that says nothing.
-  `Sources/tetmuxCore/Session/SessionService.swift:716`
-
-- [x] **A partial PTY write is reported as a total failure.** The write loop gives up after ~1 s of
-  `EAGAIN` with `written > 0`, and `send` reads `false` as "nothing reached tmux" and does
-  `pending.removeLast()`. tmux is left holding half a command line with no newline; the next command
-  concatenates onto it and answers one block for two. Permanent desync by way of the item above,
-  plus a corrupted paste — and this is exactly the path a large paste over a congested link takes.
-  `Sources/tetmuxCore/Core/PtyTransport.swift:248-263`, `SessionService.swift:1309-1314`
-
-- [x] **`%extended-output` with no reserved-colon field silently yields empty data** rather than
-  failing the parse, so a build that varies the field layout makes every pane go quietly dead.
-  `Sources/tetmuxCore/Core/ControlCodec.swift:217-228`
-
-- [x] **`LayoutParser` traps on integer overflow and recurses without a depth cap.** Both are
-  reachable from bytes on the wire, and `try?` cannot catch either — a garbled `%layout-change`
-  takes the app down.
-  `Sources/tetmuxCore/Core/LayoutParser.swift:194`, `:117`
-
-## Zoom
-
-- [x] **Zoomed panes are not handled at all.** `grep -i zoom` over `Sources/` and `Tests/` returns
-  nothing. The codec parses `visibleLayout` and `flags` and `SessionService` discards both
-  (`case .layoutChange(let windowId, let layout, _, _)`); `windowsFormat` asks for
-  `#{window_layout}` rather than `#{window_visible_layout}` / `#{window_zoomed_flag}`. `prefix-z`
-  from any client leaves tmux emitting at full-window dimensions while tetmux paints the unzoomed
-  grid and forces each surface to its unzoomed cell size: wrapped, truncated, and unrecoverable
-  without unzooming from somewhere else. The protocol layer already knows; only the model doesn't.
-  `Sources/tetmuxCore/Session/SessionService.swift:749`, `Sources/tetmuxCore/Session/TmuxCommand.swift:101`
-
-## Lifecycle and state
-
-- [x] **⌘Q leaves `window-size manual` on the user's sessions.** The delegate implements only
-  `applicationShouldTerminateAfterLastWindowClosed`; `restoreWindowSizePolicy` runs on a deliberate
-  per-host disconnect and nowhere else. The teardown is careful enough to wait for tmux's own `%end`
-  rather than merely writing the line — and the ordinary way people close a Mac app skips all of it,
-  leaving windows that no longer follow the terminal for the next plain `tmux attach` to find.
-  `Sources/tetmuxUI/AppMain.swift:122`
-
-- [x] **Reconnect creates sessions (F4.15 says it must never).** `connectHost` defaults to
-  `.createOrAttach(sessionName:)` and the backoff passes `mode: nil`. If the server restarted while
-  the link was down, the reconnect manufactures an empty session under the remembered name and
-  presents it as the user's. Only the `%exit`-observed path avoids this.
-  `Sources/tetmuxCore/Session/SessionService.swift:376-380`, `:2004-2007`
-
-- [x] **A corrupt `hosts.json` silently discards every host, then overwrites it.** Both the read and
-  the decode are `try?` with no fallback: the user sees their hosts vanish, and the next edit does
-  load-modify-save and destroys the file that still had them. No backup, no rename, nothing surfaced.
-  `Sources/tetmuxCore/Session/HostConfigStore.swift:110-115`
-
-- [x] **Editing an ssh-config-discovered host never persists.** `saveHosts` filters ids prefixed
-  `ssh-`, but `AppModel.saveHost` only assigns a `custom-` id when the id is empty. Forwards and ssh
-  options on a discovered host work all session and are gone on relaunch — while the Keychain flag
-  survives, so the two then disagree.
-  `Sources/tetmuxCore/Session/HostConfigStore.swift:127`, `Sources/tetmuxUI/AppModel.swift:456-458`
-
-- [x] **Nothing bounds connect, handshake, or the version probe.** A blocking MOTD or a hung
-  `ProxyCommand` sits on "Connecting…" forever with no error and no retry. Worse: if the probe never
-  answers, `connection.version` stays nil, `applyWindowSizePolicy` returns at its first guard, and
-  every window resize is dropped silently for the life of the channel.
-  `Sources/tetmuxCore/Session/SessionService.swift:365-402`, `:954-1010`
-
-- [x] **Manual disconnect cannot cancel the backoff.** The retry task is fire-and-forget and stored
-  nowhere, and `.disconnected.isActive` is false so `connectHost`'s guard does not stop it — a host
-  the user deliberately closed reconnects up to a minute later, possibly raising a password prompt.
-  `Sources/tetmuxCore/Session/SessionService.swift:2004-2007`, `:568-586`
-
-- [x] **Topology and pane refreshes share one task slot** but run different commands, so a
-  `%window-add` arriving just after a `%window-renamed` is dropped: only `list-panes` runs, and a
-  window created elsewhere keeps its placeholder name and wrong session until something unrelated
-  refreshes. Automatic renames fire constantly, so this is hit often.
-  `Sources/tetmuxCore/Session/SessionService.swift:1074-1108`
-
-- [x] **`retireFollower` checks then acts across an `await`.** Tab away from a session and back
-  within 2 s and the in-flight retirement tears down the client that the reconcile just decided to
-  keep, leaving every pane a frozen still frame with nothing scheduled to fix it.
-  `Sources/tetmuxCore/Session/SessionService.swift:499-511`, `:540-549`
-
-- [x] **A server-origin `%pause` is undone immediately.** The handler records the pause and calls
-  `applyFlowControl` in the same breath; when the local counter is drained the pane is resumed at
-  once, so tmux's own `pause-after` degenerates into a pause/resume cycle with a full
-  `capture-pane -S -2000` repaint each time. It needs its own hold-down, not the viewer's watermark.
-  `Sources/tetmuxCore/Session/SessionService.swift:855-863`, `:1465-1477`
-
-- [x] **`switch-client` failure leaves `pendingSessionId` set forever**, so `liveSessionIds` keeps
-  reporting a dead session as live and the not-attached banner never appears over a frozen window.
-  `Sources/tetmuxCore/Session/SessionService.swift:489-492`
-
-- [x] **The pre-handshake outbox is unbounded and replayed in full.** Keystrokes typed while a host
-  reconnects queue with no cap and no age limit; combined with the missing handshake timeout, a host
-  that finally connects gets minutes of stale input injected at once.
-  `Sources/tetmuxCore/Session/SessionService.swift:1299-1304`
-  *Capped at 256 commands, oldest dropped. There is still no age limit — a host that connects after
-  a long outage replays what is left of the queue rather than discarding it as stale.*
-
-- [x] **`%pane-mode-changed` and `%config-error` are unhandled.** Another client entering copy mode
-  leaves that pane looking frozen with no way to learn otherwise; a `.tmux.conf` syntax error is
-  reported here and nowhere else, so the user sees bindings that silently do not work.
-
-- [x] **Per-pane bookkeeping is never pruned on pane death.** `paneOwners`, `repaintedPanes`,
-  `pausedPanes`, `lossyPanes` are released by channel epoch or on `removeHost` only; there is a
-  `forgetWindowGeometry` for windows and no pane-level equivalent. Slow monotonic growth on a
-  long-lived connection.
-  `Sources/tetmuxCore/Session/SessionService.swift:1361-1383`
-
-- [x] **A stale reader thread can read a reused fd.** `terminate()` closes the master fd without
-  joining the reader, which is sitting in a 1000 ms `poll` holding the number by value; a reconnect
-  can be handed the same fd and have its bytes consumed by the old stream. The deferred `SIGKILL`
-  has the same shape against a possibly-reaped pid.
-  `Sources/tetmuxCore/Core/PtyTransport.swift:174-205`, `:296-325`
-
-## The terminal a person uses all day
-
-- [x] **Scrollback is 500 lines and is destroyed on every tab switch.** The pane is built with
-  `TerminalView(frame:)` and default options, so the scrollback is SwiftTerm's default, never
-  chosen. Only the selected window's container exists, so switching tabs dismantles the views and
-  the return trip replays a payload beginning `ESC[H ESC[2J ESC[3J` — screen *and* scrollback —
-  capped at 2000 lines.
-  `Sources/tetmuxUI/TerminalSurface.swift:73`, `Sources/tetmuxUI/AppMain.swift:268-301`
-
-- [x] **⌘F does nothing.** SwiftTerm ships a working find bar, reachable only through the standard
-  text-editing menu group that AppKit puts Find in — which is the group replaced with a single Paste
-  button. The feature exists in the dependency and was accidentally unplugged.
-  `Sources/tetmuxUI/AppMain.swift:54-59`
-
-- [ ] **Copy mode is unreachable and nothing replaces it.** Keys go to the pane via `send-keys -H`,
-  so tmux's key table is never consulted and `C-b` lands in the shell as a literal control
-  character; `grep -rni "copy-mode" Sources/ Tests/` is still empty. Search and zoom now have app-level
-  substitutes (⌘F, ⇧⌘Z) and pane navigation has ⌥⌘[ / ⌥⌘], but tmux's own copy mode — selection by
-  keyboard, its search, its buffers — has none.
-  `Sources/tetmuxCore/Session/SessionService.swift:1929`, `Sources/tetmuxUI/KeymapPolicy.swift:10-30`
-
-- [x] **There is no settings window at all** — no `Settings` scene, so macOS shows no "Settings…"
-  item. No font size (the most-adjusted setting in a terminal), no theme, no ANSI palette;
-  `TerminalTheme.ligatures` is declared and never read, and `TerminalTheme` is assigned once at
-  declaration and never written.
-  `Sources/tetmuxUI/AppMain.swift:11-33`, `Sources/tetmuxUI/AppModel.swift:15`
-  *Font family, size, ligatures and scrollback are settable and persisted. Theme and ANSI palette
-  are still absent — panes follow the system appearance and nothing else.*
-
-- [x] **No keyboard route between panes, and none to another tab except ⌘K.** Pane focus is
-  mouse-only; there is no ⌘1–9, no ⌘{/⌘}, no ⌥⌘arrow. `.closePane` is declared with no default
-  binding, so its menu item renders bare — while ⇧⌘W (close tmux window) and ⌘W (close macOS
-  window) are one modifier apart with very different blast radii.
-  `Sources/tetmuxUI/KeymapPolicy.swift:64-77`
-
-- [x] **Two ⌘V items in the menu bar, and the standard one probably wins.** AppKit's Paste is in the
-  pasteboard group and comes first; SwiftTerm validates `paste(_:)` as always enabled. If so, ⌘V
-  routes to per-keystroke `send-keys -H` and bypasses the buffer chunking whose own comment says a
-  megabyte of `send-keys` will wedge the channel. Verify live, then remove one.
-  `Sources/tetmuxUI/AppMain.swift:56-58`, `Sources/tetmuxCore/Session/SessionService.swift:1622-1650`
-
-- [x] **The bell is `NSSound.beep()`, always** — no background notification, no per-tab marker (the
-  tab dot is tmux's activity flag), no visual bell, no mute. A long build in a background window
-  beeps into the void. F4.31 asks for Notification Center; `UserNotifications` is never imported.
-  `Sources/tetmuxUI/TerminalSurface.swift:192`
-  *Background bells post a coalesced notification now. There is still no visual bell, no mute, and
-  no per-tab bell marker distinct from tmux's activity flag.*
-
-- [x] **The tab strip has no overflow handling and does not follow selection.** A plain horizontal
-  `ScrollView` with no `ScrollViewReader`: with fifteen tmux windows, selecting one from ⌘K or the
-  sidebar leaves its tab off-screen with no indicator and no overflow menu.
-  `Sources/tetmuxUI/AppMain.swift:322-341`
-
-- [x] **No tab reordering and no way to move a window between sessions.** No `onMove`/`draggable`
-  on the tab strip; `SessionService` exposes `unlink-window` but no `move-window`, `swap-window`, or
-  `link-window` — none of the three appears anywhere in `Sources/`. Renaming is well covered at both
-  levels; ordering is not.
-  `Sources/tetmuxCore/Session/SessionService.swift:2302`, `Sources/tetmuxUI/AppMain.swift:436-461`
-  *Tabs drag to reorder, and "Move to Session" / "Link to Session" are on both the tab's context menu
-  and the sidebar's window row. Three things turned up that the entry did not predict.
-  `move-window -a`/`-b` is **tmux 3.2**, not 3.0 — verified against the R3.6 matrix, where 3.0 answers
-  `illegal option -- b` and offers only `[-dkr]` — so below 3.2 the same permutation is built out of
-  `swap-window`, which 3.0 does have: a move from one position to another *is* a run of adjacent
-  swaps, and the windows it passes shift by one exactly as an insert would move them. Indices are
-  never computed, because a session's are arbitrary and often not contiguous; every command addresses
-  windows by `@id`. And the source of a move is qualified with its session (`-s $2:@7`), since a
-  window linked into several is reachable by id from any of them and an unqualified `-s` leaves tmux
-  to pick which one it is taken out of.
-  **The reorder also needed a fix one layer down, and it was a pre-existing bug:** `applyWindows`
-  updated windows in place and appended new ones, so the model kept whatever order it first learned
-  them in. `list-windows` order was discarded, which meant a window moved from another tmux client —
-  or by `swap-window`, or by `movew` typed at a prompt — changed nothing visible here at all.*
-
-- [x] **Nothing is restored on relaunch.** No `@SceneStorage`/`@AppStorage` anywhere; `UserDefaults`
-  now carries the terminal appearance and nothing else. `bootstrap` restores `hosts.json` and then
-  each window is dropped onto the first host and its active session; `WindowSeed` is in-memory only.
-  The sessions survived the relaunch — the window-to-session layout did not.
-  `Sources/tetmuxUI/AppModel.swift:283-307`, `Sources/tetmuxUI/WindowState.swift:13`, `:155-180`
-  *`workspace.json` (§2.3) now records one entry per macOS window — host, session, tmux window, tree
-  state, frame — and reopens them. Deliberately not `@SceneStorage`, which restores a scene's own
-  value into the same scene: what has to come back is a relationship between a window and a tmux
-  session that does not exist until the host has connected and answered `list-sessions`, a round trip
-  after the window is already on screen. So each window holds its entry in `pendingRestore` and
-  `reconcile` retries it on every snapshot. Both an id and a name are stored, and they answer
-  different questions: `$3` is exact and is what a still-running server will still be using — the
-  common case, since quitting tetmux does not stop tmux — while the name is what survives a server
-  restart, where matching on a reissued id would land on a stranger's session. There is no expiry: a
-  window restored onto a remote host waits on that host, connect placeholder and all, until the user
-  connects it, and only an explicit `select` cancels it. Verified end to end by hand: an entry naming
-  `$999` fell back to the session name, resolved the id, picked the window by name, and kept its
-  collapsed tree; two entries came back as two windows on two sessions with their own frames.*
-
-- [~] **Pane contents are invisible to VoiceOver.** **Parked on 2026-08-05** — the readable half is
-  done and the rest waits for somebody to need it. SwiftTerm's accessibility service is an empty
-  stub and `makeNSView` adds no label, value, or role. The chrome around it is labelled thoroughly,
-  which makes the hole sharper: everything is announced except the terminal.
-  `Sources/tetmuxUI/TerminalSurface.swift:142-144`
-  *The screen's contents are readable now: `accessibilityValue` is the visible viewport — bounded by
-  the grid rather than by the scrollback, so the cost does not grow with history — alongside a
-  character count, the selection, the cursor's line, and a role description that says "terminal"
-  rather than "text area". Two things are still missing. Nothing posts `.valueChanged`, so output
-  arriving while VoiceOver is idle is not announced and the user has to go back and read; doing that
-  properly means diffing for the lines that are new, because re-reading the whole screen on every
-  chunk of a build log is worse than saying nothing. And there is still no grid navigation — no
-  per-line elements, no `accessibilityRange(forLine:)` — so a screen reader reads the pane as one
-  string.*
-
-- [x] **No URL detection for plain text, no right-click menu on a pane, no middle-click paste.**
-  Only OSC 8 hyperlinks open, so the URL `git push` prints is not clickable. There is no
-  `rightMouseDown`, no `otherMouseDown`, and no `contextMenu` on a pane — the three context menus in
-  the app are on sidebar rows and the tab.
-  `Sources/tetmuxUI/TerminalSurface.swift:307-313`
-  *The plain-text half turned out to be **already true** — the pinned SwiftTerm detects implicit
-  links and activates them on ⌘-click, and our `requestOpenLink` was being reached all along. That
-  entry was stale rather than wrong when written, so it is now covered by a test that fails if a
-  SwiftTerm bump ever turns the matcher off. The two real gaps are done: `PaneTerminalView` is a
-  `TerminalView` subclass with a context menu (Open / Copy Link on whatever the click landed on, then
-  Copy, Paste, Select All) and middle-click paste. Both pastes go through `SessionService.paste`
-  rather than SwiftTerm's own, which inserts a clipboard as keystrokes. Verified against a live pane:
-  ⌘-click opened `https://example.com/from-a-pane` in the browser, the menu found the URL under the
-  pointer, and a middle click delivered its clipboard to the prompt.*
-
-- [x] Reduce Motion and Increase Contrast are not honoured; animations are unconditional.
-  `Sources/tetmuxUI/LauncherOverlay.swift:36`, `:87`
-  *Reduce Motion is honoured at all three animation sites — the launcher's scroll, the tab strip's
-  scroll-to-selection, and the sidebar's row-action reveal — each keeping the outcome and dropping
-  the movement. Increase Contrast is now `ContrastPolicy`, one place that every site asks rather than
-  a `contrast == .increased ? a : b` per call site: selection fills and hover washes get stronger,
-  selection gains a border, recessed text comes back toward legible without reaching 1, and an
-  unfocused pane stops being dimmed at all — dimming a pane is dimming terminal text, and the frame
-  around the focused one takes over the job at full saturation and double the width. The tests assert
-  direction rather than numbers, which is what stops a later site from taking the standard value in
-  both branches. `differentiateWithoutColor` is handled too, and with no policy type — the
-  replacement channel differs at every site, so each reads the environment itself. The RTT dot gains
-  `· good`/`· fair`/`· slow`, since the number beside it is the measurement and the hue was the
-  judgement; the ⌥-armed close buttons gain a filled chip, since red was the whole content of "this
-  will not stop to ask". The connection rail needed **nothing** — `hostStatusLabel` already says every
-  state but `.connected` in words, and `.connected` is the one with no label — which is worth having
-  checked rather than decorated.*
-
-## Requirements shipped as stubs
-
-- [x] **F4.17 stale-client reconciliation — "the single most common failure mode" — is a probe with
-  no consumer.** `list-clients -F` is sent on every attach and the response is passed to `log()`.
-  No distinctive client name is ever set, nothing identifies a non-live tetmux client, and nothing
-  detaches one. The only detach is a menu action that detaches *every* other client, the user's
-  legitimate ones included.
-  `Sources/tetmuxCore/Session/SessionService.swift:1035-1036`, `:1903-1906`
-  *tmux turned out to have no settable client name — `client_name` is the tty — so the tag is
-  `client_control_mode` instead. Known blast radius: two live tetmuxen against one server, or
-  iTerm2's tmux integration, would detach each other.*
-
-- [x] **F4.27 passthrough fallback**, which §4.6 and §10 both call first-class, is a banner string
-  after which control mode proceeds anyway. A sub-2.4 server is marked `.degraded` and then goes
-  straight on to the window-size, flow-control and subscription policies. No attached-client surface,
-  no mode indicator, nothing disabled. This is also the missing R3.8 row below — "offer a plain
-  shell" is the same surface, not a separate small job.
-  `Sources/tetmuxCore/Session/SessionService.swift:1268-1281`
-  *Both rows are done, and the shape they took is worth recording. Passthrough is a **different
-  channel**, not control mode with features off: `PassthroughChannel` has no codec, no
-  pending-command FIFO, no handshake and no flow control, because everything that makes `Connection`
-  complicated exists to talk to a parser and there is no parser here. The invocation differs from the
-  control-mode one by the `-CC` flag and by nothing else — asserted as an equality in
-  `testPassthroughIsControlModeWithoutTheControlFlag`, since a fallback that quietly dropped `-u`
-  would look like a font bug — and R3.8's last row is the same machinery with no tmux in it at all.
-  Four things that were not obvious going in. **The version probe has to end the channel**, which is
-  the actual content of the old entry's complaint: `complete(.version)` now returns after handing
-  over, so none of the policies below it are applied to a server that has none of the commands.
-  **Geometry inverts** — §3.3's "tmux owns geometry" is true because tmux is laying panes out and
-  reporting where they went, and here the surface *is* the client's terminal, so `sizeChanged` is
-  acted on rather than ignored and `TIOCSWINSZ` is the whole mechanism. **There is no repaint to
-  ask for**, so the channel keeps a 128 KiB replay buffer: a second window would otherwise be a black
-  rectangle that nothing would ever fill, and a mid-stream window of bytes drawing one line wrongly
-  is the better failure. And **the plain shell is offered, never started** — there is nothing on that
-  host to reattach to, so opening a shell nobody asked for would invent the one promise this mode
-  cannot make. Tested end to end three ways: a real tmux client attached in passthrough on this
-  machine, a scripted server claiming 2.3 to drive the fallback (no tmux here is old enough to be the
-  subject), and a host whose tmux is missing, offered and then taking up a shell.
-  **Two defects only came out of running it**, and neither would have failed a test. The banner's
-  `fixedSize(horizontal: false, vertical: true)` — the pattern every other multi-line label in this
-  app uses — blew the `NavigationSplitView` up to 1640pt inside a 612pt window, because a detail
-  column measures its content with an unspecified width and a fixed-size text answers that by
-  wrapping at one character per line. The window looked *empty*: the accessibility tree was complete
-  and correct, with every sidebar row at a negative screen Y. And a `workspace.json` entry naming a
-  passthrough host re-asserted that host on every snapshot — it names a session, a passthrough host
-  has none and never will, so the restore never landed and clicking any other host in the tree was
-  undone by the next topology change.*
-
-- [x] **R3.8 version table: three of five rows absent.** `refresh-client -B` subscriptions are never
-  issued (`TmuxVersion.supportsSubscriptions` is dead code); there is no once-per-host warning for
-  2.4–2.9; tmux being absent produces a raw stderr line rather than the offer of a plain shell.
-  Subscriptions are also the supported way to observe `pane_current_command` and
-  `window_zoomed_flag` — without them the code polls `list-panes` on a debounce.
-  `Sources/tetmuxCore/Session/HostModel.swift:555`, `Sources/tetmuxCore/Session/SessionService.swift:2057-2072`
-  *Two of the three are done: `refresh-client -B` subscribes to `pane_current_command` for every
-  pane on ≥3.2, which is what finally reports a command started in a background pane, and 2.4–2.9
-  now warns once per host. The subscription path is exercised end to end by
-  `testACommandInABackgroundPaneIsReportedWithoutARefresh`, which starts a command in a background
-  pane from outside the channel and waits for the model to learn of it. The third is done with the
-  passthrough surface above: a channel that dies with `command -v tmux`'s own message is not retried
-  — a host with no tmux will not grow one on the second attempt — and is offered a plain login shell
-  instead, which is all that can honestly be offered there.*
-
-- [x] **R3.5 checksum validation defaults to off** and all production callers take the default, so
-  the validation exists only in tests. There are now three of them — the zoom work added a second
-  parse for `visibleLayout`.
-  `Sources/tetmuxCore/Core/LayoutParser.swift:87`, callers at
-  `Sources/tetmuxCore/Session/HostModel.swift:151`, `:174`, `:178`
-  *On at every production caller. What unblocked it was making a rejection all-or-nothing: `apply`
-  parses both fields first and either commits both or keeps the previous layout, so a mismatch costs
-  a stale grid rather than the blank window `layoutTree == nil` renders — which is the fear that kept
-  it off. It returns a `LayoutApplyResult` so `SessionService` can log what it threw away. Two test
-  fixtures turned out to carry hand-edited checksums that no tmux ever emitted; the real ones,
-  zoomed `window_visible_layout` included, all verify.*
-
-- [x] **Declared and never wired**, all four confirmed still unreferenced outside `Tests/`:
-  the OSC 52 opt-in is a global `TerminalTheme` field with no persistence key, no settings control
-  and no `HostConfig` field, so it can never become true and its own doc comment's "unless the user
-  opts in per host" is fiction (T5.6); `KeymapPolicy.rebind` and `shortcut(for:)` have no production
-  callers, and there is no settings file to edit bindings in (F4.19/F4.22); `⌘⌥V` literal-escape has
-  a binding and a title but no menu item and no handler, and `literalEscapeActive: true` is never
-  passed (F4.21); `HostConfigStore.resolveEffectiveConfig` (`ssh -G`) is dead code (F4.2).
-  `Sources/tetmuxUI/TerminalSurface.swift:19`, `Sources/tetmuxUI/KeymapPolicy.swift:107`, `:122-143`,
-  `Sources/tetmuxCore/Session/HostConfigStore.swift:226`
-  *All four are wired now. `ssh -G` fills the host editor's User and Port placeholders and says what
-  an alias resolves to — display only, deliberately, since the connection is still made with the
-  *name* so ssh applies its own `Match` blocks. Wiring it turned up a bug in the dead code itself:
-  the map was last-wins, and `identityfile` repeats once per candidate key, so it reported whichever
-  default came last as though someone had chosen it.*
-  *T5.6 moved off `TerminalTheme` and onto `HostConfig`, which is the only shape the promise can
-  take: trusting the machine on your desk to set your clipboard is a different decision from trusting
-  a shared box you ssh into, and an application-wide flag makes both at once. Denied when the field is
-  absent, so a `hosts.json` written before it existed — or edited to remove it — gets the safe answer.*
-  *F4.21 needed the one event monitor in the app, and had to. Every other binding is a SwiftUI
-  `keyboardShortcut` on a menu item, which AppKit resolves in `performKeyEquivalent` before any view
-  is offered the event, so there is no view-level hook that could let ⌘K through to a pane running
-  fzf. A local `NSEvent` monitor runs earlier — `NSApplication.sendEvent` calls monitors before it
-  dispatches key equivalents — and the armed chord is delivered to the pane's `keyDown` directly
-  rather than passed on, since passing it on is exactly the interception being escaped. It asks
-  `KeymapPolicy.shortcut(for:literalEscapeActive:)` rather than matching anything itself, so F4.22
-  survives the new surface. The mode shows in the status bar: one that changes what the next
-  keystroke does and says nothing is indistinguishable from the app having hung.*
-  *F4.19's keymap is editable from a Keys tab and stored in `settings.json` (§2.3) as the difference
-  from the defaults — so a later change to a default reaches everyone who never touched it, and an
-  explicit `null` is a shortcut deliberately unbound rather than one never edited. ⌘ is required,
-  which is a design constraint and not a limitation: F4.20's promise that `Ctrl+K` stays kill-line is
-  only true while the app lives entirely in `Cmd` space. A chord already in use is refused rather than
-  resolved, because `shortcut(for:)` breaks a tie by the enum case's spelling — which decides
-  something, but nothing anybody meant. Two traps: the recorder has to answer `performKeyEquivalent`,
-  not `keyDown`, or the menu takes every ⌘ chord before it is ever seen; and `overrides` has to use
-  `updateValue`, since assigning `nil` through a `[String: String?]` subscript removes the key instead
-  of storing a null and an unbound shortcut would come back bound.*
-
-- [x] **F4.4** never lists a host's sessions without attaching — `list-sessions` only goes down an
-  already-attached channel, so the only way to see what is on a host is `connectHost`, which
-  attaches and can create.
-  `Sources/tetmuxCore/Session/SessionService.swift:460`, `:1374-1376`
-  *`tmux -C list-sessions`, the SRD's own prescription, over the `ControlMaster` socket that is
-  already there. What it is *for* is the second half of that entry rather than the first: the list is
-  only worth having because clicking an unconnected host runs `new-session -A -s tetmux-main`, so a
-  host with the user's own work on it got a second, empty session made before anyone saw what was
-  there. A discovered session attaches by name with `attach-session`, which cannot create.
-  Two things had to be probed rather than reasoned about, and both are load-bearing. **`tmux -C`
-  reads commands until its input ends**, so `tmux -C list-sessions` prints the answer and then hangs
-  forever — every caller hands it `/dev/null`, and a probe that hangs is worse than no probe because
-  nothing above it is watching. And **the answer is `%begin`-framed while the failures are not**,
-  which is what lets `ControlCodec` pick the list out of an ssh banner and what tells "this host has
-  nothing" from "we could not ask". That distinction is the whole reason `discoveredSessions` is an
-  optional: recording an unreachable host as empty tells somebody their sessions are gone because
-  their laptop is on a train.
-  The probe cannot prompt (`BatchMode=yes`, and a pipe rather than a pty, so there is nowhere to ask),
-  cannot create, cannot attach, and changes no connection state; a host it fails on simply shows what
-  it showed before. Triggers are F4.4's two and no others — expanding a host, opening the launcher,
-  and window focus — with a 30 s freshness window so flapping between two windows costs one probe.
-  The accepted limit: a password host with no live master answers nothing until it has been connected
-  once, which is the price of never raising a sheet nobody asked for.*
-
-- [x] **F4.11** has no `detach-client`: disconnect tears the pty down with `SIGHUP` instead. And
-  `newSession` accepts a start directory that no caller passes.
-  *`detach-client` is done, as "Detach This Client" beside Disconnect, and waited for rather than
-  merely written so `SIGHUP` cannot beat it out of the pty. The start directory is now a **host**
-  setting — "Start in" in the host editor — rather than a dialog at creation time, which is what lets
-  it exist at all: `createSessionWithDefaultName` deliberately puts nothing between wanting a shell
-  and having one. tmux resolves the path on its own side, so `~` and a directory that only exists
-  remotely both work, and there is deliberately no folder picker. Wiring it turned up that the
-  parameter never went through `TmuxCommand.singleLine`, so a pasted path with a line break would
-  have ended the command early and handed tmux the remainder as a new one.
-  **Localhost is covered now**, which needed both halves the entry predicted: `saveHosts` keeps the
-  `local` entry when it differs from a baseline — the same "persist only the override" rule discovered
-  hosts already had — and the editor is conditional, since hostname, user, port, password, tunnels and
-  ssh options are all properties of a connection it does not make. Only the settings that mean
-  something without one are read back from the file, so a hand-edited `hosts.json` cannot turn the
-  local host into a remote one or rename it out of the places that look it up.
-  **The initial command closes this one**, and it is a host setting for the same reason the directory
-  is: a creation flow with no dialog in it can carry no question. It is `new-session`'s trailing
-  `shell-command`, so it goes *after* every option — written before the `-c`, tmux stops reading
-  flags at the first non-flag word and the directory quietly does nothing, which is why
-  `testAStartDirectoryAndAnInitialCommandBothApply` asserts both at once rather than each alone. The
-  value is quoted whole rather than split here, because the far-side shell is what parses it:
-  `srun --pty bash` is one command, not a command plus a flag we get to interpret. A command that
-  exits takes its window and then its session with it — that is what `new-session <command>` does for
-  anybody, and `remain-on-exit` is an option on the user's server rather than ours to set for them.*
-  `Sources/tetmuxCore/Session/SessionService.swift:2323`, `Sources/tetmuxUI/AppModel.swift:926`
-
-## Infrastructure
-
-- [x] **The §2.4 portability hedge is already broken.** `PtyTransport` calls `Darwin.write`
-  unqualified by any `#if canImport(Darwin)`, fifteen lines after the file carefully imports
-  `Glibc`, and `forkpty` is not exposed by the Glibc module either. CI is macOS-only, against
-  §2.4's explicit "CI must build that target on Linux even though nothing consumes it". A hedge
-  that is never exercised has already stopped being a hedge.
-  `Sources/tetmuxCore/Core/PtyTransport.swift:249`, `.github/workflows/ci.yml`
-
-- [ ] **§2.5 distribution**: ad-hoc signing only (`codesign --force --sign - --timestamp=none`), no
-  Developer ID, no notarisation, no hardened runtime, and no update mechanism anywhere in the tree —
-  every user is on manual download plus a Gatekeeper fight on first open, which the release notes
-  currently paper over with a quarantine workaround.
-  `Scripts/package-dmg.sh:136`
-
-- [x] **R3.6 fixture matrix is one version.** Everything is captured from 3.7b; the SRD asks for
-  3.0, 3.2a, 3.3a, 3.4 and 3.5, and CI installs a single Homebrew tmux. The version-conditional
-  code paths are therefore all untested on the versions they exist for — the integration tests
-  self-skip on an old server rather than exercising the fallback, and `TmuxVersion`'s unit tests
-  cover the predicate rather than the paths behind it.
-  `.github/workflows/ci.yml`, `Tests/tetmuxTests/SessionIntegrationTests.swift:997`, `:1302`, `:1350`
-  *All five versions build from pinned checksummed tarballs (`Scripts/build-tmux-matrix.sh`), and
-  `Scripts/capture-fixtures.py` records ten scenarios from each under a pty — 50 fixtures, 200 KB.
-  `ControlCodecMatrixTests` replays them and pins the layout-change field count, zoom's visible
-  layout, octal escaping, rename ids, and `%exit` back to 3.0. Deliberately **not** a CI job: a
-  fixture is a frozen record, and regenerating it each run makes the test a tautology.
-  **Still open at the level below this:** the integration suite continues to run against whatever
-  `tmux` is on PATH, so old-version *behaviour* — as opposed to parsing — is still untested. That is
-  §8's containerised matrix, below.*
-
-- [ ] **P6.1–P6.7 are unmeasured.** No latency, throughput, CPU or memory instrumentation exists —
-  no `os_signpost`, no `measure(`, nothing in CI — against §8's "latency measurement in CI on real
-  hardware, asserting P6.1". The P6 references in the source are design rationale, and the one
-  backpressure test asserts that a pause happens, not how fast anything is.
-
-- [~] **§8 testing strategy, absent items**: no containerised sshd/tmux matrix, no chaos tests
-  (`SIGSTOP`, `pmset`, severed socket), no geometry regression suite or 50-resize storm, and no
-  rendering-acceptance corpus — so T5.7's Unicode 15 width and ZWJ correctness is delegated entirely
-  to SwiftTerm and asserted nowhere.
-  *`TerminalGeometryTests` covers the reserved-scroller column loss and the font-derived cell round
-  trip, which is the start of the geometry suite but not the resize storm. The rest is untouched:
-  the only `container:` in CI is the Swift image for the Linux core build, and the only Unicode
-  assertion is byte delivery through the paste path, never rendered width.*
-
-- [x] **Non-ASCII typed input is untested.** `send-keys -H` with bytes ≥ 0x80 relies on modern tmux
-  ORing `KEYC_LITERAL`; older builds may re-encode per byte and produce mojibake. Add the test
-  before reading it as either safe or broken.
-  `Sources/tetmuxCore/Session/SessionService.swift:1607-1608`
+References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
 ---
 
-## Done
+## Features, sized like features
 
-An earlier round: ⌥ skipping the close/kill confirmation with the glyph turning red while held; the
-menu bar tray opening a window when none is open (three separate dead ends — an unclaimed
-`requestedWindow`, the same dead end one branch later for ⌥, and New Session never queueing a reveal
-at all); localhost auto-connecting at launch; the Dock menu's New Window item; and the session count
-on a collapsed host.
+- [ ] **Copy mode.** Keys reach the pane via `send-keys -H`, so tmux's key table is never
+  consulted and `C-b` lands in the shell as a literal control character;
+  `grep -rni copy-mode Sources/ Tests/` is empty. Search and zoom have app-level substitutes
+  (⌘F, ⇧⌘Z) and pane navigation has ⌥⌘[/⌥⌘] — but tmux's own copy mode (keyboard selection, its
+  search, its buffers) has no replacement, and SwiftTerm's local selection cannot reach text that
+  has scrolled out of the local scrollback but is still in tmux's history.
+  *Do, in order:* (1) surface the mode — handle `%pane-mode-changed` into a per-pane
+  `inCopyMode` flag on `TmuxPane` and show it (status bar and a pane badge), which also fixes
+  "another client entered copy mode and the pane looks frozen" with no way to learn why.
+  (2) Enter/leave: a menu item + rebindable chord sending `copy-mode -t %pane`, and `q` handling
+  left entirely to tmux. (3) Drive it with `send-keys -X <command>` (`begin-selection`,
+  `cursor-*`, `page-up`, `search-backward`, `copy-selection-and-cancel`) behind menu items with
+  chords, all through `KeymapPolicy` per F4.22 — do not translate raw keystrokes into `-X`
+  commands wholesale; the point is a small, documented vocabulary, not an emulation of tmux's
+  key table. (4) On copy, read the buffer back with `show-buffer` (a user command, so failures
+  surface per §7) and put it on the local pasteboard — that is the half tmux cannot do.
+  *Test:* integration — enter copy mode, select, copy, assert the buffer's content round-trips;
+  and `%pane-mode-changed` from a second client flips the flag.
+  `Sources/tetmuxCore/Session/SessionService.swift:2589`, `Sources/tetmuxUI/KeymapPolicy.swift:10`
 
-Since the audit, and not on its list: the reserved-scroller gutter that made every full-width program
-wrap a few columns early, the README rewritten against what the code actually does, and the Dock menu
-— which offered New Window alone, and a window opened that way reconciles to the first host's
-*active* session and window, so the only thing the Dock could do was make a second view of whatever
-was already on screen. It now has New Window (tree shown, to navigate from), New Local Session, and
-New Remote Session with one row per remote.
+- [ ] **Pin F4.23 (mouse modes) and F4.24 (IME) with tests.** Both are delegated wholesale to
+  SwiftTerm and asserted nowhere — the exact position the plain-text URL matcher sat in before a
+  test went under it: already true, believed rather than known, and free to stop being true on a
+  dependency bump with nothing to say so. The keystroke path (an event monitor ahead of dispatch,
+  per-frame coalescing) was not written with composition in mind, which makes F4.24 the likelier
+  silent break.
+  *Do:* two focused tests in the UI test target. Mouse: feed the pane's terminal
+  `ESC[?1006h`/`ESC[?1000h` through the emulator, synthesise a scroll event, assert bytes go to
+  the channel; reset the modes, assert the same event scrolls locally and sends nothing. IME:
+  drive `PaneTerminalView` through `NSTextInputClient` — `setMarkedText` twice, then
+  `insertText` — asserting nothing reaches the channel until commit and the committed string
+  arrives as one `send-keys -H`; add a dead-key sequence (⌥e, e → é).
+  `Sources/tetmuxUI/TerminalSurface.swift:133`, `Sources/tetmuxUI/KeyEventMonitor.swift`
 
-Two more found while fixing other things, both in the same arithmetic and both worth naming because
-neither announces itself:
+- [ ] **Run the integration suite across the version matrix (§8).** The parsing matrix is done —
+  50 fixtures from five built versions — but the suite still runs against whatever `tmux` is on
+  PATH, so every version-conditional *behaviour* (per-window sizing off below 2.9, `swap-window`
+  reorders below 3.2, polling below 3.2, the 2.4–2.9 warning) is untested on the versions it
+  exists for; those tests self-skip on a new server.
+  *Do:* teach `SessionIntegrationTests` a `TETMUX_TMUX` environment variable that overrides the
+  binary path (thread it through to `PtyTransport`'s argv where the command is built). Add
+  `Scripts/test-matrix.sh`: build the matrix if absent, then loop the versions running
+  `swift test --filter SessionIntegrationTests` with `TETMUX_TMUX` set, failing on first
+  failure. Local and scripted like the capture pipeline, and for the same reason — CI's tmux is
+  one version, and the point is the ones it is not. Where a version-conditional path currently
+  self-skips, make the skip *conditional on the version actually not applying* rather than on
+  convenience, so the matrix run genuinely exercises it.
+  `Tests/tetmuxTests/SessionIntegrationTests.swift`, `Scripts/build-tmux-matrix.sh`
 
-- **`TerminalGeometryTests` had been red since the commit that introduced it.** It measured the
-  theme's cell at 2× against a view that resolves its own scale factor and, with no window and no
-  screen under `xctest`, lands on 1×. The failure was nowhere near the defect the test exists to
-  catch. Nothing in CI would have gone green over it — it was simply never run again after the commit
-  that added it.
-- **The pane's cell size was snapped to `NSScreen.main`'s density rather than the window's.**
-  `NSScreen.main` is the screen holding whichever window has keyboard focus *anywhere on the system*,
-  so on a desk with a 1× monitor beside a 2× built-in it changed answer every time the user clicked
-  into another application on the other display. SwiftTerm meanwhile resolves its own `cellDimension`
-  from `window?.backingScaleFactor`. Measured in that configuration: a 572pt pane on the Retina
-  display asked tmux for 71 columns while its own grid drew 76. `@Environment(\.displayScale)` is the
-  fix, plus an `onChange` to re-ask — a window dragged between displays keeps its size in points, so
-  nothing else in the container would ever have noticed.
+- [ ] **Chaos tests (§8).** None exist. Each scenario must end in a defined state and recover.
+  *Do,* as integration tests where the machinery allows: (1) kill the spawned process mid-stream
+  (`SIGKILL` the transport's child — the fake-ssh script precedent shows how to interpose) and
+  assert EOF → backoff → reattach → repaint; (2) `SIGSTOP` the tmux server, assert the RTT probe
+  reports the stall and `sendAndAwait` times out without wedging the actor, then `SIGCONT` and
+  assert recovery; (3) drop the `ControlMaster` socket file mid-session and assert the next
+  channel rebuilds it. Sleep/wake stays manual — `pmset sleepnow` on a test box is not a CI
+  citizen — but scriptable as a documented manual pass alongside the P6 harness.
+  `Tests/tetmuxTests/SessionIntegrationTests.swift`
+
+- [ ] **The resize storm (§8's geometry suite, second half).** `TerminalGeometryTests` covers the
+  scroller gutter and the font-derived cell round trip; the storm — 50 rapid size requests
+  including mid-flight contradictions, asserting convergence with tmux's final reported layout —
+  does not exist, and it is the test that would have caught the oscillation bugs this project
+  spent its hardest weeks on.
+  *Do:* integration test against local tmux: drive `requestSizes`-equivalent calls with 50
+  randomised (seeded) sizes without awaiting between them, then wait for quiescence and assert
+  the model's layout matches one final authoritative `list-windows`, and that no further
+  `%layout-change` arrives within a grace window — convergence, not a byte-for-byte transcript.
+  `Tests/tetmuxTests/TerminalGeometryTests.swift`
+
+- [ ] **Rendering acceptance corpus (T5.7, §8).** The only Unicode assertion in the tree is byte
+  delivery through the paste path; width and grapheme handling are delegated to SwiftTerm and
+  asserted nowhere, and under control mode a width bug corrupts geometry, not just appearance.
+  *Do:* a fixture-driven test at the emulator boundary, no live tmux needed: feed
+  `TerminalView`'s terminal a corpus (CJK, emoji ZWJ sequences, combining marks, box drawing —
+  one file per case, real bytes) and assert the resulting **grid**: cursor column after each
+  string, cells occupied, wide-char continuation cells. That pins the property control mode
+  cares about — agreement between the emulator's grid and the cell arithmetic — without
+  attempting pixel comparison. `vim`/`htop`/Powerline stay a documented manual pass; scripting a
+  full-screen TUI comparison is a project, not a test.
+  `Tests/tetmuxTests/` (new). The corpus needs a `resources:` declaration of its own on the
+  `tetmuxTests` target — `Fixtures/` moved to `tetmuxCoreTests` when the suite was split for the
+  Linux job, and this test needs `TerminalView`, so it cannot follow it there.
+
+- [ ] **The P6 measurement harness.** No latency, throughput, CPU, or memory instrumentation
+  exists — the P6 references in the source are design rationale. Verification is local and
+  scripted by SRD decision (§6, §8), so this is a script-writing job, not a CI job.
+  *Do:* (1) P6.1: `os_signpost` intervals at keyDown-in and draw-out, a
+  `Scripts/measure-latency.sh` that launches the app under `xctrace`, replays scripted
+  keystrokes (CGEvent), and prints the p95. (2) P6.3: an XCTest `measure` block feeding
+  `ControlCodec` + the octal decoder a recorded megabyte-scale `%output` stream — the codec is
+  pure, so this one *can* assert a floor in CI without hardware variance dominating.
+  (3) P6.6/P6.7: a documented `Scripts/measure-idle.md` procedure (Instruments template, what to
+  open, what number to record). Record results in the repo the way fixture provenance is
+  recorded.
+
+- [ ] **Terminal theme and ANSI palette.** Settings cover font, size, ligatures, and scrollback;
+  panes follow the system appearance and nothing else. No colour scheme, no ANSI 16 palette —
+  the second-most-adjusted terminal preference after font size.
+  *Do:* extend `TerminalTheme` with foreground/background/cursor and the 16 ANSI slots, applied
+  through SwiftTerm's `installColors`/native-colour APIs on theme change (the propagation path —
+  theme on `AppModel`, value passed down, re-applied to live panes — already exists for
+  scrollback). Ship a small set of built-in schemes rather than 19 colour wells; keep storage in
+  `UserDefaults` with the rest of appearance. Honour the §7 rule: the *chrome* keeps compositing
+  from system colours; only pane content takes the scheme. Mind `ContrastPolicy`'s pane rules —
+  the unfocused-pane dimming exemption must survive a custom background.
+  `Sources/tetmuxUI/TerminalSurface.swift:19-64`, `Sources/tetmuxUI/SettingsView.swift`
+
+## Blocked on credentials
+
+- [ ] **Developer ID signing, notarisation, hardened runtime, and an updater (§2.5).** Signing is
+  ad-hoc (`codesign --sign -`); every user is on manual download plus a Gatekeeper fight the
+  release notes paper over with a quarantine workaround. Blocked on an Apple Developer account —
+  a decision with money attached, not an engineering task.
+  *When unblocked:* sign with the Developer ID Application cert plus
+  `--options runtime --timestamp` in `package-dmg.sh` (the ad-hoc branch stays for local
+  builds); `xcrun notarytool submit --wait` + `xcrun stapler staple` in the `v*` tag job, with
+  the account's app-specific password as a repo secret; then Sparkle via SPM, an EdDSA key
+  kept offline, and an appcast served from GitHub Releases. The DMG stays arm64-only by
+  decision — do not revisit universal as part of this.
+  `Scripts/package-dmg.sh:136`, `.github/workflows/ci.yml`
+
+## Parked by decision
+
+- [~] **VoiceOver: announcing new output and per-line navigation.** The readable half is done —
+  `accessibilityValue` is the visible viewport, bounded by the grid. Nothing posts
+  `.valueChanged` (announcing means diffing for new lines; re-reading a build-log screen per
+  chunk is worse than silence), and there is no per-line navigation. Parked 2026-08-05: there is
+  one user and they do not need it. The entry stays because it names what is missing and why it
+  is hard, which is the expensive half of the work.
+  `Sources/tetmuxUI/TerminalSurface.swift` (`PaneTerminalView` accessibility overrides)
+
+- [~] **Desync recovery.** Detection is done — a `%begin` whose number fails to increase, a
+  terminator closing nothing, a `%begin` with nothing pending are all logged — but detecting is
+  not recovering, and there is still no recovery: a desynced channel keeps running with responses
+  landing one command off. Parked for three reasons, and the first alone would not be enough.
+  Everything that can *cause* one (partial writes, secrets near the FIFO) is treated as fatal
+  instead, so the detectors should never fire. More importantly, **they are diagnostics, and
+  promoting a diagnostic into a trigger changes what a false positive costs**: today a detector
+  that is wrong about some tmux version's numbering produces a spurious log line; wired to a
+  teardown it produces a reconnect storm on a healthy channel — teardown, reattach, handshake
+  *succeeds*, detector fires again — and the backoff never engages, because each cycle's completed
+  handshake resets the attempt counter. So the real fix is not the one-line teardown it first
+  appears to be: it needs a recovered-once-already guard per host, where a second desync in the
+  same epoch stops and surfaces instead of looping. And there is nothing to calibrate against —
+  the log line has never been observed outside the tests that forge one. **That log line
+  appearing in real diagnostics is the trigger to un-park this**, because it means an unknown
+  cause exists and there is finally an example to design against.
+  `Sources/tetmuxCore/Session/SessionService.swift` (desync logging beside the `%begin` handling)

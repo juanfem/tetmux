@@ -8,12 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 control mode (`tmux -CC`) and renders the resulting model natively: tmux windows become app tabs,
 tmux panes become app splits. tmux's own status bar, pane borders, and window list are never shown.
 
-`tmux-manager-srd.md` is the design baseline. It is specific and worth consulting before changing
-behaviour — requirement IDs (`R3.4`, `F4.17`, `T5.6`, `P6.3`) are cited throughout the source, and
-those citations are the fastest way to find the rationale for code that looks odd.
+`tetmux-srd.md` is the requirements baseline (v2.1, amended against the implementation). It is
+specific and worth consulting before changing behaviour — requirement IDs (`R3.4`, `F4.17`, `T5.6`,
+`P6.3`) are cited throughout the source, and those citations are the fastest way to find the
+rationale for code that looks odd. Existing IDs are frozen: amendments change their text, never
+their number.
 
-`TODO.md` is the standing audit: what is known to be missing or stubbed, with the evidence that found
-it. Check it before concluding something is a new bug.
+`TODO.md` holds what is **open** — each entry with the evidence that it is open and instructions
+concrete enough to start from. Check it before concluding something is a new bug; anything the SRD
+asks for that the tree does not do belongs there, because an unlisted requirement reads as done.
 
 ## Commands
 
@@ -34,15 +37,24 @@ Scripts/package-dmg.sh --version 1.2.3 --output dist
 
 `.github/workflows/ci.yml` runs **three** jobs on every push. `swift test` on macOS with tmux
 installed — otherwise the integration suite silently skips itself and a green check means nothing, so
-the run fails if the skip fires. `swift build --target tetmuxCore` on Ubuntu, which is the only thing
-that exercises the §2.4 portability hedge; every job used to be macOS, and a core-only regression on
-glibc went uncaught. Then the packaging script, whose result is mounted and launched before it is
-uploaded. A `v*` tag also publishes the image as a release.
+the run fails if the skip fires. On Ubuntu, `swift build --target tetmuxCore` **and**
+`swift test --filter tetmuxCoreTests`, which is what exercises the §2.4 portability hedge; every job
+used to be macOS, and a core-only regression on glibc went uncaught. Then the packaging script, whose
+result is mounted and launched before it is uploaded. A `v*` tag also publishes the image as a
+release.
 
-The .dmg is **single-architecture** and says so in its filename. A universal binary needs SwiftPM's
-`--arch arm64 --arch x86_64`, which routes through xcbuild, which compiles SwiftTerm's Metal shaders
-and so needs a Metal toolchain component that is a separate multi-gigabyte download. The native path
-copies the `.metal` source into the resource bundle and never invokes the compiler.
+**The manifest declares the AppKit half of the package only on macOS**, and that is what makes the
+Linux test job possible at all. `--filter` chooses which tests *run*, never which targets are built:
+`swift test` builds one product out of every test target, so a Linux job asking only for
+`tetmuxCoreTests` still has to compile `tetmuxTests`, which imports `tetmuxUI`, which is AppKit and
+SwiftTerm by design. `Package.swift` is ordinary Swift evaluated on the host, so `tetmuxUI`, the
+executable and `tetmuxTests` are appended inside `#if os(macOS)`.
+
+The .dmg is **arm64-only by decision** (§2.5), and says so in its filename. A universal binary
+needs SwiftPM's `--arch arm64 --arch x86_64`, which routes through xcbuild, which compiles
+SwiftTerm's Metal shaders and so needs a Metal toolchain component that is a separate
+multi-gigabyte download. The native path copies the `.metal` source into the resource bundle and
+never invokes the compiler. Do not revisit universal as part of other packaging work.
 
 Signing is ad-hoc (`codesign --sign -`): no Developer ID, no notarisation, no updater. That is a known
 gap with an account behind it, not an oversight — see `TODO.md`.
@@ -106,6 +118,8 @@ Where things are, since the invariants below name symbols without saying which f
 | `KeyEventMonitor.swift` | The one `NSEvent` monitor: ⌥⌘V's literal escape (F4.21). |
 | `WorkspaceStore.swift` · `SettingsStore.swift` | `workspace.json` and `settings.json`. |
 | `ContrastPolicy.swift` | Increase Contrast, resolved once for every site that honours it. |
+| `LiveResizeGate.swift` | R3.7 — one macOS window's panes stop asking tmux while its edge is dragged. |
+| `NotificationPolicy.swift` | F4.31 — which events earn a banner, and `WatchedWindow`. |
 | `DestructiveActionModal.swift` | The F4.10 confirmation, which says *why* the close is a kill. |
 | `BellNotifier.swift` · `KeychainStore.swift` | F4.31 background bells; per-host passwords. |
 
@@ -281,6 +295,19 @@ follows the window; nothing else does. It also has to *re-ask* on a change, beca
 to another display keeps its size in points and `requestSizes` hangs off `proxy.size` — without
 `onChange(of:)` the panes keep the old display's grid until something unrelated resizes them.
 
+**A drag on a window edge asks tmux nothing until it ends (R3.7).** §3.3 asks for a debounce *and*
+for suppression during live resize; only the debounce existed, so dragging an edge was a
+`refresh-client -C` every 100 ms, each answered with a `%layout-change`, each relaying out every pane.
+Nothing corrupts — tmux stays authoritative and the last answer wins — which is why it went unnoticed
+as anything but a heavy drag. `LiveResizeGate` holds the ask instead, and the drag ends with one
+request at the size the user let go of. Two things about it. The held request is **keyed by tmux
+window**, because every tab is built and measuring itself (the unselected ones are hidden with
+`.opacity(0)`, not omitted) and one held closure would let the last tab laid out overwrite the rest —
+every other tab would leave the drag still holding its old grid, silently. And the gate is **per macOS
+window**, observing one `NSWindow`: another window's panes are not the ones being dragged. It is
+unsubscribed from `onDisappear`, not from `deinit` — a `deinit` is nonisolated and cannot touch the
+state, and `WindowState.nsWindow` is weak, so a reference nilled by ARC never runs `didSet`.
+
 **A resize handle has to be an `NSView`, and its identity must not move.** A pane surface is
 SwiftTerm's `TerminalView`, a real `NSView` that tracks the mouse for selection; a SwiftUI
 `DragGesture` layered over it in a `ZStack` never sees an event, whatever the z-order says. Hence
@@ -418,9 +445,10 @@ session under the remembered name and presents it as the user's. What a user cli
 opposite, and conflating the two was a bug that made the app look broken for a year. Every
 user-initiated connect goes through `openHost`: `attach-session` with **no target**, which lands on
 the server's most recently used session and cannot create, and only when there is nothing to attach
-to does a second attempt make one. It replaced `reconnectNow` at those call sites because that path
-attaches by *remembered name*, and with nothing remembered the name is `tetmux-main` — a session
-almost no server has. tmux answers `can't find session: tetmux-main`, `%error`, `%exit`, and the
+to does a second attempt make one. It replaced `reconnectNow` — since deleted, because an entry point
+reachable only by writing new code is a trap — at those call sites because that path attached by
+*remembered name*, and with nothing remembered the name is `tetmux-main` — a session almost no server
+has. tmux answers `can't find session: tetmux-main`, `%error`, `%exit`, and the
 `%exit` handler reads that as "the server has nothing left": `.disconnected`, no retry, nothing said.
 Clicking a host with three sessions on it did nothing at all, while clicking one of those sessions in
 the tree worked, because that path names a session that exists. It was invisible on localhost, where
@@ -443,6 +471,20 @@ not a connection failure but a completed handshake answering `no sessions` and e
 `%exit` has to be told from the first. Nothing left to attach to means `.disconnected` with an empty
 session list — the sessions are genuinely gone, unlike a dropped link where they are merely out of
 reach, and listing them offers rows that do nothing.
+
+**…and the name it leaves behind is what makes the two tellable apart on screen (F4.15).**
+`.disconnected` after a session ends and `.disconnected` after a link drops are one state and
+completely different news, so the ended session's name is recorded on `HostState.endedSessionName` and
+the placeholder says "Session '<name>' ended" with a **Recreate** beside the ordinary Connect. Three
+things about it. It is **not a `ConnectionState` case**, for the same reason `authenticationPrompt` is
+not one: every switch over the state would grow an arm that means nothing to it. It is cleared on
+`%session-changed` and **not** on handshake completion — attaching to a server with nothing left is a
+*completed* handshake answering `no sessions` and exiting, so clearing it there wiped the name on the
+one path that needs it. And the offer is **the window's**, not the host's: `WindowState` remembers the
+last session it actually displayed, by host and by name, so a second window sitting on a different
+session of the same host gets the plain placeholder rather than an offer to recreate somebody else's
+session. `recreateEndedSession` is the one legitimate creation-by-remembered-name, and it is
+legitimate because the name is on screen with a button beside it.
 
 Two consequences that are easy to miss. **Unlinking a window can destroy its session**: a session left
 with no windows is destroyed by tmux, so closing the last tab of a multi-linked window ends that
@@ -606,6 +648,15 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   pre-handshake outbox caps at 256 commands and drops the *oldest* — the newest is what the user just
   typed. `sendAndAwait` times out at 2 s, and every path that could strand a waiter (write failure,
   `%error`, `teardown`) resumes it.
+- **The outbox is bounded by age as well as by size, and the clock is `ContinuousClock`.** The size
+  cap says how much may wait and nothing about how long, so a host that came back after ten minutes
+  of outage still replayed the survivors in one burst — keystrokes typed at a shell that had long
+  moved on, executed rather than read. Each queued command is stamped on enqueue and anything older
+  than 10 s is dropped at flush, with the count logged. Never `Date`: this is the one code path that
+  lives on the sleep/wake boundary, which is exactly where a wall clock jumps. The clock is injected
+  through `SessionService(now:)` so a test can move it — waiting ten real seconds to assert a
+  ten-second rule is a test nobody runs. There is deliberately no distinction between kinds of
+  command: the age alone disqualifies.
 - **The local host connects itself at launch; remote ones wait to be asked.** Not a general
   auto-connect policy. Local tmux is always reachable, needs no credentials and cannot prompt for
   anything, so the click was a step with no decision in it. A remote host connecting unbidden can
@@ -789,6 +840,23 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   would otherwise bury Notification Center. Authorisation is asked for on the first bell rather than at
   launch, and a refusal is not retried. `UNUserNotificationCenter.current()` **traps** in a process with
   no bundle identifier, which is exactly `swift run tetmux`, hence the availability guard.
+- **Activity notifications are opt-in per window; the bell is not, and the asymmetry is the point.**
+  A bell is a program deliberately asking for attention. Activity is only "output arrived in a window
+  nobody is reading", which for most windows is a prompt redrawing — reported for every window it
+  would be constant and worthless, and reported for the one running a long remote job that prints and
+  never rings it is the whole feature. So `AppModel.watchedWindows` is a set of host-qualified window
+  ids (tmux numbers windows per server, so `@1` exists on every host at once), toggled from the one
+  place both the tab menu and the tree menu already share — `WindowSessionMenus`, which keeps the two
+  from drifting without needing a `RowSubject` case of its own. Watches are §4.3 view state, so they
+  persist in `workspace.json`, which grew an **envelope** (`{windows, watchedWindows}`) around what
+  used to be a bare array; `WorkspaceStore.decode` still reads the old shape, because discarding
+  somebody's window arrangement is a poor way to introduce a feature. `AppModel.newlyActive` is
+  static and pure because it is the half that is silently wrong: `hasActivity` stays true until the
+  window is read, so reporting the *value* rather than the *transition* would re-fire on every
+  topology snapshot for the rest of the afternoon — and a window seen for the first time has no
+  previous value, so attaching to a server whose watched window is already active is deliberately not
+  an event. `NotificationPolicy` is the on/off pair, in `UserDefaults` beside the theme; it is
+  mirrored onto `BellNotifier.shared` because a pane surface has no `AppModel` to ask.
 - **The terminal's appearance is one `TerminalTheme` in `UserDefaults`, and changing it costs a round
   trip per pane.** The `Settings` scene sets font family, size, ligatures (T5.8) and scrollback; the
   theme lives on `AppModel` with a `didSet` that persists it, and reaches panes as a value passed down
@@ -1014,9 +1082,14 @@ spawns a dozen children concurrently on purpose — that is the fork-safety regr
 as a hang rather than an assertion. CI installs tmux and fails if that skip fires: a skipped test is
 indistinguishable from a passing one in a green check.
 
-The test target links `tetmuxUI` as well as `tetmuxCore`. `AppModelTests` covers the decisions that
-need no channel and no window — the F4.9 close decision, scope resolution, keymap matching, tab-drop
-arithmetic, workspace resolution — which were previously unreachable rather than untested.
+**There are two test targets, split along AppKit.** `tetmuxCoreTests` depends on `tetmuxCore` alone
+and holds everything that replays a fixture or exercises a pure value type — the codec, the matrix and
+its `Fixtures/`, the layout parser, the prompt detector, `TmuxCommand`, `HostModel`. That target is
+the entire reason the Linux job can run a test rather than only a build (see above), so **anything
+added there must not reach for AppKit, SwiftTerm or a live tmux server**; those belong in
+`tetmuxTests`, which links `tetmuxUI`. `AppModelTests` covers the decisions that need no channel and
+no window — the F4.9 close decision, scope resolution, keymap matching, tab-drop arithmetic, workspace
+resolution, F4.31's activity transition — which were previously unreachable rather than untested.
 
 **An `AppModel` in a test must be given a directory.** It writes files as a side effect of ordinary
 operations: rebinding a chord persists `settings.json`, and selecting a session or registering a
@@ -1035,7 +1108,7 @@ the real captured bytes rather than a hand-written approximation.
 **The R3.6 matrix is real now, and it is a local recording rather than a CI job.**
 `Scripts/build-tmux-matrix.sh` builds tmux 3.0/3.2a/3.3a/3.4/3.5 from pinned, checksummed tarballs
 into a gitignored `.tmux-matrix/`; `Scripts/capture-fixtures.py` drives each under a pty and writes
-`Tests/tetmuxTests/Fixtures/tmux-<version>.<scenario>.stream`; `ControlCodecMatrixTests` replays
+`Tests/tetmuxCoreTests/Fixtures/tmux-<version>.<scenario>.stream`; `ControlCodecMatrixTests` replays
 them. Capture must **not** move into CI: a fixture's value is that it is a frozen record, so a
 regression shows as the parser disagreeing with it — regenerate it each run and the test asserts
 "the parser agrees with whatever tmux just said", which is true by construction. The inputs are
@@ -1078,19 +1151,23 @@ rather than fixed.
   one is persisted as the difference from what discovery produces, and only while its `Host` block
   still exists. Before that, a forward or ssh option added to a discovered host worked all session and
   vanished on relaunch, while the Keychain flag it wrote survived and the two then disagreed.
-- `~/Library/Application Support/tetmux/workspace.json` — one entry per macOS window: host, session
-  (id *and* name), tmux window, whether the tree was showing, and the frame. §4.3's view state and
-  nothing else — tmux is the persistence layer for everything in a pane. Written debounced, on window
-  close, and synchronously from `applicationShouldTerminate`, which is the usual way this app is
-  closed. An empty list is never written: the app outlives its last window, so closing them all and
-  quitting from the menu bar would otherwise erase a workspace nobody meant to discard.
+- `~/Library/Application Support/tetmux/workspace.json` — `windows`, one entry per macOS window: host,
+  session (id *and* name), tmux window, whether the tree was showing, and the frame; plus
+  `watchedWindows`, F4.31's watches, which belong to no window and so had nowhere else to go. §4.3's
+  view state and nothing else — tmux is the persistence layer for everything in a pane. Written
+  debounced, on window close, and synchronously from `applicationShouldTerminate`, which is the usual
+  way this app is closed. An empty window list is never written: the app outlives its last window, so
+  closing them all and quitting from the menu bar would otherwise erase a workspace nobody meant to
+  discard. The file used to be the bare array of windows and is still read in that shape.
 - `~/Library/Application Support/tetmux/settings.json` — the keymap, as the difference from the
   defaults. A `null` is a shortcut deliberately unbound. The terminal's *appearance* deliberately
   stays in `UserDefaults` below: font and scrollback are ordinary application preferences the system
   already has a place for, while a keymap is a document somebody may want to read, diff, or copy to
   another Mac — which is §2.3's whole argument for JSON.
 - `~/Library/Preferences` (`UserDefaults`) — `terminal.fontName`, `fontSize`, `ligatures`,
-  `scrollbackLines`. Appearance only.
+  `scrollbackLines`, and F4.31's `notifications.bells` / `notifications.activity`. Preferences the
+  system already has a place for; the *watches* those last two govern are view state and live in
+  `workspace.json`.
 - `~/Library/Caches/tetmux/cm-%C` — ssh `ControlMaster` socket. Kept short on purpose: unix socket
   paths cap at 104 bytes and Application Support plus ssh's 40-char hash runs close to it.
 - Login Keychain — per-host passwords, opt-in, as `kSecClassInternetPassword` with protocol ssh keyed

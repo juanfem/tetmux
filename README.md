@@ -199,7 +199,7 @@ Two documents are worth reading before changing behaviour:
 
 - **`CLAUDE.md`** — the invariants that produce silent, hard-to-diagnose breakage when violated, and
   the protocol gotchas behind code that looks odd. Start here.
-- **`tmux-manager-srd.md`** — the design baseline. Requirement IDs (`R3.4`, `F4.17`, `T5.6`, `P6.3`)
+- **`tetmux-srd.md`** — the requirements baseline. Requirement IDs (`R3.4`, `F4.17`, `T5.6`, `P6.3`)
   are cited throughout the source and are the fastest route to the rationale for a given decision.
 
 ## Testing
