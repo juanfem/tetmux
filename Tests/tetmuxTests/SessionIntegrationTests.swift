@@ -1085,6 +1085,94 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    // MARK: - Geometry under load (§8)
+
+    /// §8's resize storm: fifty rapid, contradictory size requests, and the model has to *converge*
+    /// on what tmux ended up doing.
+    ///
+    /// This is the test that would have caught the oscillation bugs this project spent its hardest
+    /// weeks on, all of which had the same shape — a size derived from something that was itself
+    /// derived from the last size, so every answer produced another question. The cell size measured
+    /// from a pane, the scroller gutter counted on one side only, two views owning one window: none
+    /// of them is visible in a single resize, and all of them show up as a grid that never settles.
+    ///
+    /// What is asserted is convergence, not a transcript. The requests are deliberately sent without
+    /// awaiting between them, so they interleave with tmux's `%layout-change`es the way a live drag
+    /// does; what has to be true at the end is that the model agrees with an authoritative
+    /// `list-windows`, and that nothing is still moving. A byte-for-byte expectation would be a test
+    /// of the debounce's timing rather than of the property that matters.
+    ///
+    /// Seeded, so a failure is reproducible: a storm nobody can replay is a bug report with no
+    /// repro in it.
+    func testAResizeStormConvergesOnTmuxsFinalLayout() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let windowId = try XCTUnwrap(host.activeSession?.activeWindow?.id)
+        let owner = UUID()
+        await service.claimWindowSize(hostId: "local", windowId: windowId, owner: owner)
+
+        // A tiny deterministic generator rather than `Int.random`: the point is that this exact
+        // sequence can be replayed after a failure.
+        var seed: UInt64 = 0x5EED
+        func next(_ range: ClosedRange<Int>) -> Int {
+            seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return range.lowerBound + Int((seed >> 33) % UInt64(range.count))
+        }
+
+        var storm: [(cols: Int, rows: Int)] = []
+        for _ in 0..<50 {
+            storm.append((cols: next(40...200), rows: next(10...60)))
+        }
+        // Captured as a `let` for the predicate below: the wait runs concurrently, and a `var` it
+        // could still be reading while the loop wrote to it is not a race the test should have.
+        let last = try XCTUnwrap(storm.last)
+        for size in storm {
+            // No `await` on a round trip between them: they pile into the debounce exactly as a drag
+            // does, and half of them contradict the one before.
+            await service.requestWindowSize(
+                hostId: "local", windowId: windowId, cols: size.cols, rows: size.rows, owner: owner
+            )
+        }
+
+        // Quiescence: the last request has to win, and tmux has to agree it won.
+        let settled = try await waitFor(seconds: 20) {
+            guard let pane = await service.getHost("local")?
+                .activeSession?.activeWindow?.panes.first else { return false }
+            return pane.cols == last.cols && pane.rows == last.rows
+        }
+
+        let modelSays = await service.getHost("local")?
+            .activeSession?.activeWindow?.panes.first.map { "\($0.cols)x\($0.rows)" } ?? "(none)"
+        let tmuxSays = tmuxQuery(
+            ["list-windows", "-t", sessionName, "-F", "#{window_width}x#{window_height}"]
+        ) ?? "(none)"
+        XCTAssertTrue(
+            settled,
+            "the grid never settled on the last size asked for: wanted \(last.cols)x\(last.rows), "
+                + "model \(modelSays), tmux \(tmuxSays)"
+        )
+        // …and the model is not merely *near* the truth. A single pane fills its window, so the two
+        // are the same number, and a disagreement here is the model having stopped listening.
+        XCTAssertEqual(modelSays, tmuxSays, "the model and tmux disagree about the final grid")
+
+        // Nothing is still moving. An oscillation converges on nothing, so the real signal is a
+        // second look a beat later finding the same numbers rather than the next step of a cycle.
+        try await Task.sleep(for: .seconds(2))
+        let afterQuiet = await service.getHost("local")?
+            .activeSession?.activeWindow?.panes.first.map { "\($0.cols)x\($0.rows)" } ?? "(none)"
+        XCTAssertEqual(afterQuiet, modelSays, "the layout was still changing after it had settled")
+        XCTAssertEqual(
+            tmuxQuery(["list-windows", "-t", sessionName, "-F", "#{window_width}x#{window_height}"]),
+            tmuxSays,
+            "tmux was still relaying out after the storm"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     // MARK: - Paste
 
     /// Clipboard text is routinely multi-line, and control-mode commands are newline-framed: under
