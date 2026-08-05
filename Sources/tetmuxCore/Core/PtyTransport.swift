@@ -328,7 +328,12 @@ public final class PtyTransport: @unchecked Sendable {
         lock.unlock()
         guard fd >= 0, cols > 0, rows > 0 else { return }
         var ws = winsize(ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0)
-        _ = ioctl(fd, TIOCSWINSZ, &ws)
+        // `ioctl` takes its request as a `UInt` on both platforms; the *constant* does not arrive as
+        // one on both. Darwin builds TIOCSWINSZ out of `_IOW`, which casts to `unsigned long`, so it
+        // imports as `UInt` and the bare call type-checks. glibc defines it as a plain `0x5414`,
+        // which imports as `Int32` — and the same line then fails to compile with nothing platform-
+        // specific visible in it. Converting explicitly is what makes one line serve both.
+        _ = ioctl(fd, UInt(TIOCSWINSZ), &ws)
     }
 
     /// Whether this transport still holds `pid` — i.e. nothing has waited on it yet, so the number
