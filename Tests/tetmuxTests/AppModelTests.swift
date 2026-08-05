@@ -1411,6 +1411,31 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(state.pendingRestore)
     }
 
+    /// F4.26 — a session found on an idle host is offered by the launcher, as a session rather than
+    /// as the windows it has not been asked about.
+    ///
+    /// The row is `isAvailable` even though the host is not: F4.26's whole point is that the launcher
+    /// works while a host is unreachable, and this row is the one that *makes* it reachable.
+    func testTheLauncherOffersSessionsFoundWithoutAttaching() {
+        let model = makeModel()
+        var idle = HostState(
+            config: HostConfig(id: "devbox", name: "devbox"),
+            connectionState: .disconnected
+        )
+        idle.discoveredSessions = [TmuxSession(id: "$4", name: "deploy", isAttached: false)]
+        model.hosts = [idle]
+
+        let state = WindowState()
+        model.registerWindow(state)
+        let items = model.launcherItems(for: state)
+
+        let row = try? XCTUnwrap(items.first { $0.title == "deploy" })
+        XCTAssertEqual(row?.subtitle, "devbox (will connect)")
+        XCTAssertEqual(row?.isAvailable, true, "this row is what connects the host")
+        // …and it is one row, not one per window: the probe never asked about windows.
+        XCTAssertEqual(items.filter { $0.title == "deploy" }.count, 1)
+    }
+
     /// §4.6 — a restore onto a passthrough host lands rather than waiting, because what it is
     /// waiting for cannot happen.
     ///

@@ -17,11 +17,16 @@ final class SessionIntegrationTests: XCTestCase {
         runTmux(["kill-session", "-t", sessionName])
     }
 
-    private func runTmux(_ arguments: [String]) {
+    private func runTmux(_ arguments: [String], tmuxDirectory: URL? = nil) {
         guard let tmux = PtyTransport.resolveExecutable("tmux") else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tmux)
         process.arguments = arguments
+        if let tmuxDirectory {
+            var environment = ProcessInfo.processInfo.environment
+            environment["TMUX_TMPDIR"] = tmuxDirectory.path
+            process.environment = environment
+        }
         process.standardError = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         try? process.run()
@@ -1772,6 +1777,195 @@ final class SessionIntegrationTests: XCTestCase {
     /// and only then execs the tmux command it was handed. Exercises the real path — prompt detected
     /// in the pre-handshake stream, published on `HostState`, answered on the raw channel, protocol
     /// starts — without needing a remote host that accepts passwords.
+    // MARK: - Opening a host
+
+    /// Clicking a host attaches to the session that is there — it does not insist on a name.
+    ///
+    /// The bug this pins made the app look broken, and it was invisible on the machine it was
+    /// developed on: local tmux always has `tetmux-main` because tetmux itself made it, so the
+    /// hard-coded name always resolved. On any *other* server it does not, and clicking the host ran
+    /// `attach-session -t tetmux-main`, got `can't find session: tetmux-main` and `%exit`, and the
+    /// `%exit` handler read that as "the server has nothing left" — `.disconnected`, no retry, no
+    /// message. A host with three sessions on it did nothing at all when clicked.
+    func testOpeningAHostAttachesToAnExistingSessionRatherThanAName() async throws {
+        let server = try isolatedServer()
+        defer { killServer(server) }
+        runTmux(["new-session", "-d", "-s", "already-here"], tmuxDirectory: server.directory)
+        XCTAssertEqual(sessionNames(on: server), ["already-here"])
+
+        let service = SessionService()
+        await service.addHost(isolatedHost(id: "opened", server: server))
+        await service.openHost(hostId: "opened")
+
+        let host = try await waitForHost(service, id: "opened", timeout: 15) { host in
+            host.connectionState == .connected && !host.sessions.isEmpty
+        }
+        XCTAssertEqual(host.sessions.map(\.name), ["already-here"])
+        // …and nothing was invented alongside it. `tetmux-main` appearing here is the whole failure.
+        XCTAssertEqual(sessionNames(on: server), ["already-here"])
+
+        await service.disconnectHost(hostId: "opened")
+    }
+
+    /// …and the other half of the same click: with nothing to attach to, make one.
+    ///
+    /// Both shapes of "nothing" are covered by the same expectation — a server with no sessions, and
+    /// no server at all. The second is what a host that has never run tmux answers, and it dies
+    /// before the handshake rather than through `%exit`.
+    func testOpeningAHostWithNoServerCreatesASession() async throws {
+        let server = try isolatedServer()
+        defer { killServer(server) }
+        // Deliberately not started: there is no server on this socket at all.
+        XCTAssertEqual(sessionNames(on: server), [])
+
+        let service = SessionService()
+        await service.addHost(isolatedHost(id: "empty", server: server))
+        await service.openHost(hostId: "empty")
+
+        let host = try await waitForHost(service, id: "empty", timeout: 20) { host in
+            host.connectionState == .connected && !host.sessions.isEmpty
+        }
+        XCTAssertEqual(host.sessions.count, 1, "expected exactly the one session it had to create")
+        XCTAssertFalse(sessionNames(on: server).isEmpty, "nothing was created on the server")
+
+        await service.disconnectHost(hostId: "empty")
+    }
+
+    /// F4.15 is untouched: *automatic* recovery still never creates. Only the click does.
+    func testAutomaticRecoveryStillRefusesToCreate() async throws {
+        let server = try isolatedServer()
+        defer { killServer(server) }
+        XCTAssertEqual(sessionNames(on: server), [])
+
+        let service = SessionService()
+        await service.addHost(isolatedHost(id: "recovering", server: server))
+        // The backoff's own call: a recovery, with no permission to create.
+        try? await service.connectHost(hostId: "recovering", isRecovery: true)
+
+        // Give it longer than the connect would need, then insist nothing was made.
+        try await Task.sleep(for: .seconds(3))
+        XCTAssertEqual(
+            sessionNames(on: server), [],
+            "a reconnect manufactured a session, which is exactly what F4.15 forbids"
+        )
+    }
+
+    /// A tmux server of this test's own.
+    ///
+    /// Necessary rather than tidy: these tests assert things like "the server had nothing on it" and
+    /// "nothing was created", which against the machine's own tmux would be assertions about whoever
+    /// is running them. `TMUX_TMPDIR` puts the socket somewhere private, and the host below reaches
+    /// it through `customCommand` — the remote code path with the remoteness taken out, which is the
+    /// only way a test can own the server it is making claims about.
+    private func isolatedServer() throws -> (directory: URL, script: URL) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-iso-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let script = directory.appendingPathComponent("ssh.sh")
+        try """
+        #!/bin/sh
+        export TMUX_TMPDIR=\(directory.path)
+        exec /bin/sh -c "$1"
+        """.write(to: script, atomically: true, encoding: .utf8)
+        return (directory, script)
+    }
+
+    private func killServer(_ server: (directory: URL, script: URL)) {
+        runTmux(["kill-server"], tmuxDirectory: server.directory)
+        try? FileManager.default.removeItem(at: server.directory)
+    }
+
+    private func sessionNames(on server: (directory: URL, script: URL)) -> [String] {
+        guard let tmux = PtyTransport.resolveExecutable("tmux") else { return [] }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmux)
+        process.arguments = ["list-sessions", "-F", "#{session_name}"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["TMUX_TMPDIR"] = server.directory.path
+        process.environment = environment
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .sorted()
+    }
+
+    private func isolatedHost(id: String, server: (directory: URL, script: URL)) -> HostConfig {
+        HostConfig(id: id, name: id, isLocal: false, customCommand: "/bin/sh \(server.script.path)")
+    }
+
+    // MARK: - Discovery (F4.4)
+
+    /// F4.4 — what is on a host, asked without attaching to it and without creating anything.
+    ///
+    /// The three assertions are the whole requirement. It has to *find* the session; it has to leave
+    /// `session_attached` at zero, since a discovery that attaches is just a connection with extra
+    /// steps; and it must not bring `tetmux-main` into existence, which is what clicking the host
+    /// does today and the reason this exists at all.
+    func testSessionsAreDiscoveredWithoutAttachingOrCreating() async throws {
+        let existing = "\(sessionName)-discoverable"
+        runTmux(["new-session", "-d", "-s", existing])
+        defer { runTmux(["kill-session", "-t", existing]) }
+
+        let before = tmuxSessionNames()
+        XCTAssertTrue(before.contains(existing), "the fixture session was not created")
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        await service.discoverSessions(hostId: "local")
+
+        let host = await service.getHost("local")
+        let discovered = try XCTUnwrap(host?.discoveredSessions, "the probe recorded no answer at all")
+        XCTAssertTrue(
+            discovered.contains { $0.name == existing },
+            "discovered \(discovered.map(\.name)) — not the session that is really there"
+        )
+
+        // Nothing was attached: this session is exactly as unattached as it was.
+        XCTAssertEqual(
+            tmuxQuery(["display-message", "-p", "-t", existing, "#{session_attached}"]), "0",
+            "the probe attached a client, which is the one thing it must not do"
+        )
+        // …and nothing was created. `connectHost` would have made `tetmux-main` here.
+        XCTAssertEqual(tmuxSessionNames(), before, "the probe changed what is on the server")
+
+        // The host is still disconnected, and stayed that way — a probe is not a connection and must
+        // not report itself as one.
+        XCTAssertEqual(host?.connectionState, .disconnected)
+        XCTAssertTrue(host?.sessions.isEmpty == true, "a probe must not fill the channel's own list")
+    }
+
+    /// The answer is offered whichever way it was learned, and a channel's answer wins.
+    func testAConnectedHostPrefersItsChannelOverAProbe() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        await service.discoverSessions(hostId: "local")
+
+        let latest = await service.getHost("local")
+        let probed = try XCTUnwrap(latest)
+        XCTAssertFalse(probed.browsableSessions.isEmpty, "nothing to browse before connecting")
+        XCTAssertTrue(probed.sessions.isEmpty)
+
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let attached = sessionName
+        let connected = try await waitForHost(service) { host in
+            host.sessions.contains { $0.name == attached }
+        }
+        XCTAssertNil(connected.discoveredSessions, "the channel supersedes the probe")
+        XCTAssertEqual(
+            connected.browsableSessions.map(\.id), connected.sessions.map(\.id),
+            "a live channel's list is the one to offer"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     // MARK: - Passthrough (§4.6, F4.27)
 
     /// The mode itself, against the real tmux on this machine: one client, one pty, no protocol.

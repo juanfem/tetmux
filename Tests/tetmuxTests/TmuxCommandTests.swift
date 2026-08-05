@@ -174,6 +174,163 @@ final class TmuxCommandTests: XCTestCase {
         XCTAssertTrue(command.contains("attach-session -t 'my project'"), command)
     }
 
+    // MARK: - Discovery (F4.4)
+
+    /// One `-C`, never two, and a format the channel's own parse also reads.
+    func testDiscoveryAsksWithoutAttaching() {
+        let args = TmuxCommand.discoveryArguments()
+        XCTAssertEqual(args, ["-C", "list-sessions", "-F", TmuxCommand.sessionsFormat])
+        XCTAssertFalse(args.contains("-CC"), "-CC would attach a client; this must not")
+        XCTAssertFalse(args.contains("new-session"), "discovery must never create")
+        XCTAssertFalse(args.contains("attach-session"))
+    }
+
+    /// The remote half has to close its own stdin. Verified against 3.7b: `tmux -C` reads commands
+    /// until its input ends, so without this it prints the answer and then waits forever — and a
+    /// probe that hangs is worse than no probe, because nothing above it is watching.
+    func testRemoteDiscoveryClosesItsInputAndCannotCreate() {
+        let command = TmuxCommand.remoteDiscoveryCommand()
+        XCTAssertTrue(command.contains("< /dev/null"), command)
+        XCTAssertTrue(command.contains("exec tmux -C list-sessions"), command)
+        XCTAssertFalse(command.contains("-CC"), command)
+        XCTAssertFalse(command.contains("new-session"), command)
+        XCTAssertTrue(command.contains("command -v tmux"), "R3.8's message belongs here too")
+    }
+
+    /// F4.4 runs unbidden, so it may not raise a prompt: no tty to ask on, and ssh told not to.
+    func testADiscoveryProbeCanNeitherPromptNorTakeATty() {
+        let args = TmuxCommand.sshArguments(
+            destination: "devbox", port: nil, controlPath: "/tmp/cm-%C",
+            remoteCommand: TmuxCommand.remoteDiscoveryCommand(),
+            expectsPasswordPrompt: true,
+            purpose: .discovery
+        )
+        XCTAssertTrue(args.contains("-T"), "a tty is somewhere to prompt")
+        XCTAssertFalse(args.contains("-tt"))
+        XCTAssertTrue(zip(args, args.dropFirst()).contains { $0 == "-o" && $1 == "BatchMode=yes" })
+        XCTAssertTrue(zip(args, args.dropFirst()).contains { $0 == "-o" && $1 == "ConnectTimeout=5" })
+        // Even for a host that *does* use a password: the prompt cap is about answering one, and
+        // this probe must not be offered the chance.
+        XCTAssertFalse(args.contains("NumberOfPasswordPrompts=1"))
+        // The master socket is the whole reason this is cheap.
+        XCTAssertTrue(args.contains("ControlPath=/tmp/cm-%C"))
+    }
+
+    /// The invocation the *service* assembles, not the one the builder produces when asked nicely.
+    ///
+    /// This is the test that was missing, and a real bug went through the gap: `sshArguments` had a
+    /// correct `.discovery` branch and `invocation` never passed `purpose:`, so every probe ran as a
+    /// channel would — with a tty, without `BatchMode`, and leaving a `ControlPersist` master behind.
+    /// On a host that asks for a password that is an authentication attempt nobody can answer, raised
+    /// every time a window takes focus, until the server starts refusing the connections the user
+    /// actually wants. A unit test of the builder cannot see an argument the caller never supplies.
+    func testTheAssembledDiscoveryInvocationCannotPromptOrLeaveAMasterBehind() async throws {
+        let service = SessionService()
+        let config = HostConfig(
+            id: "devbox", name: "devbox", user: "me", port: 2222,
+            usesPassword: true, forwards: [
+                PortForward(kind: .local, listenPort: 5432, destinationHost: "db", destinationPort: 5432)
+            ],
+            forwardsX11: true
+        )
+
+        let probe = try await service.invocation(for: config, mode: nil, flavour: .discovery)
+        XCTAssertEqual(probe.executable, "/usr/bin/ssh")
+        let args = probe.arguments
+        XCTAssertTrue(args.contains("-T"), "a probe must not take a tty: \(args)")
+        XCTAssertFalse(args.contains("-tt"), "a tty is somewhere ssh can prompt: \(args)")
+        XCTAssertTrue(args.contains("BatchMode=yes"), "ssh must fail rather than ask: \(args)")
+        XCTAssertTrue(args.contains("ControlMaster=no"), "a probe may use a master, never make one")
+        XCTAssertFalse(args.contains { $0.hasPrefix("ControlPersist") }, "nothing outlives a probe")
+        XCTAssertFalse(args.contains("NumberOfPasswordPrompts=1"), "it may not attempt a password at all")
+        // Forwards and X11 belong to the connection the user asked for. On a master they would bind
+        // the user's ports from a background probe they cannot see or close.
+        XCTAssertFalse(args.contains("-L"), "\(args)")
+        XCTAssertFalse(args.contains("-X"), "\(args)")
+
+        // …and the channel for the same host is unchanged by all of it.
+        let channel = try await service.invocation(for: config, mode: .attachAny, flavour: .controlMode)
+        XCTAssertTrue(channel.arguments.contains("-tt"))
+        XCTAssertTrue(channel.arguments.contains("ControlMaster=auto"))
+        XCTAssertTrue(channel.arguments.contains("ControlPersist=300"))
+        XCTAssertTrue(channel.arguments.contains("NumberOfPasswordPrompts=1"))
+        XCTAssertTrue(channel.arguments.contains("-X"))
+        XCTAssertTrue(channel.arguments.contains("-L"))
+    }
+
+    /// A channel is unchanged by any of it.
+    func testAChannelStillTakesATty() {
+        let args = TmuxCommand.sshArguments(
+            destination: "devbox", port: nil, controlPath: "/tmp/cm-%C", remoteCommand: "true"
+        )
+        XCTAssertTrue(args.contains("-tt"))
+        XCTAssertFalse(args.contains("BatchMode=yes"))
+    }
+
+    /// The distinction the whole feature rests on: "this host has nothing" is an answer, and
+    /// "we could not ask" is not — and recording the second as the first tells somebody their work
+    /// is gone because their laptop is on a train.
+    func testAnUnreachableHostIsNotAnEmptyHost() {
+        func probe(_ text: String, status: Int32 = 0) -> CommandProbe.Result {
+            CommandProbe.Result(status: status, output: Data(text.utf8), timedOut: false)
+        }
+
+        let listed = probe("""
+        %begin 1785940547 9452 0\r
+        $2|0|work\r
+        $0|1|scratch\r
+        %end 1785940547 9452 0\r
+        %exit\r
+
+        """)
+        let sessions = try? XCTUnwrap(SessionService.parseDiscovery(listed))
+        XCTAssertEqual(sessions?.map(\.name), ["scratch", "work"], "sorted by name, as the tree shows them")
+        XCTAssertEqual(sessions?.first { $0.name == "scratch" }?.isAttached, true)
+        XCTAssertTrue(sessions?.allSatisfy { $0.windows.isEmpty } == true, "a probe asks one question")
+
+        // tmux answered, and the answer is "nothing here" — which must supersede whatever a dead
+        // channel left listed.
+        XCTAssertEqual(
+            SessionService.parseDiscovery(
+                probe("no server running on /private/tmp/tmux-501/default", status: 1)
+            )?.count,
+            0
+        )
+        XCTAssertEqual(
+            SessionService.parseDiscovery(
+                probe("error connecting to /private/tmp/tmux-501/default (No such file or directory)", status: 1)
+            )?.count,
+            0
+        )
+
+        // Nobody answered. These must stay unknown.
+        XCTAssertNil(SessionService.parseDiscovery(probe("ssh: connect to host devbox port 22: Operation timed out", status: 255)))
+        XCTAssertNil(SessionService.parseDiscovery(probe("Permission denied (publickey).", status: 255)))
+        XCTAssertNil(SessionService.parseDiscovery(probe("tetmux: tmux not found on remote host", status: 127)))
+        XCTAssertNil(SessionService.parseDiscovery(probe("", status: -1)))
+        // A block tmux refused is not a list of nothing either.
+        XCTAssertNil(SessionService.parseDiscovery(probe("%begin 1 2 0\r\nno such thing\r\n%error 1 2 0\r\n")))
+    }
+
+    /// An ssh banner ahead of the answer is what the `%begin` framing is for — the reason discovery
+    /// asks in control mode rather than reading plain `list-sessions` output.
+    func testABannerAheadOfTheAnswerIsIgnored() {
+        let output = """
+        ##########################################\r
+        # Authorised users only. All activity is #\r
+        # monitored and reported.                #\r
+        ##########################################\r
+        %begin 1785940547 9452 0\r
+        $2|0|work\r
+        %end 1785940547 9452 0\r
+
+        """
+        let sessions = SessionService.parseDiscovery(
+            CommandProbe.Result(status: 0, output: Data(output.utf8), timedOut: false)
+        )
+        XCTAssertEqual(sessions?.map(\.name), ["work"])
+    }
+
     // MARK: - Passthrough (§4.6, F4.27)
 
     /// The fallback is the same invocation with `-CC` removed and nothing else changed.

@@ -255,6 +255,11 @@ public final class AppModel {
         focusOrder.removeAll { $0 == state.id }
         focusOrder.append(state.id)
         syncDisplayedSessions()
+        // F4.4's second trigger, and the requirement is specific about there being only two: on
+        // demand, and on window focus. Just this window's host — probing all of them here would be
+        // a subprocess per host every time the user clicked between two windows, which is the
+        // polling loop the requirement rules out wearing a different hat.
+        if let hostId = state.selectedHostId { discoverSessions(hostId) }
     }
 
     /// Tells the service which sessions are on screen, so it can keep a tmux client attached to each.
@@ -367,6 +372,17 @@ public final class AppModel {
 
     public func bootstrap() async {
         guard stateTask == nil else { return }
+
+        // The event stream, in the app rather than only in `--diagnose`. Everything the service knows
+        // about a channel goes to a logger nothing installs here, so a host that misbehaves in the UI
+        // could only be investigated by reproducing it in the CLI — which is a different process,
+        // different windows, and often a different symptom. `TETMUX_LOG=1 swift run tetmux` now
+        // prints the same stream to stderr.
+        if ProcessInfo.processInfo.environment["TETMUX_LOG"] != nil {
+            await service.setDiagnosticLogger { message in
+                FileHandle.standardError.write(Data((message + "\n").utf8))
+            }
+        }
 
         // Before the monitor, which asks the keymap what the escape chord is.
         keymap = KeymapPolicy.applying(overrides: await settings.keymapOverrides())
@@ -552,18 +568,75 @@ public final class AppModel {
 
     // MARK: - Actions
 
+    /// Open a host, which is what every click that means "connect" does: attach to the session that
+    /// is there, and make one only if there is nothing to attach to.
+    ///
+    /// `connect` and `reconnect` are the same call now. They were not, and the difference was the
+    /// bug: `reconnect` ran the *recovery* path, which attaches by remembered name — `tetmux-main`
+    /// when nothing is remembered — so clicking a host with three sessions on it ran
+    /// `attach-session -t tetmux-main`, got `can't find session`, and stopped. Silently. Both names
+    /// are kept because the call sites read differently ("connect this host" / "try again"), and
+    /// they now mean the same thing because they always should have.
     public func connect(_ hostId: String) {
-        Task { try? await service.connectHost(hostId: hostId) }
+        Task { await service.openHost(hostId: hostId) }
     }
 
-    /// An explicit reconnect. Distinct from `connect` in that it clears the circuit breaker: a host
-    /// that has already spent its automatic attempts must still come back on a click.
+    /// An explicit reconnect. Clears the circuit breaker as well: a host that has already spent its
+    /// automatic attempts must still come back on a click.
     public func reconnect(_ hostId: String) {
-        Task { await service.reconnectNow(hostId: hostId) }
+        Task { await service.openHost(hostId: hostId) }
     }
 
     public func disconnect(_ hostId: String) {
         Task { await service.disconnectHost(hostId: hostId) }
+    }
+
+    /// F4.4 — ask a host what it has, without attaching to it. Cheap, silent, and safe to call from
+    /// anywhere the user has just shown interest in a host: the service rate-limits it.
+    public func discoverSessions(_ hostId: String) {
+        Task { await service.discoverSessions(hostId: hostId) }
+    }
+
+    /// Every host nothing is listening to, which is what ⌘K and a focus change ask about (F4.4/F4.26).
+    public func discoverIdleHosts() {
+        for host in hosts where !host.connectionState.isActive {
+            discoverSessions(host.id)
+        }
+    }
+
+    /// Opens a session discovery found — attaching to *that* session, never creating one.
+    ///
+    /// This is what F4.4 is for. Clicking an unconnected host otherwise runs
+    /// `new-session -A -s tetmux-main`, so a host with the user's own work sitting on it gets a
+    /// second, empty session made before anyone has seen what was there. Here the name is known, so
+    /// the attach can be exact — and `.attach` cannot create, which is the same guarantee F4.15 puts
+    /// on a reconnect.
+    ///
+    /// The window is shown by the ordinary reveal path rather than here: control mode answers
+    /// `attach-session` with no session id, so what to display is only knowable once the topology
+    /// arrives — the same round trip New Session waits for.
+    public func attachDiscoveredSession(
+        hostId: String,
+        named name: String,
+        in state: WindowState?,
+        preferNewWindow: Bool = false
+    ) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        if let state, !preferNewWindow { state.selectedHostId = hostId }
+        // Same rule as New Session: ⌥ means somewhere else, and nothing open at all means the reveal
+        // has to bring its own window or the session is attached and never shown.
+        let opensNewWindow = preferNewWindow || (state == nil && openWindows.isEmpty)
+        pendingReveals.append(RevealRequest(
+            state: opensNewWindow ? nil : state, opensNewWindow: opensNewWindow,
+            hostId: hostId, sessionName: trimmed, sessionId: nil,
+            knownWindowIds: [], madeAt: .now
+        ))
+        Task {
+            try? await service.connectHost(
+                hostId: hostId, targetSession: trimmed, mode: .attach(sessionName: trimmed)
+            )
+        }
     }
 
     /// §4.6 — start the fallback this host has been offered.
@@ -777,6 +850,11 @@ public final class AppModel {
     public func toggleLauncherFromMenu() {
         guard let state = activeWindowState else { return }
         state.isLauncherPresented.toggle()
+        // F4.4's "on demand" trigger, and F4.26's whole case: the launcher is where somebody goes to
+        // find a session they are *not* looking at, which is exactly the one an idle host is holding.
+        // The answer will not arrive before the list is drawn — an ssh round trip against a typed
+        // character — so it populates the launcher a moment later, or the next time it is opened.
+        if state.isLauncherPresented { discoverIdleHosts() }
     }
 
     /// F4.30 — a session picked from the menu bar extra, which belongs to no window at all.
@@ -1504,7 +1582,23 @@ public final class AppModel {
                 self.connect(host.id)
             })
 
-            for session in host.sessions {
+            for session in host.browsableSessions {
+                // F4.26 — a session found by discovery (F4.4) has no windows to list, because a probe
+                // asks one question. It is still the most useful row the launcher can offer for a
+                // host nobody is attached to: picking it attaches to *that* session, which is the
+                // choice the user otherwise never gets before `new-session -A` makes one for them.
+                if session.windows.isEmpty {
+                    items.append(LauncherItem(
+                        title: session.name,
+                        subtitle: "\(host.config.name)\(reachable ? "" : " (will connect)")",
+                        iconName: "rectangle.stack",
+                        isAvailable: true
+                    ) { [weak self, weak state] in
+                        guard let self else { return }
+                        self.attachDiscoveredSession(hostId: host.id, named: session.name, in: state)
+                    })
+                    continue
+                }
                 for window in session.windows {
                     items.append(LauncherItem(
                         title: "\(window.name)",

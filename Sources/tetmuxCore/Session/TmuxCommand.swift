@@ -246,6 +246,38 @@ public enum TmuxCommand {
     /// The same, for a host reached through a wrapper that expects a remote command.
     public static let remoteShellCommand = #"exec "${SHELL:-/bin/sh}" -l"#
 
+    // MARK: - Discovery (F4.4)
+
+    /// What is on a host, asked without attaching to it: `tmux -C list-sessions`.
+    ///
+    /// `-C` rather than a plain `list-sessions` for the framing. The answer comes back inside a
+    /// `%begin`/`%end` block, so `ControlCodec` can pick it out of whatever else arrived on the same
+    /// stream — an ssh banner, a `.tmux.conf` complaint, a login shell's noise — instead of us
+    /// guessing which lines are data. It is *one* `-C`, not `-CC`: this attaches no client, creates
+    /// nothing, and exits.
+    ///
+    /// **Its stdin must be at EOF or it never returns.** Verified against 3.7b: `-C` puts tmux into
+    /// control mode, and control mode reads commands until the stream ends — so `tmux -C
+    /// list-sessions` on a terminal prints the answer and then sits there forever waiting for the
+    /// next command. Every caller therefore hands it `/dev/null`. A one-shot probe that hangs is
+    /// worse than no probe, because nothing above it is watching.
+    public static func discoveryArguments() -> [String] {
+        ["-C", "list-sessions", "-F", sessionsFormat]
+    }
+
+    /// The remote half, as one argv element (the `remoteCommand` rule applies here too).
+    ///
+    /// A missing server answers `error connecting to /tmp/tmux-…` on stderr with status 1, which is
+    /// not a failure to report: it is the answer "there are no sessions on this host".
+    public static func remoteDiscoveryCommand() -> String {
+        let path = "PATH=\"$PATH:/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin\""
+        return """
+        \(path); export PATH; \
+        command -v tmux >/dev/null 2>&1 || { echo "tetmux: tmux not found on remote host" >&2; exit 127; }; \
+        exec tmux -C list-sessions -F \(quote(sessionsFormat)) < /dev/null
+        """
+    }
+
     /// The single shell command string handed to the remote login shell.
     ///
     /// This must be **one** argv element. `ssh host -- sh -c "a b c"` does not do what it looks
@@ -286,6 +318,17 @@ public enum TmuxCommand {
     /// `expectsPasswordPrompt` caps ssh at a single password attempt. Answering the same rejected
     /// password repeatedly is how accounts get locked out, and F4.14 already refuses to retry an
     /// authentication failure at the connection level — this is the same rule one layer down.
+    /// What an ssh invocation is *for*, which decides two things that must not be set separately.
+    ///
+    /// A channel needs a tty (tmux refuses to attach without one) and may answer a password prompt on
+    /// it. A discovery probe (F4.4) must have neither: it runs unbidden, and a background convenience
+    /// that can put a password sheet in front of somebody is not one. `BatchMode=yes` is ssh's own
+    /// way of saying so, and no tty means there is nowhere to prompt even if it tried.
+    public enum Purpose: Equatable, Sendable {
+        case channel
+        case discovery
+    }
+
     public static func sshArguments(
         destination: String,
         port: Int?,
@@ -294,7 +337,8 @@ public enum TmuxCommand {
         forwards: [PortForward] = [],
         expectsPasswordPrompt: Bool = false,
         extraArguments: [String] = [],
-        forwardsX11: Bool = false
+        forwardsX11: Bool = false,
+        purpose: Purpose = .channel
     ) -> [String] {
         // The user's own options come *first*, and that placement is the whole point of them. ssh
         // resolves each parameter to the first value it obtains, so an `-o` after ours would be
@@ -304,19 +348,46 @@ public enum TmuxCommand {
         if forwardsX11 {
             args += ["-X"]
         }
-        args += [
-            "-o", "ControlMaster=auto",
-            "-o", "ControlPath=\(controlPath)",
-            "-o", "ControlPersist=300",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=3",
-        ]
-        if expectsPasswordPrompt {
-            args += ["-o", "NumberOfPasswordPrompts=1"]
+        switch purpose {
+        case .channel:
+            args += [
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=\(controlPath)",
+                "-o", "ControlPersist=300",
+                "-o", "ServerAliveInterval=15",
+                "-o", "ServerAliveCountMax=3",
+            ]
+            if expectsPasswordPrompt {
+                args += ["-o", "NumberOfPasswordPrompts=1"]
+            }
+            // Without a tty tmux refuses to attach; -tt forces one even though our stdin is a pipe
+            // from tmux's point of view.
+            args += ["-tt"]
+
+        case .discovery:
+            // **`ControlMaster=no`, not `auto`**: a probe may *use* a master that is already there —
+            // which is what makes F4.4 cheap — but must never create one. A master outlives the
+            // command that made it (`ControlPersist`), so a background probe would leave an ssh
+            // connection on the user's machine that they did not ask for and cannot see, and the
+            // next thing to talk to that host would silently inherit it.
+            //
+            // `-T` and `BatchMode=yes` are the promise that this cannot interrupt anybody: no tty is
+            // somewhere to prompt, and BatchMode makes ssh fail rather than ask. Getting this wrong
+            // is not a cosmetic bug — a probe that runs on window focus, with a tty and no BatchMode,
+            // raises an authentication attempt nobody can answer *every time the user clicks into a
+            // window*, and a server counting failed attempts will start refusing the connections the
+            // user actually wants.
+            //
+            // `ConnectTimeout` because this runs unbidden: an unreachable host must cost a few
+            // seconds, not ssh's default of a minute and a bit.
+            args += [
+                "-o", "ControlMaster=no",
+                "-o", "ControlPath=\(controlPath)",
+                "-T",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+            ]
         }
-        // Without a tty tmux refuses to attach; -tt forces one even though our stdin is a pipe
-        // from tmux's point of view.
-        args += ["-tt"]
         args += forwardArguments(forwards)
         if let port, port != 22 {
             args += ["-p", "\(port)"]

@@ -1162,7 +1162,11 @@ struct MenuBarContent: View {
     var body: some View {
         ForEach(model.hosts) { host in
             Section(host.config.name) {
-                ForEach(host.sessions) { session in
+                // F4.4 — including the sessions a probe found on a host nothing is attached to, which
+                // is what makes this menu's "every known session" true rather than "every session we
+                // happen to have a client on". Picking one attaches to *it*; picking one on a
+                // connected host shows the window already displaying it, as before.
+                ForEach(host.browsableSessions) { session in
                     Button {
                         open(host: host, session: session)
                     } label: {
@@ -1171,7 +1175,7 @@ struct MenuBarContent: View {
                 }
                 // Item 10 — a host with no sessions still needs a way to get one, and a host with
                 // sessions still needs another.
-                if host.sessions.isEmpty && !host.connectionState.isActive {
+                if host.browsableSessions.isEmpty && !host.connectionState.isActive {
                     Button("Connect") { model.connect(host.id) }
                 }
                 Button {
@@ -1215,6 +1219,19 @@ struct MenuBarContent: View {
         // Read at click time, not from `optionKey`, which is a poll and so can be a frame behind:
         // `MenuBarExtra` gives no event, but the flags are current while the item's action runs.
         let wantsNewWindow = OptionKey.isHeld
+        // F4.4 — a session a probe found has no windows and no channel behind it, so there is
+        // nothing to *show* yet: it has to be attached first, by name, and the window follows when
+        // the topology arrives. `showSession` would look for a session id no client has reported.
+        if session.windows.isEmpty, !host.connectionState.isActive {
+            model.attachDiscoveredSession(
+                hostId: host.id,
+                named: session.name,
+                in: model.activeWindowState ?? model.lastUsedWindow,
+                preferNewWindow: wantsNewWindow
+            )
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         // No `fallback:`, so this lands on the last-used window — item 9's "otherwise the one that
         // was last used".
         model.showSession(

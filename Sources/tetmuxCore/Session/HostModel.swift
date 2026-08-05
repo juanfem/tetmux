@@ -724,6 +724,32 @@ public struct HostState: Identifiable, Equatable, Sendable {
     /// went on drawing one would be drawing a tree of nothing.
     public var passthrough: PassthroughState?
 
+    /// F4.4 — what a `tmux -C list-sessions` found on this host, with nothing attached to it.
+    ///
+    /// Kept apart from `sessions` rather than merged into it, and the distinction is the point.
+    /// `sessions` is what a channel reported: those sessions have windows, have panes, and can be
+    /// switched to. A probe answers one question — which sessions exist — so a discovered session is
+    /// a *leaf*, and code that assumed otherwise would silently render an empty tree or issue
+    /// commands down a channel that is not there.
+    ///
+    /// `nil` means nobody has asked yet, which is not the same as an empty list: an empty list is a
+    /// host that answered "no sessions", and that answer is worth having. Without the distinction a
+    /// server that has gone away is indistinguishable from one nobody has probed.
+    public var discoveredSessions: [TmuxSession]?
+
+    /// The sessions to *offer* on this host, whichever way we learned them.
+    ///
+    /// One place, because the sidebar, the launcher and the menu bar all ask and disagreeing about
+    /// what a host contains is the sort of thing that makes a tree feel unrelated to the app. A live
+    /// channel always wins — it knows about windows, and it is current by notification rather than by
+    /// probe. Otherwise the probe wins over whatever a dead channel left behind, including when it
+    /// found nothing: the sessions listed after a link drops are deliberately kept ("out of reach,
+    /// not gone"), and a probe that says the server is empty is the evidence that they really are.
+    public var browsableSessions: [TmuxSession] {
+        if connectionState.isActive { return sessions }
+        return discoveredSessions ?? sessions
+    }
+
     public var activeSession: TmuxSession? {
         sessions.first { $0.id == activeSessionId } ?? sessions.first
     }

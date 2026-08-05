@@ -87,6 +87,7 @@ Where things are, since the invariants below name symbols without saying which f
 | `Core/ControlCodec.swift` | Bytes → `[ControlEvent]`. Pure value type, no I/O. |
 | `Core/LayoutParser.swift` | tmux layout strings → `LayoutNode` tree. |
 | `Core/PtyTransport.swift` | `forkpty` + reader thread. The only spawner of anything a channel runs on. |
+| `Core/CommandProbe.swift` | One question, one subprocess, no pty — F4.4's discovery and nothing else. |
 | `Core/SshPromptDetector.swift` | Classifies a pre-handshake prompt ssh is sitting on. |
 | `Session/SessionService.swift` | The actor. Channels, correlation, topology, flow control. |
 | `Session/HostModel.swift` | `HostState`, `TmuxSession`, `TmuxWindow`, `TmuxVersion`. |
@@ -411,9 +412,22 @@ invalidates it — and a stale name is worse than a failed lookup, because the r
 `new-session -A -s <old name>` and creates an empty session under it. `syncReconnectTarget` is called
 from `%session-renamed` and after `list-sessions`.
 
-**A reconnect attaches; it never creates (F4.15).** `connectHost` defaults to `.createOrAttach`, and
-the backoff must not take that default — if the server restarted while the link was down, creating
-manufactures an empty session under the remembered name and presents it as the user's.
+**A reconnect attaches; it never creates (F4.15) — but a *click* is not a reconnect.** The backoff
+must not create: if the server restarted while the link was down, creating manufactures an empty
+session under the remembered name and presents it as the user's. What a user click means is the
+opposite, and conflating the two was a bug that made the app look broken for a year. Every
+user-initiated connect goes through `openHost`: `attach-session` with **no target**, which lands on
+the server's most recently used session and cannot create, and only when there is nothing to attach
+to does a second attempt make one. It replaced `reconnectNow` at those call sites because that path
+attaches by *remembered name*, and with nothing remembered the name is `tetmux-main` — a session
+almost no server has. tmux answers `can't find session: tetmux-main`, `%error`, `%exit`, and the
+`%exit` handler reads that as "the server has nothing left": `.disconnected`, no retry, nothing said.
+Clicking a host with three sessions on it did nothing at all, while clicking one of those sessions in
+the tree worked, because that path names a session that exists. It was invisible on localhost, where
+tetmux creates `tetmux-main` itself so the hard-coded name always resolves. Both shapes of "nothing
+to attach to" have to be handled: an empty server arrives as `%exit`, and a host with no tmux server
+running at all dies before the handshake and otherwise falls into the backoff to retry, eight times,
+an attach that cannot ever succeed.
 
 **`%exit` is the only thing separating "the session ended" from "the link died".** A dropped ssh
 connection produces EOF and nothing else; tmux ending a client always announces it first. Verified on
@@ -501,6 +515,22 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   host also has to *land* rather than stay pending: an unresolved restore re-asserts its host on every
   snapshot, and since a passthrough host never gains a session, clicking any other host in the tree
   was silently undone by the next topology change.
+- **Discovery asks `tmux -C list-sessions` and attaches nothing (F4.4).** The list is not the point:
+  clicking an unconnected host runs `new-session -A -s tetmux-main`, so a host with the user's own
+  work on it got a second, empty session made before anyone saw what was there. A discovered session
+  attaches *by name* with `attach-session`, which cannot create. Four things are load-bearing.
+  **`tmux -C` reads commands until its input ends** — `tmux -C list-sessions` prints the answer and
+  then hangs forever, so every caller gives it `/dev/null`; a probe that hangs is worse than none,
+  because nothing is watching it. **The answer is `%begin`-framed and the failures are not**, which
+  is what lets `ControlCodec` find the list under an ssh banner and what separates "this host has
+  nothing" (tmux's own `no server running`) from "we could not ask" — hence
+  `discoveredSessions` being an *optional*: recording an unreachable host as empty tells somebody
+  their sessions are gone because their laptop is on a train. **It runs through `CommandProbe`, not
+  `PtyTransport`**, because a pty is somewhere ssh can prompt; a pipe plus `BatchMode=yes` is the
+  whole of "this cannot interrupt anybody", and the price is that a password host with no live
+  `ControlMaster` answers nothing until it has been connected once. And **`browsableSessions` is the
+  one place that decides which list a surface shows**, because the sidebar, the launcher and the menu
+  bar all ask.
 - **Control mode only streams `%output` for the attached session.** Selecting another session must
   issue `switch-client`, or its panes render once from `capture-pane` and then sit frozen.
 - **Nothing repaints on its own.** Attaching to an existing session shows an empty terminal until

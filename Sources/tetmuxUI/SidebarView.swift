@@ -172,7 +172,10 @@ struct SidebarView: View {
             VStack(alignment: .leading, spacing: 1) {
                 hostRow(host)
                 if isExpanded(host) {
-                    ForEach(host.sessions) { session in
+                    // F4.4 — `browsableSessions`, so an idle host lists what a probe found rather
+                    // than nothing. A discovered session has no windows (a probe asks one question),
+                    // which is why `sessionRow` decides for itself what clicking one does.
+                    ForEach(host.browsableSessions) { session in
                         sessionRow(host: host, session: session)
                         if isExpanded(host, session) {
                             ForEach(session.windows) { window in
@@ -180,7 +183,11 @@ struct SidebarView: View {
                             }
                         }
                     }
-                    if host.sessions.isEmpty && host.connectionState.isActive {
+                    // "No sessions" only when somebody has actually said so — a live channel, or a
+                    // probe that came back empty. Saying it about a host nobody has asked is a claim
+                    // we have not got.
+                    if host.browsableSessions.isEmpty,
+                       host.connectionState.isActive || host.discoveredSessions != nil {
                         Text("No sessions")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -262,7 +269,13 @@ struct SidebarView: View {
         let live = host.connectionState.isActive
         return HStack(spacing: 6) {
             Button {
-                hostExpansion[host.id] = !isExpanded(host)
+                let expanding = !isExpanded(host)
+                hostExpansion[host.id] = expanding
+                // F4.4's "on demand": opening a host is asking what is in it, and for a host with no
+                // channel this is the only thing that can answer. Free when it has been asked
+                // recently — the service holds the answer for 30 s — so flapping the triangle costs
+                // one probe, not one each.
+                if expanding { model.discoverSessions(host.id) }
             } label: {
                 Image(systemName: isExpanded(host) ? "chevron.down" : "chevron.right")
                     .font(.caption2)
@@ -298,8 +311,8 @@ struct SidebarView: View {
                     hostStatusLabel(host)
                     // Only while closed, exactly as a collapsed session shows its window count: with
                     // the sessions listed underneath, the number is the count of the rows below it.
-                    if !isExpanded(host), !host.sessions.isEmpty {
-                        Text("\(host.sessions.count)")
+                    if !isExpanded(host), !host.browsableSessions.isEmpty {
+                        Text("\(host.browsableSessions.count)")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -333,7 +346,7 @@ struct SidebarView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             "Host \(host.config.name), \(host.connectionState.accessibilityDescription), "
-                + "\(host.sessions.count) sessions"
+                + "\(host.browsableSessions.count) sessions"
         )
     }
 
@@ -434,20 +447,40 @@ struct SidebarView: View {
         let rowKey = key(host, session.id)
         let isSelected = state.isShowing(hostId: host.id, sessionId: session.id)
         let expanded = isExpanded(host, session)
+        // F4.4 — this row came from a probe rather than from a channel: the session is real, and
+        // everything *inside* it is unknown until somebody attaches. It therefore has no triangle
+        // and no window count, because both would be answers we have not got — a triangle that opens
+        // onto nothing reads as an empty session, which is the one thing this is not.
+        let isDiscovered = session.windows.isEmpty && !host.connectionState.isActive
         return HStack(spacing: 4) {
-            Button {
-                expandedSessions.formSymmetricDifference([rowKey])
-            } label: {
-                Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 10)
+            if isDiscovered {
+                // The indent stays, so the tree does not shuffle sideways when the host connects and
+                // the same session grows a triangle.
+                Color.clear.frame(width: 10, height: 1)
+            } else {
+                Button {
+                    expandedSessions.formSymmetricDifference([rowKey])
+                } label: {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(expanded ? "Collapse \(session.name)" : "Expand \(session.name)")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(expanded ? "Collapse \(session.name)" : "Expand \(session.name)")
 
             Button {
-                model.select(in: state, host: host.id, session: session.id, window: session.activeWindow?.id)
+                // F4.4 — a session with no windows on a host with no channel is one a *probe* found,
+                // and there is nothing to select: no window to show, no client to switch. Clicking it
+                // means "attach to this one", by name and with `attach-session`, which is the whole
+                // point of having looked. Selecting it instead would put the window on a session that
+                // renders an empty tree until somebody connects the host by another route.
+                if session.windows.isEmpty, !host.connectionState.isActive {
+                    model.attachDiscoveredSession(hostId: host.id, named: session.name, in: state)
+                } else {
+                    model.select(in: state, host: host.id, session: session.id, window: session.activeWindow?.id)
+                }
             } label: {
                 HStack(spacing: 6) {
                     // A session is the one thing in the tree that *contains* windows, so it is the
@@ -460,7 +493,7 @@ struct SidebarView: View {
                     Spacer(minLength: 4)
                     // Only while closed: with the windows listed underneath, a count is just the
                     // number of rows directly below it.
-                    if !expanded {
+                    if !expanded, !isDiscovered {
                         Text("\(session.windows.count)")
                             .font(.caption2)
                             .foregroundStyle(.secondary)

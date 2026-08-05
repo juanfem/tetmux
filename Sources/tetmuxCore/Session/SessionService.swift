@@ -221,6 +221,16 @@ public actor SessionService {
         /// before the handshake can be read as "that session is gone" rather than "the host is down".
         var attachedByRememberedName = false
 
+        /// Whether finding nothing to attach to means "make one".
+        ///
+        /// Set only for a channel the *user* opened, and that is the whole of F4.15's distinction:
+        /// automatic recovery must never create, because it cannot tell "the session is still there"
+        /// from "the server restarted while you were away" and would hand back an empty session as
+        /// though it were the user's work. Somebody clicking a host is not guessing — they are asking
+        /// for a shell on it, and a click that lands on an empty server and then does nothing at all
+        /// is the bug this exists to fix.
+        var createsIfServerIsEmpty = false
+
         /// Whether tmux said `%exit` before the channel closed.
         ///
         /// This is the whole difference between "the session ended" and "the link died", and there is
@@ -390,6 +400,7 @@ public actor SessionService {
         paneOwners.removeValue(forKey: hostId)
         reconnectTarget.removeValue(forKey: hostId)
         reconnectAttempts.removeValue(forKey: hostId)
+        lastDiscovery.removeValue(forKey: hostId)
         cancelScheduledReconnect(hostId: hostId)
         hosts.removeValue(forKey: hostId)
         hostOrder.removeAll { $0 == hostId }
@@ -449,7 +460,8 @@ public actor SessionService {
         hostId: String,
         targetSession: String? = nil,
         mode: TmuxCommand.AttachMode? = nil,
-        isRecovery: Bool = false
+        isRecovery: Bool = false,
+        createIfEmpty: Bool = false
     ) async throws {
         guard var host = hosts[hostId] else { return }
         if let existing = connections[hostId] {
@@ -495,6 +507,7 @@ public actor SessionService {
                 host: host.config, sessionTarget: sessionTarget, mode: attachMode, role: .primary
             )
             connection.attachedByRememberedName = isRecovery && attachMode != .attachAny
+            connection.createsIfServerIsEmpty = createIfEmpty
             connections[hostId] = connection
         } catch {
             let reason = describe(error)
@@ -573,6 +586,114 @@ public actor SessionService {
             hostId: hostId, epoch: epoch,
             error: PtyError.handshakeTimedOut(seconds: Int(Self.handshakeTimeout.components.seconds))
         )
+    }
+
+    // MARK: - Discovery (F4.4)
+
+    /// When each host was last probed, so a burst of focus changes costs one subprocess.
+    private var lastDiscovery: [String: ContinuousClock.Instant] = [:]
+    /// Hosts with a probe in flight. A probe is an `await`, and a second one started underneath it
+    /// would race to write the same field with an older answer.
+    private var discoveryInFlight: Set<String> = []
+    /// How long a probe's answer stands before another is worth spawning. F4.4 forbids a polling
+    /// loop, so this is not an interval — nothing fires on its own — it is how much staleness a
+    /// *deliberate* trigger is allowed to be satisfied by.
+    private static let discoveryFreshness = Duration.seconds(30)
+
+    /// Asks a host what sessions it has, without attaching to it (F4.4).
+    ///
+    /// The point is not the list; it is that the first click on a remote host currently *creates*
+    /// one. `connectHost` defaults to `new-session -A -s tetmux-main`, so a host with the user's own
+    /// `work` session sitting on it gets a second, empty session made on it before anyone has seen
+    /// what was there. Discovery is what lets the choice come first.
+    ///
+    /// Silent in every failure mode, deliberately. It runs unbidden, so it may not raise a prompt
+    /// (`BatchMode=yes`, no tty), may not change `connectionState`, and may not report an error: a
+    /// host that cannot be reached simply has nothing to show, which is what it had before.
+    public func discoverSessions(hostId: String, force: Bool = false) async {
+        guard let host = hosts[hostId] else { return }
+        // A live channel is already answering this question by notification, and its answer is
+        // strictly better — it knows about windows. F4.4's "there is no polling loop" is exactly
+        // this guard: discovery is for hosts nothing is listening to.
+        guard connections[hostId] == nil else { return }
+        // §4.6 — a passthrough host has a tmux we have already established we cannot drive, and no
+        // way to act on what a list would say.
+        guard host.passthrough == nil else { return }
+        guard !discoveryInFlight.contains(hostId) else { return }
+        if !force, let last = lastDiscovery[hostId], ContinuousClock.now - last < Self.discoveryFreshness {
+            return
+        }
+
+        let invocation: (executable: String, arguments: [String])
+        do {
+            invocation = try self.invocation(for: host.config, mode: nil, flavour: .discovery)
+        } catch {
+            // No local tmux to ask with. Nothing to say about it here: the connect path says it
+            // properly, with an offer attached (R3.8).
+            return
+        }
+
+        discoveryInFlight.insert(hostId)
+        defer { discoveryInFlight.remove(hostId) }
+        log("[\(hostId)] discovery: \(invocation.executable) \(invocation.arguments.joined(separator: " "))")
+
+        let result = await CommandProbe.run(
+            executable: invocation.executable,
+            arguments: invocation.arguments,
+            environment: childEnvironment()
+        )
+        lastDiscovery[hostId] = .now
+
+        // The host may have connected while ssh was thinking. Its channel's list is the better
+        // answer and is already in `sessions`; writing a probe's over it would age backwards.
+        guard connections[hostId] == nil, hosts[hostId] != nil else { return }
+
+        guard let sessions = Self.parseDiscovery(result) else {
+            log("[\(hostId)] discovery did not get an answer (status \(result.status))")
+            return
+        }
+        log("[\(hostId)] discovery found \(sessions.count) session(s) without attaching")
+        withHost(hostId) { $0.discoveredSessions = sessions }
+        broadcastState()
+    }
+
+    /// A probe's output → the sessions on that host, or `nil` for "we did not find out".
+    ///
+    /// The distinction is the whole reason this is not a plain array. An empty list is a host that
+    /// *answered* and has nothing on it — which is worth recording, because it is what supersedes the
+    /// sessions a dropped channel left behind. `nil` is a question that never reached tmux: ssh
+    /// refused, the host is unreachable, `BatchMode` declined to prompt. Recording that as "no
+    /// sessions" would tell the user their work is gone because their laptop is on a train.
+    ///
+    /// The framing is what tells them apart. tmux answers inside a `%begin`/`%end` block; an
+    /// unreachable host produces ssh's complaint and nothing else. `no server running` is the one
+    /// unframed answer that is still an answer, and it is tmux's own words for "there is nothing
+    /// here" — the state every host is in before its first session.
+    static func parseDiscovery(_ result: CommandProbe.Result) -> [TmuxSession]? {
+        var codec = ControlCodec()
+        var lines: [String] = []
+        var sawBlock = false
+        for event in codec.feed(result.output) {
+            switch event {
+            case .begin: sawBlock = true
+            case .commandResultLine(_, let line, _): lines.append(line)
+            // A block that ends in `%error` is tmux refusing the command, not a list of nothing.
+            case .error: return nil
+            default: break
+            }
+        }
+
+        if !sawBlock {
+            let text = String(decoding: result.output, as: UTF8.self).lowercased()
+            let noServer = text.contains("no server running")
+                || text.contains("error connecting to")
+            return noServer ? [] : nil
+        }
+
+        return lines
+            .compactMap(parseSessionLine)
+            .map { TmuxSession(id: $0.id, name: $0.name, isAttached: $0.isAttached) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     // MARK: - Passthrough (§4.6, F4.27)
@@ -1072,19 +1193,29 @@ public actor SessionService {
     /// The three differ only in which process is spawned, which is the whole of §2.1's claim about
     /// this layer. Passthrough (§4.6) is not a second transport, a second reader, or a remote branch:
     /// it is `tmux` without `-CC`, and the plain shell is the same sentence with no tmux in it.
-    private enum ChannelFlavour {
+    enum SpawnFlavour {
         case controlMode
         /// §4.6 — one tmux client drawing itself, for a server below the control-mode floor.
         case passthroughTmux
         /// R3.8's last row — a login shell, for a host with no tmux at all.
         case plainShell
+        /// F4.4 — one question and out. The only flavour that is not a channel at all, and the only
+        /// one that never gets a tty.
+        case discovery
     }
 
-    private func invocation(
+    /// Non-private so the *assembled* invocation can be asserted, which is the gap that let a real
+    /// bug through: `sshArguments(purpose: .discovery)` was tested and correct, and the one line that
+    /// passes `.discovery` to it was missing — so every probe ran with a tty, no `BatchMode`, and a
+    /// persistent master. Testing the builder in isolation cannot catch an argument nobody passes.
+    func invocation(
         for config: HostConfig,
-        mode: TmuxCommand.AttachMode,
-        flavour: ChannelFlavour = .controlMode
+        mode: TmuxCommand.AttachMode?,
+        flavour: SpawnFlavour = .controlMode
     ) throws -> (executable: String, arguments: [String]) {
+        // Every flavour but discovery is a channel, and a channel is always attaching to something.
+        let mode = mode ?? .attachAny
+
         if config.isLocal {
             if flavour == .plainShell {
                 return TmuxCommand.localShellInvocation(
@@ -1094,17 +1225,21 @@ public actor SessionService {
             guard let tmux = PtyTransport.resolveExecutable("tmux", path: searchPath()) else {
                 throw PtyError.executableNotFound("tmux")
             }
-            return (
-                tmux,
-                flavour == .controlMode
-                    ? TmuxCommand.localArguments(mode: mode)
-                    : TmuxCommand.localPassthroughArguments(mode: mode)
-            )
+            switch flavour {
+            case .controlMode: return (tmux, TmuxCommand.localArguments(mode: mode))
+            case .passthroughTmux: return (tmux, TmuxCommand.localPassthroughArguments(mode: mode))
+            case .discovery: return (tmux, TmuxCommand.discoveryArguments())
+            case .plainShell: break  // handled above
+            }
         }
 
-        let remoteCommand = flavour == .plainShell
-            ? TmuxCommand.remoteShellCommand
-            : TmuxCommand.remoteCommand(mode: mode, controlMode: flavour == .controlMode)
+        let remoteCommand: String
+        switch flavour {
+        case .plainShell: remoteCommand = TmuxCommand.remoteShellCommand
+        case .discovery: remoteCommand = TmuxCommand.remoteDiscoveryCommand()
+        case .controlMode, .passthroughTmux:
+            remoteCommand = TmuxCommand.remoteCommand(mode: mode, controlMode: flavour == .controlMode)
+        }
 
         if let custom = config.customCommand, !custom.isEmpty {
             // The user's wrapper replaces ssh entirely; we still append our own tmux invocation so
@@ -1117,10 +1252,17 @@ public actor SessionService {
             port: config.port,
             controlPath: try controlPath(),
             remoteCommand: remoteCommand,
-            forwards: config.forwards,
+            // A probe forwards nothing. Forwards belong to the connection the user asked for, and
+            // with `ControlMaster` they belong to the *master* — so a background probe setting them
+            // up would bind the user's ports on a connection they cannot see or close.
+            forwards: flavour == .discovery ? [] : config.forwards,
             expectsPasswordPrompt: config.usesPassword,
             extraArguments: TmuxCommand.splitArguments(config.extraSshArguments),
-            forwardsX11: config.forwardsX11
+            forwardsX11: flavour == .discovery ? false : config.forwardsX11,
+            // The line this was missing. Everything above about a probe not taking a tty and not
+            // prompting is decided by this argument, and without it the whole branch was unreachable
+            // — the probe ran as a channel would: `-tt`, no `BatchMode`, and a persistent master.
+            purpose: flavour == .discovery ? .discovery : .channel
         ))
     }
 
@@ -1571,6 +1713,11 @@ public actor SessionService {
             // longer the answer to anything. Left set, it would keep the UI drawing a passthrough
             // surface over a host with a live session tree behind it.
             withHost(hostId) { $0.passthrough = nil }
+            // F4.4's probe is superseded by the channel about to answer `list-sessions`, and holding
+            // it would leave a snapshot from before the connection to resurface the next time the
+            // link drops — older than the sessions the channel itself left behind.
+            withHost(hostId) { $0.discoveredSessions = nil }
+            lastDiscovery.removeValue(forKey: hostId)
             // Whatever ssh asked for, it got: the protocol is speaking.
             withHost(hostId) { $0.authenticationPrompt = nil }
             withHost(hostId) { host in
@@ -1783,15 +1930,21 @@ public actor SessionService {
         refreshClients(hostId: hostId)
     }
 
+    /// One `list-sessions` line, in one place.
+    ///
+    /// Shared by the channel's parse and F4.4's probe, which read the *same* format string — two
+    /// readings of `sessionsFormat` is two chances for one of them to drift from it.
+    static func parseSessionLine(_ line: String) -> (id: String, isAttached: Bool, name: String)? {
+        let fields = line.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+        guard fields.count >= 3 else { return nil }
+        return (String(fields[0]), fields[1] == "1", String(fields[2]))
+    }
+
     private func applySessions(_ lines: [String], hostId: String) {
         withHost(hostId) { host in
             var seen: Set<String> = []
             for line in lines {
-                let fields = line.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
-                guard fields.count >= 3 else { continue }
-                let id = String(fields[0])
-                let attached = fields[1] == "1"
-                let name = String(fields[2])
+                guard let (id, attached, name) = Self.parseSessionLine(line) else { continue }
                 seen.insert(id)
                 if let index = host.sessions.firstIndex(where: { $0.id == id }) {
                     host.sessions[index].name = name
@@ -2973,6 +3126,10 @@ public actor SessionService {
         let userInitiated = connection.userInitiatedDisconnect
         let serverEnded = connection.serverEnded
         let attachedToSession = connection.attachedToSession
+        // Read before `teardown`, which lets the connection go.
+        let createsIfServerIsEmpty = connection.createsIfServerIsEmpty
+        let handshakeComplete = connection.handshakeComplete
+        let defaultName = hosts[hostId].map { defaultSessionName(for: $0.config) } ?? "tetmux-main"
         // A recovery attach that died before tmux ever spoke is the remembered session failing to
         // resolve — `attach-session -t <name>` exits when there is no such session. The next attempt
         // takes whatever the server still has rather than retrying a name that will never come back.
@@ -2997,6 +3154,20 @@ public actor SessionService {
             reconnectTarget.removeValue(forKey: hostId)
 
             guard attachedToSession else {
+                // Nothing to attach to. What that *means* depends on who asked: a click on a host is
+                // a request for a shell on it, so an empty server is the one case where creating one
+                // is right — and doing nothing instead is what made clicking a host look broken.
+                // Automatic recovery keeps the old behaviour, which is F4.15.
+                if createsIfServerIsEmpty {
+                    log("[\(hostId)] nothing to attach to; creating a session because the user asked to open this host")
+                    Task { [weak self] in
+                        try? await self?.connectHost(
+                            hostId: hostId,
+                            mode: .createOrAttach(sessionName: defaultName)
+                        )
+                    }
+                    return
+                }
                 // We never landed anywhere: the server is gone and there is nothing to attach to.
                 // Not a failure — the user closed the last session and this is what that looks like.
                 log("[\(hostId)] session ended and the server has nothing left; disconnected")
@@ -3034,6 +3205,20 @@ public actor SessionService {
                 )
             }
             broadcastState()
+            return
+        }
+
+        // The other shape of "nothing to attach to": no tmux server on that host at all, which never
+        // reaches a handshake — tmux says `no server running on /tmp/tmux-1000/default` and exits.
+        // Without this the click falls into the backoff and retries an attach that cannot ever
+        // succeed, eight times, and ends at `.failed` on a host that is perfectly reachable.
+        if createsIfServerIsEmpty, !handshakeComplete, Self.describesEmptyServer(reason) {
+            log("[\(hostId)] no tmux server there yet; starting one because the user asked to open this host")
+            Task { [weak self] in
+                try? await self?.connectHost(
+                    hostId: hostId, mode: .createOrAttach(sessionName: defaultName)
+                )
+            }
             return
         }
 
@@ -3141,6 +3326,45 @@ public actor SessionService {
         for subscribers in panes.values {
             for subscriber in subscribers.values { subscriber.continuation.finish() }
         }
+    }
+
+    /// What clicking a host means: **attach to what is there, and make a session only if there is
+    /// nothing to attach to.**
+    ///
+    /// Every user-initiated connect comes through here — the sidebar row, the placeholder's Connect,
+    /// the banner's Retry, the launcher, the menu bar. It is `attach-session` with **no target**,
+    /// which lands on the server's most recently used session and cannot create; only when that finds
+    /// an empty (or absent) server does a second attempt make one.
+    ///
+    /// It replaces `reconnectNow` at every one of those call sites, and the reason is a bug that made
+    /// the app look broken. Those clicks used to run the *recovery* path, which attaches by remembered
+    /// name — and with nothing remembered that name is `tetmux-main`, a session almost no server has.
+    /// tmux answers `can't find session: tetmux-main`, `%error`, `%exit`; the `%exit` handler reads
+    /// "the server has nothing left", sets `.disconnected`, and returns without retrying or saying
+    /// anything. So clicking a host with three sessions on it did *nothing at all*, silently, while
+    /// clicking one of those sessions in the tree worked — because that path names a session that
+    /// exists.
+    ///
+    /// F4.15 is untouched: it forbids *automatic* reconnection from creating, and its own text carves
+    /// out "recreation by name on explicit user action". This is that action.
+    public func openHost(hostId: String) async {
+        cancelScheduledReconnect(hostId: hostId)
+        reconnectAttempts[hostId] = 0
+        // A click is the user asserting the host is worth trying, so the name that failed last time
+        // is no longer a reason to skip straight to `attachAny` — and `attachAny` is what this uses
+        // in any case.
+        recoveryLostItsSession.remove(hostId)
+        try? await connectHost(hostId: hostId, mode: .attachAny, createIfEmpty: true)
+    }
+
+    /// tmux's own words for "there is nothing here to attach to", as opposed to a host that could not
+    /// be reached at all. Both end a channel; only the first is a reason to make a session.
+    static func describesEmptyServer(_ reason: String) -> Bool {
+        let lowered = reason.lowercased()
+        return lowered.contains("no server running")
+            || lowered.contains("no sessions")
+            || lowered.contains("error connecting to")
+            || lowered.contains("can't find session")
     }
 
     /// An explicit "reconnect now" from the user.

@@ -4,7 +4,7 @@ From the audit of 2026-08-04. Ordered by what actually breaks for a user, not by
 Each item names the evidence, because the ones that matter here are all silent failures — nothing
 in this list announces itself, which is why they survived this long.
 
-**41 done, 1 partial, 4 open, 1 parked.**
+**42 done, 1 partial, 3 open, 1 parked.**
 
 References on **done** items are as they were when the audit ran, so they point into the commit
 before each fix rather than into current `main` — they are kept because the evidence is the useful
@@ -18,10 +18,10 @@ What is left falls into three groups, and they are not equally blocked:
   P6 wants latency measured in CI on real hardware. These are decisions before they are work.
   (The R3.6 matrix was in this group and is out of it: the binaries turned out to build from source
   in about a minute each, so nothing was needed but the script to do it.)
-- **Real features, sized like features.** Copy mode, listing a host's sessions without attaching
-  (F4.4), and the §8 test infrastructure — a containerised sshd matrix, chaos tests, a full geometry
-  suite, a rendering corpus. (Passthrough was in this group and is out of it, along with R3.8's
-  "offer a plain shell" row, which was the same surface.)
+- **Real features, sized like features.** Copy mode and the §8 test infrastructure — a containerised
+  sshd matrix, chaos tests, a full geometry suite, a rendering corpus. (Passthrough left this group,
+  along with R3.8's "offer a plain shell" row, which was the same surface, and F4.4's discovery,
+  which turned out to be one command and a rule about when it may run.)
 - **Small and unblocked.** Nothing, for the moment. The four that were here — per-host OSC 52, an
   editable keymap, ⌘⌥V's literal escape, and a start directory for localhost — are done, along with
   tab reordering, `move-window`, and workspace restoration from the group above.
@@ -422,10 +422,29 @@ What is left falls into three groups, and they are not equally blocked:
   `updateValue`, since assigning `nil` through a `[String: String?]` subscript removes the key instead
   of storing a null and an unbound shortcut would come back bound.*
 
-- [ ] **F4.4** never lists a host's sessions without attaching — `list-sessions` only goes down an
+- [x] **F4.4** never lists a host's sessions without attaching — `list-sessions` only goes down an
   already-attached channel, so the only way to see what is on a host is `connectHost`, which
   attaches and can create.
   `Sources/tetmuxCore/Session/SessionService.swift:460`, `:1374-1376`
+  *`tmux -C list-sessions`, the SRD's own prescription, over the `ControlMaster` socket that is
+  already there. What it is *for* is the second half of that entry rather than the first: the list is
+  only worth having because clicking an unconnected host runs `new-session -A -s tetmux-main`, so a
+  host with the user's own work on it got a second, empty session made before anyone saw what was
+  there. A discovered session attaches by name with `attach-session`, which cannot create.
+  Two things had to be probed rather than reasoned about, and both are load-bearing. **`tmux -C`
+  reads commands until its input ends**, so `tmux -C list-sessions` prints the answer and then hangs
+  forever — every caller hands it `/dev/null`, and a probe that hangs is worse than no probe because
+  nothing above it is watching. And **the answer is `%begin`-framed while the failures are not**,
+  which is what lets `ControlCodec` pick the list out of an ssh banner and what tells "this host has
+  nothing" from "we could not ask". That distinction is the whole reason `discoveredSessions` is an
+  optional: recording an unreachable host as empty tells somebody their sessions are gone because
+  their laptop is on a train.
+  The probe cannot prompt (`BatchMode=yes`, and a pipe rather than a pty, so there is nowhere to ask),
+  cannot create, cannot attach, and changes no connection state; a host it fails on simply shows what
+  it showed before. Triggers are F4.4's two and no others — expanding a host, opening the launcher,
+  and window focus — with a 30 s freshness window so flapping between two windows costs one probe.
+  The accepted limit: a password host with no live master answers nothing until it has been connected
+  once, which is the price of never raising a sheet nobody asked for.*
 
 - [x] **F4.11** has no `detach-client`: disconnect tears the pty down with `SIGHUP` instead. And
   `newSession` accepts a start directory that no caller passes.
