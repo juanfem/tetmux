@@ -132,6 +132,10 @@ public final class AppModel {
         public let windowName: String
         public let paneCount: Int
         public let runningCommands: [String]
+        /// The session the window is being closed from, which is also its *only* one — this request
+        /// is raised nowhere else (F4.9). Carried so the confirmation can name the other clients
+        /// attached to it: a kill takes the window out from under every one of them.
+        public let sessionId: String?
     }
 
     /// A session the user asked to kill, pending confirmation.
@@ -714,12 +718,17 @@ public final class AppModel {
 
     /// F4.10 — the confirmation names the window, its pane count, and what is running in it.
     private func closeRequest(hostId: String, window: TmuxWindow) -> PendingClose {
-        PendingClose(
+        // Whoever else is attached is about to lose this window, so the confirmation asks for a fresh
+        // answer on its way up. It reads the model live, so a list arriving after it is on screen
+        // still lands in it.
+        refreshClients(hostId: hostId)
+        return PendingClose(
             hostId: hostId,
             windowId: window.id,
             windowName: window.name,
             paneCount: window.paneCount,
-            runningCommands: window.panes.map(\.command).filter { !$0.isEmpty }
+            runningCommands: window.panes.map(\.command).filter { !$0.isEmpty },
+            sessionId: linkedSessions(hostId: hostId, windowId: window.id).first?.id
         )
     }
 
@@ -1072,6 +1081,10 @@ public final class AppModel {
             killSession(hostId: hostId, sessionId: sessionId)
             return
         }
+        // The list on screen is worth what it was when it was last read, and this is the question it
+        // exists to answer. Asked here rather than in the sheet: a view that issues commands as a
+        // side effect of being drawn issues them again every time SwiftUI redraws it.
+        refreshClients(hostId: hostId)
         state.pendingKillSession = PendingKillSession(
             hostId: hostId,
             sessionId: sessionId,
@@ -1081,6 +1094,49 @@ public final class AppModel {
                 .flatMap { $0.panes.map(\.command) }
                 .filter { !$0.isEmpty }
         )
+    }
+
+    /// The clients attached to a session that are not this application's own (F4.10).
+    ///
+    /// Killing is not private: `kill-session` ends the session for everyone attached to it, and a
+    /// window killed because it was in one session only goes with it. Until the confirmation could
+    /// say this it described the panes and never the people, so "close this stale-looking session"
+    /// and "close the session a colleague is working in" read identically.
+    public func otherClients(hostId: String, sessionId: String?) -> [TmuxClient] {
+        guard let sessionId, let host = hosts.first(where: { $0.id == hostId }) else { return [] }
+        // By tty, so a list of several is stable between refreshes rather than reordering under the
+        // pointer whenever somebody types.
+        return host.otherClients(attachedTo: sessionId).sorted { $0.tty < $1.tty }
+    }
+
+    /// Whether the host can currently answer the question above at all.
+    ///
+    /// A disconnected host's client list is whatever it was when the link died, and presenting that
+    /// as "nobody else is attached" is the one wrong answer here — the confirmation says so instead.
+    public func knowsAttachedClients(hostId: String) -> Bool {
+        hosts.first { $0.id == hostId }?.connectionState.isActive ?? false
+    }
+
+    /// The same fact in a phrase, for a control whose click may never raise the confirmation.
+    ///
+    /// ⌥ skips the sheet, which is the one gesture that would otherwise destroy somebody else's
+    /// session without ever mentioning them — the argument the linked-window badge already makes for
+    /// saying beforehand what a click will do. `nil` when there is nobody to name, so a tooltip does
+    /// not grow a clause on every session that has only us in it.
+    public func otherClientsSummary(hostId: String, sessionId: String?) -> String? {
+        let clients = otherClients(hostId: hostId, sessionId: sessionId)
+        guard !clients.isEmpty else { return nil }
+        // Names them while there are few enough to name, for the reason `closeDescription` does:
+        // "me on /dev/ttys004" is checkable and "3 clients" is a number to go and resolve.
+        let named = clients.prefix(2).map(\.displayName).joined(separator: ", ")
+        let rest = clients.count > 2 ? " and \(clients.count - 2) more" : ""
+        return clients.count == 1
+            ? "1 other client is attached (\(named))"
+            : "\(clients.count) other clients are attached (\(named)\(rest))"
+    }
+
+    public func refreshClients(hostId: String) {
+        Task { await service.refreshClients(hostId: hostId) }
     }
 
     public func confirmKillSession(in state: WindowState) {

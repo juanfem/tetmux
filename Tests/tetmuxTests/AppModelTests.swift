@@ -195,6 +195,86 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.closeWindow(hostId: "nope", window: window("@1")))
     }
 
+    // MARK: - Who else is attached (F4.10)
+
+    /// The confirmation reports the clients a kill would throw out — everyone but us.
+    ///
+    /// Our own channels are filtered because they are this application: counting them turns "you are
+    /// alone in here" into "2 clients attached" and makes the warning worthless on the occasion it
+    /// matters. Session-scoped for the same reason: a client attached to a different session of the
+    /// same server loses nothing when this one dies.
+    func testOtherClientsExcludesOurOwnChannelsAndOtherSessions() {
+        let model = makeModel()
+        var host = host(sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [window("@1")], isAttached: true),
+            TmuxSession(id: "$2", name: "two", windows: [window("@2")]),
+        ])
+        host.clients = [
+            TmuxClient(tty: "/dev/ttys009", sessionId: "$1", user: "ada"),
+            TmuxClient(tty: "/dev/ttys001", sessionId: "$1", user: "me", isControlMode: true, isOurs: true),
+            TmuxClient(tty: "/dev/ttys004", sessionId: "$1", user: "grace"),
+            TmuxClient(tty: "/dev/ttys007", sessionId: "$2", user: "elsewhere"),
+        ]
+        model.hosts = [host]
+
+        XCTAssertEqual(
+            model.otherClients(hostId: "local", sessionId: "$1").map(\.tty),
+            ["/dev/ttys004", "/dev/ttys009"],
+            "ours is excluded, another session's is excluded, and the rest are ordered by tty"
+        )
+        XCTAssertEqual(model.otherClients(hostId: "local", sessionId: "$2").map(\.user), ["elsewhere"])
+        XCTAssertTrue(model.otherClients(hostId: "local", sessionId: nil).isEmpty)
+    }
+
+    /// ⌥ skips the confirmation, so the tooltip is the only place the warning can appear — and it
+    /// names the clients while there are few enough to name, exactly as `closeDescription` does.
+    func testOtherClientsSummaryNamesThemAndIsSilentWhenWeAreAlone() {
+        let model = makeModel()
+        var host = host(sessions: [TmuxSession(id: "$1", name: "one", windows: [window("@1")])])
+        host.clients = [TmuxClient(tty: "/dev/ttys001", sessionId: "$1", isOurs: true)]
+        model.hosts = [host]
+
+        XCTAssertNil(
+            model.otherClientsSummary(hostId: "local", sessionId: "$1"),
+            "a tooltip that reports the ordinary case says nothing"
+        )
+
+        host.clients.append(TmuxClient(tty: "/dev/ttys004", sessionId: "$1", user: "ada"))
+        model.hosts = [host]
+        XCTAssertEqual(
+            model.otherClientsSummary(hostId: "local", sessionId: "$1"),
+            "1 other client is attached (ada on /dev/ttys004)"
+        )
+
+        host.clients.append(TmuxClient(tty: "/dev/ttys005", sessionId: "$1", user: "grace"))
+        host.clients.append(TmuxClient(tty: "/dev/ttys006", sessionId: "$1", user: "alan"))
+        model.hosts = [host]
+        XCTAssertEqual(
+            model.otherClientsSummary(hostId: "local", sessionId: "$1"),
+            "3 other clients are attached (ada on /dev/ttys004, grace on /dev/ttys005 and 1 more)"
+        )
+    }
+
+    /// A client with no user — tmux below 3.3 has no `client_user` — is still a client, and is still
+    /// named by the field tmux does have.
+    func testAClientWithNoUserIsStillNamedByItsTty() {
+        XCTAssertEqual(TmuxClient(tty: "/dev/ttys004", sessionId: "$1").displayName, "/dev/ttys004")
+    }
+
+    /// The close confirmation is raised only for a window in one session (F4.9), and it carries that
+    /// session so the sheet can ask who else is in it. Without the id the sheet has nothing to look
+    /// the clients up by and silently reports an empty list, which reads as "nobody is attached".
+    func testACloseConfirmationCarriesTheSessionItWouldKillTheWindowIn() {
+        let only = window("@7", name: "build")
+        let model = makeModel()
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$3", name: "one", windows: [only], isAttached: true),
+        ])]
+
+        let pending = model.closeWindow(hostId: "local", window: only)
+        XCTAssertEqual(pending?.sessionId, "$3")
+    }
+
     // MARK: - Default session names
 
     /// The first session on a host with none takes index 1, not 0.

@@ -113,8 +113,31 @@ public enum TmuxCommand {
     /// from a control client answers `/dev/ttys007`). `client_control_mode` is the tag that actually
     /// exists. Every tetmux channel is a control-mode client and an ordinary terminal is not, so
     /// "control-mode, and not one of the ttys we are holding" is the orphan.
+    ///
+    /// The rest of it is who else is looking at a session, which is what the kill confirmation needs:
+    /// `kill-session` ends the session for every client attached to it, and until the confirmation
+    /// could say so it was describing a smaller act than the one it was asking for.
+    ///
+    /// `#{session_id}` rather than the `#{client_session}` name this used to carry, for two reasons.
+    /// A session name is user data and may contain `|`, which is the field separator — the old parse
+    /// happened not to read past it. And a client has to be attributed to a session by the same key
+    /// the model uses, which is the `$id`. Verified in `list-clients` on 3.0 through 3.7b: the format
+    /// is evaluated with the client's own session in scope, so `#{session_id}` is that client's.
+    ///
+    /// **Nothing here says where the client connected from, because tmux does not know.** A client is
+    /// a process on the server's machine holding a tty; when someone reaches it over ssh, the origin
+    /// address is the ssh daemon's business and never enters tmux's model — there is no
+    /// `client_host`, and `#{host}` is the *server's* hostname, the same for every row. What tmux can
+    /// name a stranger by is the unix user, the tty, and the terminal type. Deriving more would mean
+    /// `run-shell` and `who` on the far side, which is a shell command tetmux does not get to run on
+    /// somebody's server to decorate a dialog.
+    ///
+    /// `client_user` arrived in tmux 3.3 (empty on 3.0 and 3.2a, checked against the matrix builds).
+    /// An unknown `#{...}` expands to nothing rather than failing the command, so older servers lose
+    /// the field and keep the row.
     public static let clientsFormat =
-        "#{client_tty}|#{client_control_mode}|#{client_session}|#{client_flags}"
+        "#{client_tty}|#{client_control_mode}|#{session_id}|#{client_activity}"
+        + "|#{client_user}|#{client_termname}"
 
     /// The tty of the client on the other end of *this* channel, which is how a channel recognises
     /// itself in the list above.

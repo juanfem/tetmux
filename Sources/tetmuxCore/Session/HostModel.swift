@@ -271,6 +271,67 @@ public struct TmuxSession: Identifiable, Equatable, Sendable {
     }
 }
 
+/// A tmux client attached to this server — one row of `list-clients`.
+///
+/// It exists because killing is not a private act. `kill-session` ends the session for everyone
+/// attached to it, and closing the last link of a window kills the window in every client showing it
+/// — so the confirmation that asks about it has to be able to say who else is there. Before this it
+/// described the panes and said nothing about the people.
+///
+/// What tmux can say about a stranger is here and no more: the unix user, the tty, the terminal type,
+/// and when they last did something. There is no client hostname or address in tmux's model — see
+/// `TmuxCommand.clientsFormat` — so this deliberately carries none rather than inventing one.
+public struct TmuxClient: Identifiable, Equatable, Sendable {
+    /// The tty is tmux's own name for a client: `client_name` *is* the tty, and `detach-client -t`
+    /// takes it. Unique per client for as long as the client exists, which is the whole lifetime of
+    /// anything the model does with one.
+    public var id: String { tty }
+    public let tty: String
+    /// The `$id` of the session this client is attached to.
+    public let sessionId: String
+    /// Empty below tmux 3.3, which has no `client_user`.
+    public let user: String
+    /// `client_termname`, e.g. `xterm-256color`. Empty for a control-mode client on some versions.
+    public let terminal: String
+    /// A `tmux -CC` client: tetmux's own channels, and anything else speaking control mode.
+    public let isControlMode: Bool
+    /// One of *this* tetmux's channels, matched by tty against the ttys our channels reported.
+    ///
+    /// A channel that has not yet answered `#{client_tty}` cannot be recognised, so a client can
+    /// briefly look like a stranger — the same window F4.17's reconciliation skips itself in. It is
+    /// visible rather than hidden: the row says "control mode", which is what tells the two apart.
+    public let isOurs: Bool
+    /// `client_activity` — when this client last did anything. The difference between a colleague at
+    /// work in the session and a terminal somebody left open in another space last Tuesday.
+    public let lastActivity: Date?
+
+    public init(
+        tty: String,
+        sessionId: String,
+        user: String = "",
+        terminal: String = "",
+        isControlMode: Bool = false,
+        isOurs: Bool = false,
+        lastActivity: Date? = nil
+    ) {
+        self.tty = tty
+        self.sessionId = sessionId
+        self.user = user
+        self.terminal = terminal
+        self.isControlMode = isControlMode
+        self.isOurs = isOurs
+        self.lastActivity = lastActivity
+    }
+
+    /// How the client is named in a sentence: the user when tmux knows it, and the tty either way.
+    ///
+    /// The tty is never dropped. It is the only field that distinguishes two clients of the same
+    /// user, which on a personal machine is *every* pair of them.
+    public var displayName: String {
+        user.isEmpty ? tty : "\(user) on \(tty)"
+    }
+}
+
 /// An ssh port forward carried by a host's control channel — `-L`, `-R`, or `-D`.
 ///
 /// §1.2 rules out a port-forward *management* UI, and this is not one: a forward is a property of how
@@ -546,9 +607,25 @@ public struct HostState: Identifiable, Equatable, Sendable {
     /// A session whose channel is still connecting is included: it is about to be live, and a
     /// banner that appears for a moment and withdraws is worse than no banner at all.
     public var liveSessionIds: Set<String> = []
+    /// Every client attached to this server, tetmux's own channels included and marked as such.
+    ///
+    /// Re-read on each topology refresh and whenever tmux says a client came or went, so the
+    /// destructive confirmations can name who else is in the session they are about to end. It is not
+    /// the same fact as `TmuxSession.isAttached`, which is a count with nobody's name on it, nor as
+    /// `liveSessionIds`, which is only ever about us.
+    public var clients: [TmuxClient] = []
 
     public var activeSession: TmuxSession? {
         sessions.first { $0.id == activeSessionId } ?? sessions.first
+    }
+
+    /// The clients attached to a session that are *not* ours — the ones a kill would throw out.
+    ///
+    /// Ours are excluded because they are this application: telling the user that killing a session
+    /// will detach the window they are killing it from is noise, and counting them would turn "you
+    /// are alone in here" into "3 clients attached".
+    public func otherClients(attachedTo sessionId: String) -> [TmuxClient] {
+        clients.filter { $0.sessionId == sessionId && !$0.isOurs }
     }
 
     /// Whether this host is streaming a session's panes rather than showing a still frame of them.
@@ -566,7 +643,8 @@ public struct HostState: Identifiable, Equatable, Sendable {
         rttMilliseconds: Double? = nil,
         authenticationPrompt: AuthenticationPrompt? = nil,
         lastCommandFailure: CommandFailure? = nil,
-        liveSessionIds: Set<String> = []
+        liveSessionIds: Set<String> = [],
+        clients: [TmuxClient] = []
     ) {
         self.config = config
         self.connectionState = connectionState
@@ -577,6 +655,7 @@ public struct HostState: Identifiable, Equatable, Sendable {
         self.authenticationPrompt = authenticationPrompt
         self.lastCommandFailure = lastCommandFailure
         self.liveSessionIds = liveSessionIds
+        self.clients = clients
     }
 
     public func window(_ windowId: String) -> TmuxWindow? {

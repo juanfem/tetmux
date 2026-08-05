@@ -474,6 +474,25 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   that says why (F4.10, no "don't ask again" escape). Both halves have a regression test, including
   one asserting tmux still refuses; if that ever stops being true the confirmation can go.
   `%window-close` cannot distinguish the two, so it schedules a topology refresh rather than guessing.
+- **A kill is not private, so the confirmation names who else is attached (F4.10).** `kill-session`
+  ends the session for every client attached to it, and a window killed because it was in one session
+  goes out from under all of them too — the dialog described the panes and never the people, so
+  "close this stale-looking session" and "close the session a colleague is working in" read
+  identically. `HostState.clients` is `list-clients` kept in the model, and the *absence* of others is
+  stated just as plainly, since that is what makes the section trustworthy when it says otherwise.
+  Three things about it. **The detach pass belongs to an attach and nothing else**:
+  `Kind.listClients(reconcileStale:)` splits F4.17's orphan hunt from the plain re-read, or a refresh
+  on every window rename would turn a known blast radius (two live tetmuxen detaching each other once)
+  into a fight. **Our own channels are marked and excluded** — matched by tty against what each channel
+  answered for `#{client_tty}`, the same "ours" F4.17 uses — or the dialog warns the user about
+  themselves every time. And **tmux does not know where a client connected from**: there is no
+  `client_host`, `#{host}` is the *server's* hostname, and an ssh origin never enters tmux's model, so
+  a client is named by unix user, tty and terminal type and the sheet says so rather than letting
+  `ada on /dev/ttys004` be read as a claim about which machine that is. Freshness is `%client-detached`
+  and `%client-session-changed` (verified on 3.7b; `%client-detached` needs 3.2, so the topology
+  refresh re-reads the list as well), plus one more read on the way to raising the sheet — which the
+  sheet picks up because it reads the model rather than a snapshot. `client_user` is empty below 3.3
+  and the row keeps its tty.
 - **A linked window says so, because the link is what decides whether closing it is reversible.**
   `AppModel.closeOutcome` is the single decision and both the action and the tooltips ask it, so a
   control cannot promise something the click will not do. That matters most with ⌥ held, which skips

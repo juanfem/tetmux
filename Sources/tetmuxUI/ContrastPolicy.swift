@@ -51,6 +51,23 @@ enum ContrastPolicy {
         contrast == .increased ? max(standard, 0.85) : standard
     }
 
+    /// Small print that qualifies something above it — the footnote under the destructive
+    /// confirmation's client list, saying what tmux does and does not know about a client.
+    ///
+    /// The same rule as `recessedOpacity`, one level up in the text hierarchy instead of in opacity:
+    /// tertiary at caption size is the faintest thing this application draws, and a caveat nobody can
+    /// read is a caveat that is not there. It stays a footnote — no size change, no weight change,
+    /// nothing appears — because the point is legibility, not promotion.
+    ///
+    /// A `Color` rather than `HierarchicalShapeStyle.tertiary`/`.secondary`, which is what this
+    /// would otherwise be: those two are not comparable, so a test could not assert the *direction*,
+    /// and the failure this whole type exists to catch is a site that takes the same value in both
+    /// branches. The standard value is macOS's tertiary label alpha, so nothing changes for a user
+    /// who has not asked for anything.
+    static func footnoteColor(_ contrast: ColorSchemeContrast) -> Color {
+        Color.primary.opacity(contrast == .increased ? 0.62 : 0.26)
+    }
+
     /// A hairline that only has to be *visible*, not decorative: panel edges, dividers between rows.
     static func hairline(_ contrast: ColorSchemeContrast) -> Color {
         Color.primary.opacity(contrast == .increased ? 0.35 : 0.08)

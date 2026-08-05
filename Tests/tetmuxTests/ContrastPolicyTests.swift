@@ -63,6 +63,16 @@ final class ContrastPolicyTests: XCTestCase {
         XCTAssertEqual(ContrastPolicy.recessedOpacity(.standard, standard: 0.35), 0.35)
     }
 
+    /// The confirmation's footnote — what tmux does and does not know about an attached client — is
+    /// the faintest text in the application, and a caveat nobody can read is a caveat that is not
+    /// there. It comes forward without becoming body text.
+    func testFootnoteTextComesForward() {
+        let increased = opacity(of: ContrastPolicy.footnoteColor(.increased))
+        let standard = opacity(of: ContrastPolicy.footnoteColor(.standard))
+        XCTAssertGreaterThan(increased, standard)
+        XCTAssertLessThan(increased, 1.0)
+    }
+
     /// A caller that is already at or above the floor must not be pulled *down* by asking.
     func testAlreadyLegibleValuesAreNotLowered() {
         XCTAssertEqual(ContrastPolicy.recessedOpacity(.increased, standard: 0.95), 0.95)

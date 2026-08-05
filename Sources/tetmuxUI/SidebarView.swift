@@ -464,9 +464,7 @@ struct SidebarView: View {
                 // killing — unless ⌥ is down, which is how a run of them becomes one click each.
                 RowButton(
                     glyph: .cross,
-                    help: modifiers.isOptionHeld
-                        ? "Kill \(session.name) without asking"
-                        : "Kill \(session.name)",
+                    help: killHelp(host: host, session: session),
                     isVisible: hoveredRow == rowKey || isSelected,
                     isArmed: modifiers.isOptionHeld
                 ) {
@@ -485,6 +483,21 @@ struct SidebarView: View {
             "Session \(session.name), \(session.windows.count) windows, "
                 + (host.isLive(session.id) ? "attached" : "not attached")
         )
+    }
+
+    /// The kill button's tooltip, which is the only warning the ⌥ path gives.
+    ///
+    /// With ⌥ down the click kills without a confirmation, so this is the last place anything can
+    /// mention that the session belongs to somebody else too. Silent when it is ours alone — the
+    /// confirmation says that, and a tooltip that reports the ordinary case says nothing.
+    private func killHelp(host: HostState, session: TmuxSession) -> String {
+        let base = modifiers.isOptionHeld
+            ? "Kill \(session.name) without asking"
+            : "Kill \(session.name)"
+        guard let others = model.otherClientsSummary(hostId: host.id, sessionId: session.id) else {
+            return base
+        }
+        return "\(base) — \(others)"
     }
 
     @ViewBuilder

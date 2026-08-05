@@ -245,6 +245,8 @@ public actor SessionService {
         /// its own size back, forever. The focused view owns the size; the other letterboxes.
         var windowSizeOwners: [String: UUID] = [:]
         var windowResizeTask: Task<Void, Never>?
+        /// Debounce for re-reading `list-clients` after tmux says a client came, went, or moved.
+        var clientRefreshTask: Task<Void, Never>?
 
         /// Callers waiting for tmux to answer a command they sent, by command id.
         ///
@@ -265,6 +267,7 @@ public actor SessionService {
             resizeTask?.cancel()
             windowResizeTask?.cancel()
             topologyRefreshTask?.cancel()
+            clientRefreshTask?.cancel()
             handshakeWatchdog?.cancel()
         }
     }
@@ -288,7 +291,13 @@ public actor SessionService {
             case listSessions
             case listWindows
             case listPanes
-            case listClients
+            /// `reconcileStale` is F4.17's detach pass, which belongs to an *attach* and to nothing
+            /// else. The same answer is now also read for the model — who else is attached, which the
+            /// destructive confirmations report — and that runs on every topology refresh. Sharing
+            /// one kind would have made every refresh a round of orphan-hunting: two live tetmuxen
+            /// against one server already detach each other on attach, and doing it every time a
+            /// window is renamed turns a known, bounded blast radius into a fight.
+            case listClients(reconcileStale: Bool)
             /// This channel's own `client_tty`, so it can exclude itself from the list above.
             case clientTty
             /// `target` scopes the repaint to a single subscriber. The same pane can be on screen in
@@ -1110,8 +1119,14 @@ public actor SessionService {
         case .message(let text):
             log("[\(hostId)] tmux message: \(text)")
 
+        // Somebody else attached, detached, or switched session. Only the client list changed, so
+        // this is not a topology refresh — but it is the thing a kill confirmation reports, and
+        // nothing else would tell us. Verified on 3.7b: a plain `tmux attach` from another terminal
+        // emits `%client-session-changed <tty> $id <name>` and killing it emits `%client-detached
+        // <tty>`. `%client-detached` needs tmux ≥ 3.2 (3.0 emits nothing when a client leaves), which
+        // is why the topology refresh re-reads the list as well rather than trusting these alone.
         case .clientDetached, .clientSessionChanged:
-            break
+            scheduleClientRefresh(hostId: hostId)
 
         case .exit(let reason):
             log("[\(hostId)] %exit \(reason ?? "")")
@@ -1229,7 +1244,7 @@ public actor SessionService {
         // depends on it, and choosing wrongly either collapses every pane toward 80x24 or leaves a
         // torn-off window unable to size itself. See `applyWindowSizePolicy`.
         send("list-clients -F \(TmuxCommand.quote(TmuxCommand.clientsFormat))",
-             kind: .listClients, hostId: hostId, connection: connection)
+             kind: .listClients(reconcileStale: true), hostId: hostId, connection: connection)
         // One channel's worth of topology is the whole server's, so a follower asking again would
         // only duplicate three round trips and one broadcast.
         if connection.isPrimary {
@@ -1298,8 +1313,9 @@ public actor SessionService {
         case .clientTty:
             connection.clientTty = text().first?.trimmingCharacters(in: .whitespaces)
 
-        case .listClients:
-            reconcileStaleClients(text(), hostId: hostId)
+        case .listClients(let reconcileStale):
+            let clients = applyClients(text(), hostId: hostId)
+            if reconcileStale { reconcileStaleClients(clients, hostId: hostId) }
 
         case .capturePane(let paneId, let target):
             deliver(Self.repaintPayload(from: command.lines), hostId: hostId, paneId: paneId, target: target)
@@ -1384,6 +1400,41 @@ public actor SessionService {
              kind: .listWindows, hostId: hostId, connection: connection)
         send("list-panes -a -F \(TmuxCommand.quote(TmuxCommand.panesFormat))",
              kind: .listPanes, hostId: hostId, connection: connection)
+        // Who else is attached, without the detach pass — see `Kind.listClients`. A session gaining
+        // or losing a client is not a topology change and produces no notification below tmux 3.2, so
+        // without this the list would only ever be as fresh as the last attach.
+        send("list-clients -F \(TmuxCommand.quote(TmuxCommand.clientsFormat))",
+             kind: .listClients(reconcileStale: false), hostId: hostId, connection: connection)
+    }
+
+    /// Re-reads the client list alone.
+    ///
+    /// Public because a destructive confirmation is the one moment this has to be *current* rather
+    /// than merely recent: it is about to tell somebody they are alone in a session. The sheet reads
+    /// the model live, so an answer arriving a round trip after it opened corrects what it says.
+    public func refreshClients(hostId: String) {
+        guard let connection = connections[hostId], connection.handshakeComplete else { return }
+        send("list-clients -F \(TmuxCommand.quote(TmuxCommand.clientsFormat))",
+             kind: .listClients(reconcileStale: false), hostId: hostId, connection: connection)
+    }
+
+    /// Debounced client refresh for `%client-session-changed` and `%client-detached`.
+    ///
+    /// Its own task slot rather than the topology one, for the reason the pane refresh has its own:
+    /// these fire on their own schedule — every client attaching, detaching, or switching session —
+    /// and folding them into the topology debounce would let one narrow the other.
+    private func scheduleClientRefresh(hostId: String) {
+        guard let connection = connections[hostId], connection.handshakeComplete else { return }
+        guard connection.clientRefreshTask == nil else { return }
+        connection.clientRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            await self?.runScheduledClientRefresh(hostId: hostId)
+        }
+    }
+
+    private func runScheduledClientRefresh(hostId: String) {
+        connections[hostId]?.clientRefreshTask = nil
+        refreshClients(hostId: hostId)
     }
 
     private func applySessions(_ lines: [String], hostId: String) {
@@ -2257,24 +2308,57 @@ public actor SessionService {
     /// answered `#{client_tty}` is indistinguishable from an orphan, and detaching it would kill a
     /// client we opened a moment ago. If any channel of this host has no tty yet, the whole pass is
     /// skipped — the next attach runs it again.
-    private func reconcileStaleClients(_ lines: [String], hostId: String) {
-        let ours = channels(of: hostId).map(\.clientTty)
-        guard !ours.contains(where: { $0 == nil }) else {
+    private func reconcileStaleClients(_ clients: [TmuxClient], hostId: String) {
+        guard !channels(of: hostId).contains(where: { $0.clientTty == nil }) else {
             log("[\(hostId)] skipping client reconciliation: a channel has not identified itself yet")
             return
         }
-        let ourTtys = Set(ours.compactMap { $0 })
 
-        for line in lines {
-            let fields = line.split(separator: "|", maxSplits: 3, omittingEmptySubsequences: false)
-            guard fields.count >= 2 else { continue }
-            let tty = String(fields[0])
-            let isControlMode = fields[1] == "1"
-            guard isControlMode, !tty.isEmpty, !ourTtys.contains(tty) else { continue }
-
-            log("[\(hostId)] detaching orphaned control-mode client \(tty)")
-            send("detach-client -t \(TmuxCommand.quote(tty))", kind: .ignore, hostId: hostId)
+        // `isOurs` is that same tty comparison, made once where the row was parsed. The guard above
+        // is still the one that matters: it is what stops an unidentified channel of our own from
+        // being read as an orphan and detached a moment after we opened it.
+        for client in clients where client.isControlMode && !client.isOurs && !client.tty.isEmpty {
+            log("[\(hostId)] detaching orphaned control-mode client \(client.tty)")
+            send("detach-client -t \(TmuxCommand.quote(client.tty))", kind: .ignore, hostId: hostId)
         }
+    }
+
+    /// Parses `list-clients` into the model: who is attached to this server, and which of them is us.
+    ///
+    /// Returns the parsed rows as well as storing them, because the F4.17 detach pass reads the same
+    /// answer and re-parsing it to decide would be two readings of one fact.
+    ///
+    /// Tolerant by field count rather than strict: `client_user` does not exist below tmux 3.3, and a
+    /// row for a client with no session is not a row worth dropping the whole list over. A client
+    /// tetmux cannot describe is still a client that a kill would throw out, and saying "one other
+    /// client, and I cannot tell you whose" beats saying nothing.
+    @discardableResult
+    private func applyClients(_ lines: [String], hostId: String) -> [TmuxClient] {
+        let ourTtys = Set(channels(of: hostId).compactMap(\.clientTty))
+
+        let clients: [TmuxClient] = lines.compactMap { line in
+            let fields = line.split(separator: "|", maxSplits: 5, omittingEmptySubsequences: false)
+            guard fields.count >= 3 else { return nil }
+            let tty = String(fields[0])
+            guard !tty.isEmpty else { return nil }
+            let field = { (index: Int) in fields.count > index ? String(fields[index]) : "" }
+            // `client_activity` is a unix timestamp from the *server's* clock. A remote host with a
+            // clock that disagrees with this one would report an idle time that is wrong by the
+            // difference — which is why the UI says "active 5 minutes ago" and never a wall time.
+            let activity = Double(field(3)).map { Date(timeIntervalSince1970: $0) }
+            return TmuxClient(
+                tty: tty,
+                sessionId: String(fields[2]),
+                user: field(4),
+                terminal: field(5),
+                isControlMode: fields[1] == "1",
+                isOurs: ourTtys.contains(tty),
+                lastActivity: activity
+            )
+        }
+
+        withHost(hostId) { $0.clients = clients }
+        return clients
     }
 
     private func forgetWindowGeometry(hostId: String, windowId: String) {

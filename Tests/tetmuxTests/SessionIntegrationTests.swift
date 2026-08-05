@@ -1169,6 +1169,90 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// F4.10 — the model knows who else is attached, and knows which of them is us.
+    ///
+    /// This is what the destructive confirmations report: `kill-session` ends the session for every
+    /// client attached to it, so a dialog that names only the panes is describing a smaller act than
+    /// the one it is asking for. Against a real server rather than a parsed fixture, because the two
+    /// facts that can be wrong are both about reality — that `#{session_id}` in `list-clients` is the
+    /// *client's* session, and that our own channel is recognised by tty rather than counted as a
+    /// stranger. Get the second wrong and the dialog warns the user about themselves, every time.
+    func testAttachedClientsAreListedAndOurOwnChannelIsNotCountedAsAStranger() async throws {
+        runTmux(["new-session", "-d", "-s", sessionName, "-x", "100", "-y", "30"])
+
+        // A colleague in another terminal, which is exactly a plain `tmux attach` on a pty.
+        let bystander = PtyTransport()
+        let bystanderStream = try bystander.spawn(
+            executable: try XCTUnwrap(PtyTransport.resolveExecutable("tmux")),
+            arguments: ["attach-session", "-t", sessionName],
+            environment: Self.childLikeEnvironment(),
+            initialSize: (cols: 80, rows: 24)
+        )
+        let drain = Task { for try await _ in bystanderStream {} }
+        defer { drain.cancel(); bystander.terminate() }
+
+        let session = sessionName
+        _ = try await waitFor(seconds: 10) { !Self.clientTtys(of: session).isEmpty }
+        let bystanderTty = try XCTUnwrap(Self.clientTtys(of: session).first)
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let connected = try await waitForHost(service) { $0.sessions.contains { $0.name == session } }
+        let sessionId = try XCTUnwrap(connected.sessions.first { $0.name == session }).id
+
+        // `waitFor` and an explicit assertion rather than `waitForHost`, which skips on timeout —
+        // and a skip is exactly as green as a pass for a test whose whole subject is a warning that
+        // must appear.
+        let listed = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.otherClients(attachedTo: sessionId)
+                .contains { $0.tty == bystanderTty } ?? false
+        }
+        XCTAssertTrue(listed, "the attached terminal never reached the model as another client")
+
+        let snapshot = await service.getHost("local")
+        let host = try XCTUnwrap(snapshot)
+        let stranger = try XCTUnwrap(host.clients.first { $0.tty == bystanderTty })
+        XCTAssertFalse(stranger.isOurs)
+        XCTAssertFalse(stranger.isControlMode, "a plain `tmux attach` is not a control-mode client")
+        XCTAssertEqual(stranger.sessionId, sessionId, "the client was attributed to the wrong session")
+        XCTAssertNotNil(stranger.lastActivity)
+
+        // Our own channel is in the list too, and marked. It is the reason `otherClients` exists:
+        // telling somebody that killing a session will detach the window they are killing it from is
+        // not information.
+        let ours = host.clients.filter(\.isOurs)
+        XCTAssertEqual(ours.count, 1, "expected exactly this channel's client to be marked as ours")
+        XCTAssertTrue(try XCTUnwrap(ours.first).isControlMode)
+        XCTAssertFalse(
+            host.otherClients(attachedTo: sessionId).contains { $0.isOurs },
+            "our own client was reported as somebody else's"
+        )
+
+        // Unwrapped rather than `if let`: a nil version would silently skip both checks below, and a
+        // check that skips itself is the failure mode the whole suite is written against.
+        let version = try XCTUnwrap(host.tmuxVersion.flatMap(TmuxVersion.init))
+
+        // `client_user` arrived in tmux 3.3; below it tmux has no answer and the row keeps the tty.
+        if version >= TmuxVersion("3.3")! {
+            XCTAssertFalse(stranger.user.isEmpty, "tmux \(version.raw) reports client_user")
+        }
+
+        // And the list keeps up on its own: nothing polls it, so a client leaving has to arrive as
+        // `%client-detached` (tmux 3.2) and be re-read. Without that the confirmation would warn
+        // about somebody who left an hour ago.
+        if version >= TmuxVersion("3.2")! {
+            drain.cancel()
+            bystander.terminate()
+            let departed = try await waitFor(seconds: 10) {
+                await service.getHost("local")?.otherClients(attachedTo: sessionId).isEmpty ?? false
+            }
+            XCTAssertTrue(departed, "the client list did not notice a client detaching")
+        }
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     /// The environment the service itself would hand a channel. A hand-written minimal one is not
     /// enough — tmux inherits things from it that decide which server it even talks to.
     private static func childLikeEnvironment() -> [String: String] {

@@ -403,6 +403,11 @@ struct RootView: View {
                 targetName: pending.windowName,
                 paneCount: pending.paneCount,
                 runningCommands: pending.runningCommands,
+                subject: .window,
+                // Read from the model rather than captured into `pending`, so the `list-clients` the
+                // request sent on its way up lands in the sheet that is already on screen.
+                otherClients: model.otherClients(hostId: pending.hostId, sessionId: pending.sessionId),
+                clientsAreKnown: model.knowsAttachedClients(hostId: pending.hostId),
                 onConfirm: { model.confirmCloseWindow(in: state) },
                 onCancel: { state.pendingClose = nil }
             )
@@ -421,6 +426,9 @@ struct RootView: View {
                 targetName: pending.sessionName,
                 paneCount: pending.windowCount,
                 runningCommands: pending.runningCommands,
+                subject: .session,
+                otherClients: model.otherClients(hostId: pending.hostId, sessionId: pending.sessionId),
+                clientsAreKnown: model.knowsAttachedClients(hostId: pending.hostId),
                 onConfirm: { model.confirmKillSession(in: state) },
                 onCancel: { state.pendingKillSession = nil }
             )
