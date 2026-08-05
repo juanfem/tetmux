@@ -381,6 +381,31 @@ struct SidebarView: View {
     /// not tell anyone what "yellow" meant.
     @ViewBuilder
     private func hostStatusLabel(_ host: HostState) -> some View {
+        // §4.6 outranks the connection state, and has to: a host in the fallback is `.degraded`,
+        // which would otherwise label it "degraded" — true of the protocol and useless as a
+        // description of what the user is looking at, which is a working terminal with no tree under
+        // it. F4.27 asks for the mode to be indicated, and this row is where the tree explains itself.
+        if let passthrough = host.passthrough {
+            // Three words, because the two fallbacks are not the same promise: one still has tmux
+            // behind it and the user's sessions are still there, and the other is a shell with
+            // nothing to come back to. Calling both "passthrough" on the row that says what a host
+            // *is* would hide exactly the difference that matters.
+            Text(
+                passthrough.isRunning
+                    ? (passthrough.usesTmux ? "passthrough" : "plain shell")
+                    : "no control mode"
+            )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help("\(passthrough.summary) \(passthrough.consequence)")
+        } else {
+            connectionStatusLabel(host)
+        }
+    }
+
+    @ViewBuilder
+    private func connectionStatusLabel(_ host: HostState) -> some View {
         switch host.connectionState {
         case .connected:
             EmptyView()

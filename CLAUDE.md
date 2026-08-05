@@ -97,6 +97,7 @@ Where things are, since the invariants below name symbols without saying which f
 | `WindowState.swift` | Everything that belongs to one macOS window. |
 | `TerminalContainerView.swift` | The pane-tree renderer and `PaneDivider`. |
 | `TerminalSurface.swift` | `TerminalView` wrapper, `TerminalTheme`, bell, OSC handling, `PaneTerminalView`. |
+| `PassthroughView.swift` | §4.6's whole surface: the mode indicator, the offer, and the one terminal. |
 | `SidebarView.swift` · `StatusBarView.swift` | Host/session/window tree (drawn glyphs); F4.28 footer. |
 | `LauncherOverlay.swift` | ⌘K fuzzy launcher over hosts, sessions and windows (F4.25/F4.26). |
 | `SettingsView.swift` · `KeymapPolicy.swift` | The `Settings` scene; shortcut table. |
@@ -119,6 +120,14 @@ control protocol. Local and remote differ *only* in which process `PtyTransport`
 
 There is no "remote code path". If you find yourself adding a remote branch above `PtyTransport`,
 the design has gone wrong.
+
+**§4.6's passthrough is the same sentence with `-CC` removed**, and that is the whole difference in
+the invocation — `localPassthroughArguments` is asserted equal to `localArguments` minus that flag,
+because a fallback that also dropped `-u` would present as a font bug. What differs is everything
+*above* the transport: a `PassthroughChannel` has no codec, no pending-command FIFO, no handshake
+and no flow control, since all of that exists to talk to a parser and there is no parser on the far
+end. R3.8's last row is the same machinery with no tmux in it at all — a login shell. See the
+passthrough entry under "Behaviour worth knowing".
 
 ## Invariants that are easy to violate
 
@@ -291,6 +300,15 @@ opens as a *tab* of the first, which is wrong here twice over: ⌥-clicking a se
 asks for a window and got a tab, and a row of macOS tabs sits directly above the tab bar of tmux
 windows, which are the tabs this app is actually about.
 
+**A multi-line label in the detail column takes `lineLimit`, never `fixedSize`.** The two banners in
+`AppMain` always did; §4.6's did not, and the difference is that a `NavigationSplitView` detail
+column measures its content with an *unspecified* width — which a fixed-size text answers by wrapping
+at one character per line and reporting the height that implies. The split view grew to 1640pt inside
+a 612pt window, centred itself, and pushed **both** columns' content off the top. What makes this
+worth its own entry is how it presents: the window is *empty*, with a working menu bar, a correct
+title, no hang, no log line, and a complete accessibility tree in which every row has a negative
+screen Y. `fixedSize` is right everywhere it is currently used — those are all fixed-width sheets.
+
 **Pane surfaces need explicit `.id(paneId)`.** The layout tree is rendered through `AnyView`, which
 erases structural identity, so without an explicit id SwiftUI rebuilds every `NSView` on each update
 and discards the terminal's contents.
@@ -461,6 +479,28 @@ Keep it that way — it is the only reason the protocol layer is testable agains
 
 ## Behaviour worth knowing before changing it
 
+- **Passthrough is a different channel, not control mode with features off (§4.6, F4.27).** A server
+  below the floor gets `PassthroughChannel`: one `tmux` on a pty with no `-CC`, painting itself into
+  one `TerminalView`, with tmux's own status bar and prefix key doing the jobs tetmux normally does.
+  Four things about it are load-bearing. **The version probe ends the channel** — `complete(.version)`
+  hands over and *returns*, because applying the window-size, flow-control and subscription policies
+  to a server that has none of those commands is what the old "banner and carry on" did. **Geometry
+  inverts**: §3.3 gives tmux geometry because tmux is laying panes out and reporting where they went,
+  and here the surface *is* the client's terminal, so `sizeChanged` is acted on rather than ignored
+  and `TIOCSWINSZ` is the entire mechanism — two macOS windows take turns, last one winning, exactly
+  as two tmux clients of different sizes do. **There is nothing to repaint from**, so the channel
+  keeps a 128 KiB replay buffer and hands it to each new subscriber: without it a second window is a
+  black rectangle nothing will ever fill, and one line drawn wrongly from a mid-stream start is the
+  better failure. Output is bounded by dropping chunks for the same reason — `refresh-client -A` is
+  tmux 3.2, so there is no pause to ask for, and it is the one place in the app where bytes are
+  discarded without owing a repaint. And **the plain shell (R3.8's last row) is offered, never
+  started**: nothing on a host with no tmux persists, so opening one unbidden would invent the only
+  promise this mode cannot make. A host in the mode is `.degraded`, which is *active* — so
+  `connectHost` stops the passthrough channel itself, or an explicit "try control mode again" would
+  be refused by the idempotence guard and there would be no way back. A workspace entry naming such a
+  host also has to *land* rather than stay pending: an unresolved restore re-asserts its host on every
+  snapshot, and since a passthrough host never gains a session, clicking any other host in the tree
+  was silently undone by the next topology change.
 - **Control mode only streams `%output` for the attached session.** Selecting another session must
   issue `switch-client`, or its panes render once from `capture-pane` and then sit frozen.
 - **Nothing repaints on its own.** Attaching to an existing session shows an empty terminal until
@@ -607,14 +647,19 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   They are placed **before** tetmux's own `-o` options, and that ordering is the point: ssh resolves
   each parameter to the *first* value it obtains, so options appended after ours would be accepted and
   silently ignored.
-- **A start directory is a property of the host, not a question at creation time.** `new-session`
-  takes `-c`, and it is fed from `HostConfig.startDirectory` rather than from a dialog: New Session
-  deliberately puts nothing between wanting a shell and having one, which is why it has no name
-  prompt either. tmux resolves the path on its own side, so `~` and a directory that only exists
-  remotely both work — and that is also why there is no folder picker, which could only ever browse
-  this machine. It goes through `TmuxCommand.singleLine` as well as `quote`, like every other user
-  value: the field takes a pasted path, and a line break in one ends the command before the closing
-  quote and hands tmux the remainder to run.
+- **A start directory and an initial command are properties of the host, not questions at creation
+  time.** `new-session` takes `-c` and a trailing `shell-command`, and both are fed from `HostConfig`
+  rather than from a dialog: New Session deliberately puts nothing between wanting a shell and having
+  one, which is why it has no name prompt either. tmux resolves both on its own side, so `~`, a
+  directory that only exists remotely, and `srun --pty bash` all work — and that is also why there is
+  no folder picker, which could only ever browse this machine. Both go through
+  `TmuxCommand.singleLine` as well as `quote`, like every other user value: the fields take pasted
+  text, and a line break ends the command before the closing quote and hands tmux the remainder to
+  run. **The command goes last**, after every option — tmux stops reading flags at the first word
+  that is not one, so a `-c` written after it is not an option at all and the directory silently does
+  nothing. It is quoted whole rather than split, because the far-side shell is what parses it. A
+  command that exits takes its window and then its session with it; that is `new-session <command>`
+  for anybody, and `remain-on-exit` is an option on the user's server rather than ours to set.
 - **The local host is persisted only as the difference from a baseline, and its editor is a different
   editor.** `HostConfigStore.localBaseline` is what "localhost, unedited" means; `saveHosts` keeps
   the `local` entry only when it differs, which is the same rule discovered `ssh-` hosts already had

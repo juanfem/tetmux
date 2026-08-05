@@ -243,6 +243,92 @@ final class SessionIntegrationTests: XCTestCase {
         )
     }
 
+    /// F4.11 — a host's initial command is what the new session's first pane runs.
+    ///
+    /// Asserted through `pane_current_command` rather than against the command string, for the same
+    /// reason the start directory is: what the setting promises is that the pane is running that
+    /// program, and the only thing that can say so is tmux. `cat` because it is the shortest command
+    /// that stays alive with no output — one that exits would take the window and then the session
+    /// with it, which is tmux's behaviour for any `new-session <command>` and not this feature
+    /// misbehaving.
+    func testANewSessionRunsTheHostsInitialCommand() async throws {
+        let created = "\(sessionName)-runs"
+        defer { runTmux(["kill-session", "-t", created]) }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let attached = sessionName
+        _ = try await waitForHost(service) { $0.sessions.contains { $0.name == attached } }
+
+        await service.newSession(hostId: "local", name: created, initialCommand: "cat")
+
+        // `waitFor` and an explicit assertion: `waitForHost` skips on timeout, and a skip is as green
+        // as a pass for the one thing this test exists to catch.
+        let arrived = try await waitFor(seconds: 15) {
+            let command = await service.getHost("local")?
+                .sessions.first { $0.name == created }?
+                .activeWindow?.panes.first?.command
+            return command == "cat"
+        }
+        let host = await service.getHost("local")
+        let pane = host?.sessions.first { $0.name == created }?.activeWindow?.panes.first
+        XCTAssertTrue(
+            arrived,
+            "the pane ran \(pane?.command ?? "nothing") rather than the host's initial command"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// Both of F4.11's optional parameters at once, and in the right order on the command line.
+    ///
+    /// `shell-command` is `new-session`'s trailing positional argument, so a `-c` written after it
+    /// is not an option at all — tmux stops reading flags at the first word that is not one. With
+    /// the two swapped the session is still created and still runs the command, and only the
+    /// directory quietly does nothing, which is exactly the kind of failure that survives a review.
+    func testAStartDirectoryAndAnInitialCommandBothApply() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-both-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let created = "\(sessionName)-both"
+        defer { runTmux(["kill-session", "-t", created]) }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let attached = sessionName
+        _ = try await waitForHost(service) { $0.sessions.contains { $0.name == attached } }
+
+        await service.newSession(
+            hostId: "local", name: created,
+            startDirectory: directory.path, initialCommand: "cat"
+        )
+
+        let arrived = try await waitFor(seconds: 15) {
+            let pane = await service.getHost("local")?
+                .sessions.first { $0.name == created }?
+                .activeWindow?.panes.first
+            return pane?.command == "cat" && pane?.currentPath.isEmpty == false
+        }
+        XCTAssertTrue(arrived, "the new session never reported both a command and a path")
+
+        let host = await service.getHost("local")
+        let pane = try XCTUnwrap(
+            host?.sessions.first { $0.name == created }?.activeWindow?.panes.first
+        )
+        XCTAssertEqual(pane.command, "cat")
+        // /var is a symlink to /private/var on macOS, so the two spellings are one directory.
+        XCTAssertEqual(
+            URL(fileURLWithPath: pane.currentPath).resolvingSymlinksInPath().path,
+            directory.resolvingSymlinksInPath().path
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     /// Control mode only streams `%output` for the session the client is attached to. Selecting
     /// another session in the sidebar therefore has to move the client with `switch-client`;
     /// otherwise its panes render once from `capture-pane` and then sit frozen forever.
@@ -1686,6 +1772,226 @@ final class SessionIntegrationTests: XCTestCase {
     /// and only then execs the tmux command it was handed. Exercises the real path — prompt detected
     /// in the pre-handshake stream, published on `HostState`, answered on the raw channel, protocol
     /// starts — without needing a remote host that accepts passwords.
+    // MARK: - Passthrough (§4.6, F4.27)
+
+    /// The mode itself, against the real tmux on this machine: one client, one pty, no protocol.
+    ///
+    /// Driven with an explicit reason rather than by a version probe, because the version that
+    /// triggers it in production is one no machine here has — the trigger is covered separately with
+    /// a server that claims to be 2.3. What this asserts is the part that must work whatever caused
+    /// it: a real tmux client attaches, paints itself into the stream, and takes a keystroke.
+    func testPassthroughRunsARealTmuxClientAndStreamsWhatItDraws() async throws {
+        let attached = "\(sessionName)-passthrough"
+        defer { runTmux(["kill-session", "-t", attached]) }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        await service.startPassthrough(
+            hostId: "local",
+            reason: .belowControlModeFloor(version: "2.3"),
+            sessionName: attached
+        )
+
+        let collector = Collector()
+        let subscription = await service.subscribeToPassthrough(hostId: "local")
+        let reader = Task {
+            for await chunk in subscription.stream { await collector.append(chunk) }
+        }
+        defer { reader.cancel() }
+
+        // `.running` is set by the first byte off the pty, so reaching it *is* "tmux drew something".
+        let running = try await waitFor(seconds: 15) {
+            await service.getHost("local")?.passthrough?.phase == .running
+        }
+        XCTAssertTrue(running, "the passthrough client never produced any output")
+
+        // Deliberately *not* asserted on tmux's own status bar, which is the visible difference this
+        // mode makes: it is drawn from the user's `~/.tmux.conf`, and this test runs against whatever
+        // tmux is on the machine with whatever configuration it has. The run that found this had
+        // `status off`, so the assertion was about the developer's dotfiles rather than about the
+        // feature. What follows is the same claim without that dependency.
+
+        // The session is really there, which is what separates this from a terminal painting itself.
+        XCTAssertTrue(tmuxSessionNames().contains(attached))
+
+        // Keystrokes are raw bytes on the pty, not `send-keys`: there is no command plane to use.
+        await collector.mark()
+        await service.sendPassthrough(hostId: "local", bytes: Array("echo 90210\n".utf8))
+        let echoed = try await waitFor(seconds: 10) {
+            await collector.textSinceMark.contains("90210")
+        }
+        XCTAssertTrue(echoed, "the keystrokes never reached the shell")
+
+        await service.stopPassthrough(hostId: "local")
+        let stopped = await service.getHost("local")
+        XCTAssertEqual(stopped?.passthrough?.phase, .offered, "stopping must leave the mode offered")
+        // Stopping the client must not kill what it was attached to. That is the whole point of tmux
+        // being in the loop for this half of §4.6.
+        XCTAssertTrue(tmuxSessionNames().contains(attached))
+    }
+
+    /// R3.8's `< 2.4` row, end to end: control mode answers, says it is too old, and the channel is
+    /// replaced rather than continued.
+    ///
+    /// The server is a script, because no tmux on this machine is old enough to be the subject. It
+    /// speaks exactly as much of the protocol as the handshake and the version probe need, and its
+    /// other half — the invocation without `-CC` — stands in for the tmux client passthrough would
+    /// attach. What is asserted is ours: the fallback triggers, the control channel goes away rather
+    /// than applying policies this server does not have, and the passthrough stream is live.
+    func testAServerBelowTheControlModeFloorFallsBackToPassthrough() async throws {
+        let script = try writeFakeOldTmuxScript(reporting: "2.3")
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(
+            id: "old", name: "fake-old", isLocal: false,
+            customCommand: "/bin/sh \(script.path)"
+        ))
+        try await service.connectHost(hostId: "old", targetSession: sessionName)
+
+        let fellBack = try await waitFor(seconds: 15) {
+            await service.getHost("old")?.passthrough?.isRunning == true
+        }
+        let latest = await service.getHost("old")
+        let host = try XCTUnwrap(latest)
+        XCTAssertTrue(fellBack, "never fell back; state was \(String(describing: host.passthrough))")
+        XCTAssertEqual(
+            host.passthrough?.reason, .belowControlModeFloor(version: "2.3"),
+            "the fallback has to name the version it was told, since that is the whole explanation"
+        )
+        XCTAssertTrue(host.passthrough?.usesTmux == true)
+        // §4.6 is a different channel, not control mode with features off: the tree is empty because
+        // there is nothing behind it to fill it with.
+        XCTAssertTrue(host.sessions.isEmpty)
+        guard case .degraded = host.connectionState else {
+            return XCTFail("expected .degraded, got \(host.connectionState)")
+        }
+
+        let collector = Collector()
+        let subscription = await service.subscribeToPassthrough(hostId: "old")
+        let reader = Task {
+            for await chunk in subscription.stream { await collector.append(chunk) }
+        }
+        defer { reader.cancel() }
+        let spoke = try await waitFor(seconds: 10) {
+            await collector.text.contains("fake-passthrough-ready")
+        }
+        XCTAssertTrue(spoke, "the passthrough channel never spawned the non-control-mode invocation")
+
+        await service.disconnectHost(hostId: "old")
+        let after = await service.getHost("old")
+        XCTAssertNil(after?.passthrough, "a deliberate disconnect leaves no mode behind")
+    }
+
+    /// R3.8's last row: no tmux on the far side is an error with something to offer, and what it
+    /// offers is a plain shell — offered, never started, because nothing there persists.
+    func testAHostWithNoTmuxOffersAPlainShellAndOpensOneOnRequest() async throws {
+        let script = try writeFakeMissingTmuxScript()
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(
+            id: "no-tmux", name: "fake-bare", isLocal: false,
+            customCommand: "/bin/sh \(script.path)"
+        ))
+        try? await service.connectHost(hostId: "no-tmux", targetSession: sessionName)
+
+        let offered = try await waitFor(seconds: 15) {
+            await service.getHost("no-tmux")?.passthrough?.phase == .offered
+        }
+        let latest = await service.getHost("no-tmux")
+        let host = try XCTUnwrap(latest)
+        XCTAssertTrue(offered, "no offer was made; state was \(String(describing: host.passthrough))")
+        XCTAssertEqual(host.passthrough?.reason, .tmuxUnavailable)
+        XCTAssertFalse(host.passthrough?.usesTmux == true, "there is no tmux to be passing through to")
+        // §7 — what the far end said, kept for the placeholder to show.
+        XCTAssertTrue(
+            host.passthrough?.detail.contains("tmux not found") == true,
+            "got: \(String(describing: host.passthrough?.detail))"
+        )
+        guard case .failed = host.connectionState else {
+            return XCTFail("expected .failed, got \(host.connectionState)")
+        }
+
+        // The offer being taken up: this is the one path that spawns a shell rather than tmux.
+        let collector = Collector()
+        await service.startPassthrough(hostId: "no-tmux")
+        let subscription = await service.subscribeToPassthrough(hostId: "no-tmux")
+        let reader = Task {
+            for await chunk in subscription.stream { await collector.append(chunk) }
+        }
+        defer { reader.cancel() }
+
+        let running = try await waitFor(seconds: 15) {
+            await service.getHost("no-tmux")?.passthrough?.phase == .running
+        }
+        XCTAssertTrue(running, "the plain shell never produced any output")
+
+        // Something the shell computes, so its own echo of the line cannot be mistaken for a result.
+        await collector.mark()
+        await service.sendPassthrough(hostId: "no-tmux", bytes: Array("expr 111111 + 222222\n".utf8))
+        let answered = try await waitFor(seconds: 10) {
+            await collector.textSinceMark.contains("333333")
+        }
+        XCTAssertTrue(answered, "the shell never ran what was typed into it")
+
+        await service.disconnectHost(hostId: "no-tmux")
+    }
+
+    /// A control-mode server that answers the handshake and the version probe, and nothing else.
+    ///
+    /// The passthrough half is the same script invoked without `-CC` — which is exactly how the two
+    /// invocations differ in production, so the branch here is the assertion that they do.
+    private func writeFakeOldTmuxScript(reporting version: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-fake-old-\(UUID().uuidString.prefix(8)).sh")
+        let script = """
+        #!/bin/sh
+        case "$1" in
+          *-CC*)
+            # The DCS preamble glued to the first %begin, exactly as tmux -CC opens.
+            printf '\\033P1000p'
+            printf '%%begin 1000 1 1\\r\\n%%end 1000 1 1\\r\\n'
+            n=2
+            while IFS= read -r line; do
+              printf '%%begin 1000 %s 1\\r\\n' "$n"
+              case "$line" in
+                *version*) printf '\(version)\\r\\n' ;;
+              esac
+              printf '%%end 1000 %s 1\\r\\n' "$n"
+              n=$((n + 1))
+            done
+            ;;
+          *)
+            printf 'fake-passthrough-ready\\r\\n'
+            # Hold the pty open; a process that exits here would look like the mode ending.
+            cat > /dev/null
+            ;;
+        esac
+        """
+        try script.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    /// A host with no tmux, which is `remoteCommand`'s own `command -v` message and exit 127. Any
+    /// other command — the login shell the offer runs — is executed normally.
+    private func writeFakeMissingTmuxScript() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-fake-bare-\(UUID().uuidString.prefix(8)).sh")
+        let script = """
+        #!/bin/sh
+        case "$1" in
+          *tmux*)
+            echo 'tetmux: tmux not found on remote host' >&2
+            exit 127
+            ;;
+        esac
+        exec /bin/sh -c "$1"
+        """
+        try script.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
     private func writeFakePasswordSshScript(accepting secret: String) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("tetmux-fake-ssh-\(UUID().uuidString.prefix(8)).sh")

@@ -110,10 +110,18 @@ struct HostEditorView: View {
                     )
                     .frame(width: 300)
                 }
+                GridRow {
+                    Text("Run").gridColumnAlignment(.trailing)
+                    TextField(
+                        "your shell — optional",
+                        text: Binding($host.initialCommand, replacingNilWith: "")
+                    )
+                    .frame(width: 300)
+                }
             }
             .textFieldStyle(.roundedBorder)
 
-            Text("Where a new session's first pane opens, as `new-session -c`. Left blank, tmux uses whatever it would have used anyway.")
+            Text("Where a new session's first pane opens, as `new-session -c`, and what it runs instead of a shell. Left blank, tmux uses whatever it would have used anyway.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -192,11 +200,24 @@ struct HostEditorView: View {
                     )
                     .frame(width: 300)
                 }
+                // The other half of F4.11's "new (name, start directory, optional command)". Here for
+                // the same reason the directory is, and it is the field that makes a host reached
+                // through a wrapper usable at all: `srun --pty bash` is how you get a shell on a
+                // scheduler, and nothing in a session-creation flow with no dialog could otherwise
+                // say so.
+                GridRow {
+                    Text("Run").gridColumnAlignment(.trailing)
+                    TextField(
+                        "your shell — optional",
+                        text: Binding($host.initialCommand, replacingNilWith: "")
+                    )
+                    .frame(width: 300)
+                }
             }
             .textFieldStyle(.roundedBorder)
             .padding(.top, 4)
 
-            Text("Where a new session's first pane opens, as `new-session -c`. Resolved on \(host.name.isEmpty ? "the host" : host.name), not here.")
+            Text("Where a new session's first pane opens, as `new-session -c`, and what it runs instead of a shell. Both are resolved on \(host.name.isEmpty ? "the host" : host.name), not here — and a command that exits ends the window it was given.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

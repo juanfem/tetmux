@@ -566,6 +566,30 @@ public final class AppModel {
         Task { await service.disconnectHost(hostId: hostId) }
     }
 
+    /// §4.6 — start the fallback this host has been offered.
+    public func startPassthrough(_ hostId: String) {
+        Task { await service.startPassthrough(hostId: hostId) }
+    }
+
+    /// The way back out of the fallback. A plain `connect` rather than `reconnect`, because this is
+    /// the user asking to *use* the host in control mode rather than asserting a lost link is back —
+    /// and F4.15's "a reconnect never creates" would otherwise refuse to make the session they are
+    /// asking for. `connectHost` stops the passthrough channel itself; the two cannot coexist.
+    public func tryControlMode(_ hostId: String) {
+        Task { try? await service.connectHost(hostId: hostId) }
+    }
+
+    /// Whether the window in front is looking at a passthrough host (§4.6).
+    ///
+    /// The one question the menus ask, and F4.27's "GUI splits disabled for that tab" is the whole of
+    /// why it exists: splitting, opening a tmux window and closing a pane are all commands about a
+    /// model this host has none of. They already act on an empty scope and so already do nothing —
+    /// this is the difference between doing nothing and *saying* so.
+    public var activeHostIsPassthrough: Bool {
+        guard let hostId = activeScope.hostId else { return false }
+        return hosts.first { $0.id == hostId }?.passthrough != nil
+    }
+
     /// F4.11 — let go of this client without ending the session or the host.
     public func detachThisClient(_ hostId: String) {
         Task { await service.detachThisClient(hostId: hostId) }
@@ -1260,9 +1284,17 @@ public final class AppModel {
         // inside the ssh command, which has nowhere to put a `-c` and no reason to — a host that is
         // not yet connected is being reached for the first time, not given a working directory.
         let startDirectory = host?.config.startDirectory
+        // Same branch and the same reason (F4.11). A host being connected for the first time has its
+        // session made by `new-session -A` inside the ssh command line, which is the attach the user
+        // asked for rather than a session created here — the initial command applies where the `-c`
+        // does, and to nothing else.
+        let initialCommand = host?.config.initialCommand
         Task {
             if host?.connectionState.isActive == true {
-                await service.newSession(hostId: hostId, name: trimmed, startDirectory: startDirectory)
+                await service.newSession(
+                    hostId: hostId, name: trimmed,
+                    startDirectory: startDirectory, initialCommand: initialCommand
+                )
             } else {
                 try? await service.connectHost(hostId: hostId, targetSession: trimmed)
             }
@@ -1306,8 +1338,15 @@ public final class AppModel {
     public func pasteIntoFocusedPane() {
         let scope = activeScope
         guard let hostId = scope.hostId,
-              let paneId = scope.paneId ?? window(in: scope)?.preferredPaneId,
               let text = NSPasteboard.general.string(forType: .string) else { return }
+        // §4.6 — a passthrough host has no pane to paste *into*: the surface is a terminal on a pty,
+        // so the clipboard is bytes and goes where a keystroke goes. Without this branch ⌘V did
+        // nothing at all in that mode, since AppKit's own Paste is replaced by this command.
+        if hosts.first(where: { $0.id == hostId })?.passthrough != nil {
+            Task { await service.sendPassthrough(hostId: hostId, bytes: Array(text.utf8)) }
+            return
+        }
+        guard let paneId = scope.paneId ?? window(in: scope)?.preferredPaneId else { return }
         Task { await service.paste(hostId: hostId, paneId: paneId, text: text) }
     }
 

@@ -77,7 +77,7 @@ final class HostConfigStoreTests: XCTestCase {
         let host = StoredHost(
             id: "custom-devbox", name: "devbox", user: "me", port: 2222,
             usesPassword: true, storesPasswordInKeychain: true, forwards: [forward],
-            startDirectory: "~/work/service"
+            startDirectory: "~/work/service", initialCommand: "srun --pty bash"
         )
 
         try await store.saveHosts([host])
@@ -90,6 +90,10 @@ final class HostConfigStoreTests: XCTestCase {
         // a path from *this* machine's home directory for a session opening on another one.
         XCTAssertEqual(reloaded.startDirectory, "~/work/service")
         XCTAssertEqual(reloaded.asConfig.startDirectory, "~/work/service", "lost crossing into HostConfig")
+        // F4.11's optional command, kept exactly as typed for the same reason: it is parsed by a
+        // shell on the far side, so anything this end did to it would be wrong there.
+        XCTAssertEqual(reloaded.initialCommand, "srun --pty bash")
+        XCTAssertEqual(reloaded.asConfig.initialCommand, "srun --pty bash", "lost crossing into HostConfig")
         XCTAssertEqual(reloaded.asConfig.asStoredHost, reloaded, "lost crossing back")
     }
 
@@ -141,12 +145,14 @@ final class HostConfigStoreTests: XCTestCase {
         let store = HostConfigStore(directory: directory)
         var local = HostConfigStore.localBaseline
         local.startDirectory = "~/projects"
+        local.initialCommand = "fish"
         local.allowRemoteClipboardWrite = true
         try await store.saveHosts([local, StoredHost(id: "custom-keeper", name: "keeper")])
 
         let reloaded = await HostConfigStore(directory: directory).loadHosts()
         let restored = try XCTUnwrap(reloaded.first { $0.id == "local" })
         XCTAssertEqual(restored.startDirectory, "~/projects")
+        XCTAssertEqual(restored.initialCommand, "fish")
         XCTAssertTrue(restored.allowRemoteClipboardWrite)
         XCTAssertTrue(restored.isLocal)
         XCTAssertEqual(restored.name, "localhost")

@@ -480,6 +480,25 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
     /// only exists remotely both work.
     public let startDirectory: String?
 
+    /// What a new session's first pane runs instead of a shell — `new-session`'s trailing
+    /// `shell-command` (F4.11).
+    ///
+    /// A property of the host for the same reason `startDirectory` is, and it is the same argument:
+    /// `createSessionWithDefaultName` puts nothing between wanting a shell and having one, so
+    /// anything asked at creation time cannot exist at all. "This box is reached through
+    /// `srun --pty bash`" or "start a login shell here" is decided once per machine in any case.
+    /// tmux hands the string to the shell on the far side, so it is written in the *remote* machine's
+    /// terms and nothing here tries to resolve it.
+    ///
+    /// Sessions only, never windows opened afterwards. That is tmux's own division — `new-window`
+    /// takes `default-command` — and a wrapper answering "how do I get a shell on this host" belongs
+    /// at the point a session is made rather than on every tab.
+    ///
+    /// A command that *exits* takes its window with it, and tmux destroys a session with no windows
+    /// left. That is what `new-session <command>` does for anyone, and it is deliberately not papered
+    /// over: `remain-on-exit` is an option on the user's server, not ours to set from here.
+    public let initialCommand: String?
+
     /// T5.6 — whether a program in this host's panes may write the Mac's clipboard with OSC 52.
     ///
     /// Per host and denied by default, which is the whole of what T5.6 asks for and what the flag on
@@ -510,9 +529,11 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
         extraSshArguments: String = "",
         forwardsX11: Bool = false,
         startDirectory: String? = nil,
+        initialCommand: String? = nil,
         allowRemoteClipboardWrite: Bool = false
     ) {
         self.allowRemoteClipboardWrite = allowRemoteClipboardWrite
+        self.initialCommand = initialCommand
         self.id = id
         self.name = name
         self.hostname = hostname
@@ -584,6 +605,90 @@ public struct AuthenticationPrompt: Equatable, Sendable, Identifiable {
     }
 }
 
+/// §4.6 / F4.27 — what a host falls back to when control mode is not available on it.
+///
+/// Passthrough is not a degraded control-mode channel; it is a different channel. One tmux client
+/// runs on a pty and paints itself into a single terminal surface, with tmux's own status bar,
+/// borders and prefix key on screen — the three things tetmux otherwise replaces. Nothing above the
+/// transport knows the protocol, because there is no protocol: bytes go out as keystrokes and come
+/// back as pixels. So there is no session tree, no tab per window, and no GUI split, and this state
+/// existing is what tells every surface to stop offering them.
+///
+/// The SRD calls this first-class rather than a courtesy, and the reason is institutional: HPC and
+/// long-lived enterprise images run tmux versions from years ago, and an application that refuses to
+/// connect to them is useless in exactly the environment where session persistence matters most.
+public struct PassthroughState: Equatable, Sendable {
+    /// Why control mode is not being used. The two are not the same fallback: one still runs tmux and
+    /// keeps the user's sessions, the other has no tmux to run at all and is a plain login shell with
+    /// nothing persistent behind it.
+    public enum Reason: Equatable, Sendable {
+        /// R3.8's `< 2.4` row. The server speaks control mode, but not one this client can drive.
+        case belowControlModeFloor(version: String)
+        /// R3.8's last row: no tmux on the far side. A shell is all that can be offered, and it is
+        /// offered rather than started — there are no sessions to come back to, so opening one
+        /// unbidden would be a decision nobody made.
+        case tmuxUnavailable
+    }
+
+    public enum Phase: Equatable, Sendable {
+        /// Available and not started. Only `tmuxUnavailable` waits here.
+        case offered
+        case connecting
+        case running
+        /// The process ended — `exit` at the shell, the link dropping, tmux being killed. Deliberately
+        /// not restarted: in a mode with no protocol there is nothing to tell an orderly exit from a
+        /// failure, and reopening a shell somebody just closed is the F4.15 mistake in a new place.
+        case ended(reason: String)
+    }
+
+    public var reason: Reason
+    public var phase: Phase
+    /// §7 — what the far end actually said, verbatim. The version string, or ssh's own complaint.
+    public var detail: String
+
+    public init(reason: Reason, phase: Phase, detail: String) {
+        self.reason = reason
+        self.phase = phase
+        self.detail = detail
+    }
+
+    /// Whether tmux is in the loop at all. Derived rather than stored, so it cannot disagree with the
+    /// reason it follows from — and it is the difference between "your sessions are still there" and
+    /// "this window is all there is".
+    public var usesTmux: Bool {
+        if case .belowControlModeFloor = reason { return true }
+        return false
+    }
+
+    public var isRunning: Bool {
+        switch phase {
+        case .connecting, .running: return true
+        case .offered, .ended: return false
+        }
+    }
+
+    /// The mode indicator's own sentence (F4.27 — "the mode is clearly indicated").
+    ///
+    /// Here rather than in the view because three surfaces say it — the banner over the terminal, the
+    /// sidebar row, and the placeholder that offers to start it — and a mode named differently in
+    /// each of them is a mode the user has to work out for themselves.
+    public var summary: String {
+        switch reason {
+        case .belowControlModeFloor(let version):
+            return "Passthrough — tmux \(version) on this host is below the control-mode floor (2.4)."
+        case .tmuxUnavailable:
+            return "Plain shell — there is no tmux on this host."
+        }
+    }
+
+    /// What the user loses, said once, where it belongs: beside the mode it is true of.
+    public var consequence: String {
+        usesTmux
+            ? "This is one tmux client in one surface, with tmux's own status bar and prefix key. Tabs, splits and the session tree are tmux's here, not tetmux's."
+            : "A login shell on this host, with nothing to reattach to. Install tmux there to get sessions that survive the connection."
+    }
+}
+
 public struct HostState: Identifiable, Equatable, Sendable {
     public var id: String { config.id }
     public var config: HostConfig
@@ -614,6 +719,10 @@ public struct HostState: Identifiable, Equatable, Sendable {
     /// the same fact as `TmuxSession.isAttached`, which is a count with nobody's name on it, nor as
     /// `liveSessionIds`, which is only ever about us.
     public var clients: [TmuxClient] = []
+    /// §4.6 — set when control mode is not what this host is being driven with. Non-nil is the one
+    /// signal every surface asks: there is no session tree behind a passthrough host, so a view that
+    /// went on drawing one would be drawing a tree of nothing.
+    public var passthrough: PassthroughState?
 
     public var activeSession: TmuxSession? {
         sessions.first { $0.id == activeSessionId } ?? sessions.first

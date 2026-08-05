@@ -1411,6 +1411,36 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(state.pendingRestore)
     }
 
+    /// §4.6 — a restore onto a passthrough host lands rather than waiting, because what it is
+    /// waiting for cannot happen.
+    ///
+    /// Found by running the app. A pending restore re-asserts its host on *every* snapshot until a
+    /// session resolves, and a passthrough host has no sessions and will not grow any while it is in
+    /// that mode — so clicking any other host in the tree was silently undone by the next topology
+    /// change, and the window was pinned to that host for the life of the process. The host is kept,
+    /// since it is the part of the entry that still means something.
+    func testARestoreOntoAPassthroughHostStopsWaiting() {
+        let state = WindowState()
+        state.beginRestore(WorkspaceWindow(hostId: "old", sessionId: "$1", sessionName: "work"))
+        let local = host(sessions: [TmuxSession(id: "$1", name: "local", windows: [window("@1")], isAttached: true)])
+        var old = HostState(
+            config: HostConfig(id: "old", name: "oldbox"),
+            connectionState: .degraded(reason: "below the floor")
+        )
+        old.passthrough = PassthroughState(
+            reason: .belowControlModeFloor(version: "2.3"), phase: .running, detail: ""
+        )
+
+        state.reconcile(with: [local, old])
+        XCTAssertEqual(state.selectedHostId, "old")
+        XCTAssertNil(state.pendingRestore, "nothing left to resolve to: this host has no sessions")
+
+        // …and the window can now be moved somewhere else and stay there.
+        state.selectedHostId = "local"
+        state.reconcile(with: [local, old])
+        XCTAssertEqual(state.selectedHostId, "local", "the restore pulled the window back")
+    }
+
     /// The user has said where this window belongs, which outranks where it was last time — a
     /// pending restore left in place would move the window again when its host finally connected.
     func testSelectingSomethingCancelsAPendingRestore() {

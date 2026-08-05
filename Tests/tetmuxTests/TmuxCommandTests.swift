@@ -174,6 +174,50 @@ final class TmuxCommandTests: XCTestCase {
         XCTAssertTrue(command.contains("attach-session -t 'my project'"), command)
     }
 
+    // MARK: - Passthrough (§4.6, F4.27)
+
+    /// The fallback is the same invocation with `-CC` removed and nothing else changed.
+    ///
+    /// Worth pinning as an equality rather than an absence: passthrough dropping a flag it should
+    /// have kept — `-u`, and a pane full of replacement characters — is the failure that looks like a
+    /// font problem, and dropping `-2` is one that looks like a colour scheme.
+    func testPassthroughIsControlModeWithoutTheControlFlag() {
+        let passthrough = TmuxCommand.localPassthroughArguments(mode: .createOrAttach(sessionName: "work"))
+        let control = TmuxCommand.localArguments(mode: .createOrAttach(sessionName: "work"))
+        XCTAssertEqual(passthrough, ["-2", "-u", "new-session", "-A", "-s", "work"])
+        XCTAssertEqual(passthrough, control.filter { $0 != "-CC" })
+    }
+
+    func testRemotePassthroughKeepsTheMissingTmuxCheck() {
+        let command = TmuxCommand.remoteCommand(mode: .attach(sessionName: "work"), controlMode: false)
+        XCTAssertTrue(command.contains("exec tmux -2 -u attach-session -t 'work'"), command)
+        XCTAssertFalse(command.contains("-CC"), command)
+        // R3.8's last row is reached through this message, in passthrough exactly as in control mode.
+        XCTAssertTrue(command.contains("command -v tmux"), command)
+    }
+
+    /// R3.8's "tmux absent" row, which is the one connection failure with something better to offer
+    /// than a retry — and which must not swallow the failures that are not it.
+    func testAMissingTmuxIsToldFromEveryOtherFailure() {
+        XCTAssertTrue(SessionService.describesMissingTmux("tetmux: tmux not found on remote host"))
+        XCTAssertTrue(SessionService.describesMissingTmux("bash: tmux: command not found"))
+        XCTAssertTrue(SessionService.describesMissingTmux("Executable not found on PATH: tmux"))
+
+        XCTAssertFalse(SessionService.describesMissingTmux("Permission denied (publickey)."))
+        XCTAssertFalse(SessionService.describesMissingTmux("ssh: connect to host devbox port 22: No route to host"))
+        XCTAssertFalse(SessionService.describesMissingTmux("duplicate session: tmux-work"))
+        XCTAssertFalse(SessionService.describesMissingTmux("Connection closed"))
+    }
+
+    /// The plain shell is the user's own, since that is what "a shell on this host" means — and it
+    /// falls back to `/bin/sh` rather than to nothing when the environment does not say.
+    func testThePlainShellIsALoginShell() {
+        XCTAssertEqual(TmuxCommand.localShellInvocation(shell: "/bin/zsh").executable, "/bin/zsh")
+        XCTAssertEqual(TmuxCommand.localShellInvocation(shell: "/bin/zsh").arguments, ["-l"])
+        XCTAssertEqual(TmuxCommand.localShellInvocation(shell: nil).executable, "/bin/sh")
+        XCTAssertEqual(TmuxCommand.localShellInvocation(shell: "").executable, "/bin/sh")
+    }
+
     // MARK: - Attaching to whatever is left
 
     /// The mode the recovery from `%exit` uses. It must name no session at all: it exists for the

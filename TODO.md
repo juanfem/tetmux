@@ -4,7 +4,7 @@ From the audit of 2026-08-04. Ordered by what actually breaks for a user, not by
 Each item names the evidence, because the ones that matter here are all silent failures — nothing
 in this list announces itself, which is why they survived this long.
 
-**38 done, 4 partial, 5 open.**
+**41 done, 1 partial, 4 open, 1 parked.**
 
 References on **done** items are as they were when the audit ran, so they point into the commit
 before each fix rather than into current `main` — they are kept because the evidence is the useful
@@ -18,13 +18,17 @@ What is left falls into three groups, and they are not equally blocked:
   P6 wants latency measured in CI on real hardware. These are decisions before they are work.
   (The R3.6 matrix was in this group and is out of it: the binaries turned out to build from source
   in about a minute each, so nothing was needed but the script to do it.)
-- **Real features, sized like features.** Passthrough fallback (F4.27, which is also the "offer a
-  plain shell" row of R3.8), copy mode, listing a host's sessions without attaching (F4.4), and the
-  §8 test infrastructure — a containerised sshd matrix, chaos tests, a full geometry suite, a
-  rendering corpus.
+- **Real features, sized like features.** Copy mode, listing a host's sessions without attaching
+  (F4.4), and the §8 test infrastructure — a containerised sshd matrix, chaos tests, a full geometry
+  suite, a rendering corpus. (Passthrough was in this group and is out of it, along with R3.8's
+  "offer a plain shell" row, which was the same surface.)
 - **Small and unblocked.** Nothing, for the moment. The four that were here — per-host OSC 52, an
   editable keymap, ⌘⌥V's literal escape, and a start directory for localhost — are done, along with
   tab reordering, `move-window`, and workspace restoration from the group above.
+- **Parked by decision, not by difficulty.** VoiceOver in a pane, on 2026-08-05: the pane's contents
+  are readable, and the rest — announcing output as it arrives, per-line navigation — is on hold
+  until somebody needs it. There is one user and they do not. Recorded rather than deleted, because
+  the entry says what is missing and why it is hard, which is the expensive half of the work.
 
 ## Protocol correctness
 
@@ -257,7 +261,8 @@ What is left falls into three groups, and they are not equally blocked:
   `$999` fell back to the session name, resolved the id, picked the window by name, and kept its
   collapsed tree; two entries came back as two windows on two sessions with their own frames.*
 
-- [~] **Pane contents are invisible to VoiceOver.** SwiftTerm's accessibility service is an empty
+- [~] **Pane contents are invisible to VoiceOver.** **Parked on 2026-08-05** — the readable half is
+  done and the rest waits for somebody to need it. SwiftTerm's accessibility service is an empty
   stub and `makeNSView` adds no label, value, or role. The chrome around it is labelled thoroughly,
   which makes the hole sharper: everything is announced except the terminal.
   `Sources/tetmuxUI/TerminalSurface.swift:142-144`
@@ -316,14 +321,43 @@ What is left falls into three groups, and they are not equally blocked:
   `client_control_mode` instead. Known blast radius: two live tetmuxen against one server, or
   iTerm2's tmux integration, would detach each other.*
 
-- [ ] **F4.27 passthrough fallback**, which §4.6 and §10 both call first-class, is a banner string
+- [x] **F4.27 passthrough fallback**, which §4.6 and §10 both call first-class, is a banner string
   after which control mode proceeds anyway. A sub-2.4 server is marked `.degraded` and then goes
   straight on to the window-size, flow-control and subscription policies. No attached-client surface,
   no mode indicator, nothing disabled. This is also the missing R3.8 row below — "offer a plain
   shell" is the same surface, not a separate small job.
   `Sources/tetmuxCore/Session/SessionService.swift:1268-1281`
+  *Both rows are done, and the shape they took is worth recording. Passthrough is a **different
+  channel**, not control mode with features off: `PassthroughChannel` has no codec, no
+  pending-command FIFO, no handshake and no flow control, because everything that makes `Connection`
+  complicated exists to talk to a parser and there is no parser here. The invocation differs from the
+  control-mode one by the `-CC` flag and by nothing else — asserted as an equality in
+  `testPassthroughIsControlModeWithoutTheControlFlag`, since a fallback that quietly dropped `-u`
+  would look like a font bug — and R3.8's last row is the same machinery with no tmux in it at all.
+  Four things that were not obvious going in. **The version probe has to end the channel**, which is
+  the actual content of the old entry's complaint: `complete(.version)` now returns after handing
+  over, so none of the policies below it are applied to a server that has none of the commands.
+  **Geometry inverts** — §3.3's "tmux owns geometry" is true because tmux is laying panes out and
+  reporting where they went, and here the surface *is* the client's terminal, so `sizeChanged` is
+  acted on rather than ignored and `TIOCSWINSZ` is the whole mechanism. **There is no repaint to
+  ask for**, so the channel keeps a 128 KiB replay buffer: a second window would otherwise be a black
+  rectangle that nothing would ever fill, and a mid-stream window of bytes drawing one line wrongly
+  is the better failure. And **the plain shell is offered, never started** — there is nothing on that
+  host to reattach to, so opening a shell nobody asked for would invent the one promise this mode
+  cannot make. Tested end to end three ways: a real tmux client attached in passthrough on this
+  machine, a scripted server claiming 2.3 to drive the fallback (no tmux here is old enough to be the
+  subject), and a host whose tmux is missing, offered and then taking up a shell.
+  **Two defects only came out of running it**, and neither would have failed a test. The banner's
+  `fixedSize(horizontal: false, vertical: true)` — the pattern every other multi-line label in this
+  app uses — blew the `NavigationSplitView` up to 1640pt inside a 612pt window, because a detail
+  column measures its content with an unspecified width and a fixed-size text answers that by
+  wrapping at one character per line. The window looked *empty*: the accessibility tree was complete
+  and correct, with every sidebar row at a negative screen Y. And a `workspace.json` entry naming a
+  passthrough host re-asserted that host on every snapshot — it names a session, a passthrough host
+  has none and never will, so the restore never landed and clicking any other host in the tree was
+  undone by the next topology change.*
 
-- [~] **R3.8 version table: three of five rows absent.** `refresh-client -B` subscriptions are never
+- [x] **R3.8 version table: three of five rows absent.** `refresh-client -B` subscriptions are never
   issued (`TmuxVersion.supportsSubscriptions` is dead code); there is no once-per-host warning for
   2.4–2.9; tmux being absent produces a raw stderr line rather than the offer of a plain shell.
   Subscriptions are also the supported way to observe `pane_current_command` and
@@ -333,8 +367,10 @@ What is left falls into three groups, and they are not equally blocked:
   pane on ≥3.2, which is what finally reports a command started in a background pane, and 2.4–2.9
   now warns once per host. The subscription path is exercised end to end by
   `testACommandInABackgroundPaneIsReportedWithoutARefresh`, which starts a command in a background
-  pane from outside the channel and waits for the model to learn of it. Still absent: the
-  tmux-absent row's "offer a plain shell to that host", which is the passthrough surface above.*
+  pane from outside the channel and waits for the model to learn of it. The third is done with the
+  passthrough surface above: a channel that dies with `command -v tmux`'s own message is not retried
+  — a host with no tmux will not grow one on the second attempt — and is offered a plain login shell
+  instead, which is all that can honestly be offered there.*
 
 - [x] **R3.5 checksum validation defaults to off** and all production callers take the default, so
   the validation exists only in tests. There are now three of them — the zoom work added a second
@@ -391,7 +427,7 @@ What is left falls into three groups, and they are not equally blocked:
   attaches and can create.
   `Sources/tetmuxCore/Session/SessionService.swift:460`, `:1374-1376`
 
-- [~] **F4.11** has no `detach-client`: disconnect tears the pty down with `SIGHUP` instead. And
+- [x] **F4.11** has no `detach-client`: disconnect tears the pty down with `SIGHUP` instead. And
   `newSession` accepts a start directory that no caller passes.
   *`detach-client` is done, as "Detach This Client" beside Disconnect, and waited for rather than
   merely written so `SIGHUP` cannot beat it out of the pty. The start directory is now a **host**
@@ -407,7 +443,15 @@ What is left falls into three groups, and they are not equally blocked:
   ssh options are all properties of a connection it does not make. Only the settings that mean
   something without one are read back from the file, so a hand-edited `hosts.json` cannot turn the
   local host into a remote one or rename it out of the places that look it up.
-  **Still not covered:** an initial command is not a parameter.*
+  **The initial command closes this one**, and it is a host setting for the same reason the directory
+  is: a creation flow with no dialog in it can carry no question. It is `new-session`'s trailing
+  `shell-command`, so it goes *after* every option — written before the `-c`, tmux stops reading
+  flags at the first non-flag word and the directory quietly does nothing, which is why
+  `testAStartDirectoryAndAnInitialCommandBothApply` asserts both at once rather than each alone. The
+  value is quoted whole rather than split here, because the far-side shell is what parses it:
+  `srun --pty bash` is one command, not a command plus a flag we get to interpret. A command that
+  exits takes its window and then its session with it — that is what `new-session <command>` does for
+  anybody, and `remain-on-exit` is an option on the user's server rather than ours to set for them.*
   `Sources/tetmuxCore/Session/SessionService.swift:2323`, `Sources/tetmuxUI/AppModel.swift:926`
 
 ## Infrastructure

@@ -25,6 +25,11 @@ public actor SessionService {
     /// Which sessions the UI is currently showing, per host. The input to `reconcileChannels`.
     private var displayedSessions: [String: Set<String>] = [:]
 
+    /// §4.6 — the passthrough channel of a host, when it has one. Never at the same time as a control
+    /// channel: the two are alternatives, and a host that has fallen back has nothing to speak the
+    /// protocol on.
+    private var passthroughChannels: [String: PassthroughChannel] = [:]
+
     /// Which channel is painting each pane, by epoch, keyed `hostId` → `paneId`.
     ///
     /// A window can be linked into two sessions at once (F4.9's whole subject), and if both are on
@@ -451,6 +456,12 @@ public actor SessionService {
             if host.connectionState.isActive { return }
             teardown(hostId: hostId, connection: existing)
         }
+        // A host in §4.6's fallback is `.degraded`, which is active — so the guard above would have
+        // refused this call, and it must not: an explicit connect is the user asking to try control
+        // mode again, which is the only way back from passthrough on a host whose tmux was upgraded.
+        // The two channels cannot coexist, so the fallback goes first.
+        if passthroughChannels[hostId] != nil { stopPassthrough(hostId: hostId) }
+        host.passthrough = nil
 
         let sessionTarget = targetSession ?? reconnectTarget[hostId] ?? defaultSessionName(for: host.config)
         // `attachAny` deliberately does not adopt a target: it is used precisely when the remembered
@@ -486,7 +497,16 @@ public actor SessionService {
             connection.attachedByRememberedName = isRecovery && attachMode != .attachAny
             connections[hostId] = connection
         } catch {
-            host.connectionState = .failed(reason: describe(error))
+            let reason = describe(error)
+            host.connectionState = .failed(reason: reason)
+            // R3.8's last row, on the local host: the executable simply is not there, which the
+            // resolver says before anything is spawned. A plain shell is offered rather than started
+            // — there is nothing to reattach to, so opening one is a decision for the user to make.
+            if Self.describesMissingTmux(reason) {
+                host.passthrough = PassthroughState(
+                    reason: .tmuxUnavailable, phase: .offered, detail: reason
+                )
+            }
             hosts[hostId] = host
             broadcastState()
             throw error
@@ -553,6 +573,296 @@ public actor SessionService {
             hostId: hostId, epoch: epoch,
             error: PtyError.handshakeTimedOut(seconds: Int(Self.handshakeTimeout.components.seconds))
         )
+    }
+
+    // MARK: - Passthrough (§4.6, F4.27)
+
+    /// A channel with no protocol on it.
+    ///
+    /// Everything that makes `Connection` complicated — the pending-command FIFO, the codec, the
+    /// handshake, flow control, window sizing — exists because something on the far end is answering
+    /// in a language. Here nothing is: the bytes are a terminal's, and the only jobs are to hand them
+    /// to whoever is drawing and to write keystrokes back. That is why this is a separate type rather
+    /// than a mode on the other one; a `Connection` with all of that switched off would be a class
+    /// whose every field needs a "not in passthrough" caveat.
+    private final class PassthroughChannel {
+        let epoch = UUID()
+        let transport: PtyTransport
+        var readTask: Task<Void, Never>?
+        var subscribers: [UUID: AsyncStream<Data>.Continuation] = [:]
+        /// Whether the process is being stopped on purpose, so its ending is not reported as a fault.
+        var userInitiatedStop = false
+        /// Whether anything has arrived yet, which is what turns `.connecting` into `.running`.
+        var hasSpoken = false
+
+        /// Recent output, replayed to a surface that appears after the channel started.
+        ///
+        /// There is no `capture-pane` here — no protocol to ask it on — so a second window, or a view
+        /// rebuilt for any reason, would otherwise be a black rectangle until the user pressed
+        /// something. Replaying a mid-stream window of bytes can land inside an escape sequence and
+        /// draw one line wrongly; a redraw (`prefix r`, or Ctrl-L in a shell) fixes that, and nothing
+        /// fixes a blank surface that will never be sent anything again.
+        var replay = Data()
+        static let replayBytes = 128 * 1024
+
+        init(transport: PtyTransport) {
+            self.transport = transport
+        }
+
+        func record(_ data: Data) {
+            replay.append(data)
+            if replay.count > Self.replayBytes {
+                replay.removeFirst(replay.count - Self.replayBytes)
+            }
+        }
+    }
+
+    /// A view's handle on a passthrough channel. Deliberately the same shape as `PaneSubscription`,
+    /// since the consumer end is the same job.
+    public struct PassthroughSubscription: Sendable {
+        public let id: UUID
+        public let stream: AsyncStream<Data>
+    }
+
+    /// Starts §4.6's fallback for a host: one tmux client, or a login shell where there is no tmux.
+    ///
+    /// Idempotent, and it takes the host's control channel down first — the two are alternatives, and
+    /// leaving a control client attached while a second one draws the same session is two clients
+    /// fighting over one terminal's worth of size.
+    ///
+    /// - Parameter reason: why control mode is not being used, which is also *which* fallback this
+    ///   is — tmux without `-CC`, or a shell with no tmux behind it at all. Omitted, the host's
+    ///   recorded reason stands, which is what the button on an offer sends: the offer is the thing
+    ///   that knew why.
+    public func startPassthrough(
+        hostId: String,
+        reason: PassthroughState.Reason? = nil,
+        detail: String? = nil,
+        sessionName: String? = nil
+    ) {
+        guard let host = hosts[hostId] else { return }
+        guard passthroughChannels[hostId] == nil else { return }
+        let state = PassthroughState(
+            reason: reason ?? host.passthrough?.reason ?? .tmuxUnavailable,
+            phase: .offered,
+            detail: detail ?? host.passthrough?.detail ?? ""
+        )
+
+        if let existing = connections[hostId] {
+            existing.userInitiatedDisconnect = true
+            teardown(hostId: hostId, connection: existing)
+        }
+
+        let target = sessionName ?? reconnectTarget[hostId] ?? defaultSessionName(for: host.config)
+        let transport = PtyTransport()
+        let channel = PassthroughChannel(transport: transport)
+
+        do {
+            let (executable, arguments) = try invocation(
+                for: host.config,
+                // `new-session -A`: attach to the session if it is there and make it if it is not,
+                // which is what a person opening a terminal on this host means. F4.15's "a reconnect
+                // never creates" is about recovery, and this is not one — nothing here reconnects.
+                mode: .createOrAttach(sessionName: target),
+                flavour: state.usesTmux ? .passthroughTmux : .plainShell
+            )
+            log("[\(hostId)] passthrough: spawn \(executable) \(arguments.map { "\"\($0)\"" }.joined(separator: " "))")
+            // 80x24 until the surface measures itself and says otherwise. Unlike control mode, where
+            // tmux owns geometry (§3.3), the size here is the terminal's own — the view *is* the
+            // client, so the pty's window size is the only thing there is to set.
+            let stream = try transport.spawn(
+                executable: executable,
+                arguments: arguments,
+                environment: childEnvironment(),
+                initialSize: (cols: 80, rows: 24)
+            )
+            let epoch = channel.epoch
+            channel.readTask = Task { [weak self] in
+                do {
+                    for try await data in stream {
+                        await self?.ingestPassthrough(hostId: hostId, epoch: epoch, data: data)
+                    }
+                    await self?.passthroughClosed(hostId: hostId, epoch: epoch, error: nil)
+                } catch {
+                    await self?.passthroughClosed(hostId: hostId, epoch: epoch, error: error)
+                }
+            }
+        } catch {
+            // The whole state, not just the phase: the fallback path clears `passthrough` on its way
+            // here, so a `?.phase =` would write into nothing and the failure would vanish — leaving
+            // a host that had said it was falling back and then said nothing at all.
+            log("[\(hostId)] passthrough could not start: \(describe(error))")
+            withHost(hostId) { host in
+                host.passthrough = PassthroughState(
+                    reason: state.reason,
+                    phase: .ended(reason: self.describe(error)),
+                    detail: state.detail
+                )
+            }
+            broadcastState()
+            return
+        }
+
+        passthroughChannels[hostId] = channel
+        withHost(hostId) { host in
+            host.passthrough = PassthroughState(
+                reason: state.reason, phase: .connecting, detail: state.detail
+            )
+            // There is no session tree behind a passthrough host and no way to build one, so anything
+            // still listed from a control channel that has since been torn down is a row that cannot
+            // do what it offers.
+            host.sessions = []
+            host.activeSessionId = nil
+            host.liveSessionIds = []
+            host.clients = []
+        }
+        broadcastState()
+    }
+
+    /// Ends the passthrough channel, leaving the mode itself offered.
+    public func stopPassthrough(hostId: String) {
+        guard let channel = passthroughChannels.removeValue(forKey: hostId) else { return }
+        channel.userInitiatedStop = true
+        finishPassthroughSubscribers(channel)
+        channel.readTask?.cancel()
+        channel.transport.terminate()
+        withHost(hostId) { host in
+            host.passthrough?.phase = .offered
+        }
+        broadcastState()
+    }
+
+    /// Bytes from the passthrough channel, for whoever is drawing it.
+    ///
+    /// Broadcast rather than owned by one subscriber: there is one client and it paints one screen,
+    /// so two windows on the same passthrough host are two views of the same terminal — which is what
+    /// they would be if this were tmux drawing to two attached clients of the same size.
+    public func subscribeToPassthrough(hostId: String) -> PassthroughSubscription {
+        let id = UUID()
+        // Element-bounded, and that bound is the whole of the backpressure here. Below the
+        // control-mode floor there is nothing to pause a pane *with* — `refresh-client -A` is tmux
+        // 3.2 — so a runaway program is absorbed by dropping the oldest chunks and letting the next
+        // redraw repair the screen. It is the one place in the app where output is discarded without
+        // owing a repaint, because there is nothing that could issue one.
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: Data.self, bufferingPolicy: .bufferingNewest(2048)
+        )
+        guard let channel = passthroughChannels[hostId] else {
+            continuation.finish()
+            return PassthroughSubscription(id: id, stream: stream)
+        }
+        channel.subscribers[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removePassthroughSubscriber(hostId: hostId, id: id) }
+        }
+        // What is already on screen over there, so a surface made now is not blank until the user
+        // types something.
+        if !channel.replay.isEmpty {
+            continuation.yield(channel.replay)
+        }
+        return PassthroughSubscription(id: id, stream: stream)
+    }
+
+    private func removePassthroughSubscriber(hostId: String, id: UUID) {
+        passthroughChannels[hostId]?.subscribers.removeValue(forKey: id)
+    }
+
+    /// Keystrokes, as bytes, straight to the pty.
+    ///
+    /// Not through `send`: there is no command plane here and no pending-command FIFO to misalign.
+    /// This is the same write `answerAuthenticationPrompt` makes, for the same reason — the far end
+    /// is not a parser.
+    public func sendPassthrough(hostId: String, bytes: [UInt8]) {
+        guard let channel = passthroughChannels[hostId], !bytes.isEmpty else { return }
+        let outcome = channel.transport.write(Data(bytes))
+        // A partial write is survivable here, unlike on the command plane: nothing is framed, so the
+        // rest of a keystroke sequence being lost costs a character rather than the channel. Worth
+        // logging, since a character that vanished is otherwise a mystery.
+        if outcome != .complete {
+            log("[\(hostId)] passthrough write did not complete: \(outcome)")
+        }
+    }
+
+    /// The terminal's size, which in this mode is genuinely the view's to decide.
+    ///
+    /// The deliberate exception to §3.3. There, tmux owns geometry because tmux is laying panes out
+    /// and telling us where they went; here the surface *is* the tmux client's terminal, so its size
+    /// is what `TIOCSWINSZ` says and tmux is downstream of it — exactly as it would be in a terminal
+    /// emulator. Asking tmux first would be asking it about a number it is waiting for from us.
+    public func resizePassthrough(hostId: String, cols: Int, rows: Int) {
+        guard let channel = passthroughChannels[hostId], cols > 0, rows > 0 else { return }
+        channel.transport.resize(cols: UInt16(clamping: cols), rows: UInt16(clamping: rows))
+    }
+
+    private func ingestPassthrough(hostId: String, epoch: UUID, data: Data) {
+        guard let channel = passthroughChannels[hostId], channel.epoch == epoch else { return }
+        channel.record(data)
+        for continuation in channel.subscribers.values {
+            continuation.yield(data)
+        }
+        guard !channel.hasSpoken else { return }
+        channel.hasSpoken = true
+        withHost(hostId) { host in
+            host.passthrough?.phase = .running
+        }
+        broadcastState()
+    }
+
+    private func passthroughClosed(hostId: String, epoch: UUID, error: Error?) {
+        guard let channel = passthroughChannels[hostId], channel.epoch == epoch else { return }
+        passthroughChannels.removeValue(forKey: hostId)
+        finishPassthroughSubscribers(channel)
+        guard !channel.userInitiatedStop else { return }
+
+        let reason = error.map(describe) ?? "The session ended."
+        log("[\(hostId)] passthrough ended: \(reason)")
+        withHost(hostId) { host in
+            host.passthrough?.phase = .ended(reason: reason)
+        }
+        broadcastState()
+    }
+
+    private func finishPassthroughSubscribers(_ channel: PassthroughChannel) {
+        for continuation in channel.subscribers.values { continuation.finish() }
+        channel.subscribers.removeAll()
+    }
+
+    /// R3.8's `< 2.4` row: control mode answered, and answered that it is not one we can drive.
+    ///
+    /// The channel goes rather than continuing in a reduced form. That was the shape of the bug this
+    /// replaces — the host was marked `.degraded` and then went straight on to apply the window-size,
+    /// flow-control and subscription policies to a server that has none of them — and it is also the
+    /// honest reading of the requirement: passthrough is a different way of driving the host, not a
+    /// control-mode channel with some features off.
+    private func beginPassthroughFallback(
+        hostId: String, connection: Connection, version: TmuxVersion
+    ) {
+        let detail = "tmux \(version.raw) predates control mode as this client speaks it (2.4)."
+        log("[\(hostId)] \(detail) falling back to passthrough")
+        withHost(hostId) { host in
+            host.connectionState = .degraded(reason: detail)
+        }
+        // Deliberate, so the teardown is not read as a dropped link and put on the backoff.
+        connection.userInitiatedDisconnect = true
+        teardown(hostId: hostId, connection: connection)
+        startPassthrough(
+            hostId: hostId,
+            reason: .belowControlModeFloor(version: version.raw),
+            detail: detail
+        )
+    }
+
+    /// R3.8's last row — whether what killed the channel was the absence of tmux, which is the one
+    /// failure with something better to offer than a retry.
+    ///
+    /// Matched against the message rather than against an exit code, because the exit code is 127 for
+    /// every failed exec and the sentence is ours: `remoteCommand` runs `command -v tmux` precisely so
+    /// that this case says what it is instead of arriving as a generic failure.
+    static func describesMissingTmux(_ reason: String) -> Bool {
+        let lowered = reason.lowercased()
+        return lowered.contains("tmux not found")
+            || lowered.contains("tmux: command not found")
+            || lowered.contains("executable not found on path: tmux")
     }
 
     // MARK: - A client per displayed session
@@ -704,6 +1014,12 @@ public actor SessionService {
         // First, and outside the guard below: a host that is *only* waiting to retry has no
         // connection to find, and that is exactly the state a pending backoff has to be cancelled in.
         cancelScheduledReconnect(hostId: hostId)
+        // §4.6 — a host being driven by passthrough has no `Connection` either, and "disconnect" has
+        // to mean the same thing there: stop the process this app started on the far side.
+        if passthroughChannels[hostId] != nil {
+            stopPassthrough(hostId: hostId)
+            withHost(hostId) { $0.passthrough = nil }
+        }
         guard let connection = connections[hostId] else {
             reconnectAttempts[hostId] = 0
             withHost(hostId) { $0.connectionState = .disconnected }
@@ -740,7 +1056,8 @@ public actor SessionService {
     /// how long the others take — the caller is holding a quit open while this runs.
     public func shutdown() async {
         await withTaskGroup(of: Void.self) { group in
-            for hostId in Set(connections.keys).union(followerChannels.keys) {
+            for hostId in Set(connections.keys).union(followerChannels.keys)
+                .union(passthroughChannels.keys) {
                 group.addTask { await self.disconnectHost(hostId: hostId) }
             }
         }
@@ -750,18 +1067,44 @@ public actor SessionService {
         "tetmux-main"
     }
 
+    /// What a channel is being opened to *talk to* — a parser or a person.
+    ///
+    /// The three differ only in which process is spawned, which is the whole of §2.1's claim about
+    /// this layer. Passthrough (§4.6) is not a second transport, a second reader, or a remote branch:
+    /// it is `tmux` without `-CC`, and the plain shell is the same sentence with no tmux in it.
+    private enum ChannelFlavour {
+        case controlMode
+        /// §4.6 — one tmux client drawing itself, for a server below the control-mode floor.
+        case passthroughTmux
+        /// R3.8's last row — a login shell, for a host with no tmux at all.
+        case plainShell
+    }
+
     private func invocation(
         for config: HostConfig,
-        mode: TmuxCommand.AttachMode
+        mode: TmuxCommand.AttachMode,
+        flavour: ChannelFlavour = .controlMode
     ) throws -> (executable: String, arguments: [String]) {
         if config.isLocal {
+            if flavour == .plainShell {
+                return TmuxCommand.localShellInvocation(
+                    shell: ProcessInfo.processInfo.environment["SHELL"]
+                )
+            }
             guard let tmux = PtyTransport.resolveExecutable("tmux", path: searchPath()) else {
                 throw PtyError.executableNotFound("tmux")
             }
-            return (tmux, TmuxCommand.localArguments(mode: mode))
+            return (
+                tmux,
+                flavour == .controlMode
+                    ? TmuxCommand.localArguments(mode: mode)
+                    : TmuxCommand.localPassthroughArguments(mode: mode)
+            )
         }
 
-        let remoteCommand = TmuxCommand.remoteCommand(mode: mode)
+        let remoteCommand = flavour == .plainShell
+            ? TmuxCommand.remoteShellCommand
+            : TmuxCommand.remoteCommand(mode: mode, controlMode: flavour == .controlMode)
 
         if let custom = config.customCommand, !custom.isEmpty {
             // The user's wrapper replaces ssh entirely; we still append our own tmux invocation so
@@ -1224,6 +1567,10 @@ public actor SessionService {
         if connection.isPrimary {
             // Landed, so the name question is settled either way.
             recoveryLostItsSession.remove(hostId)
+            // Control mode is speaking, so whatever fallback this host was offered or was in is no
+            // longer the answer to anything. Left set, it would keep the UI drawing a passthrough
+            // surface over a host with a live session tree behind it.
+            withHost(hostId) { $0.passthrough = nil }
             // Whatever ssh asked for, it got: the protocol is speaking.
             withHost(hostId) { $0.authenticationPrompt = nil }
             withHost(hostId) { host in
@@ -1286,12 +1633,11 @@ public actor SessionService {
             }()
             connection.version = version
             withHost(hostId) { $0.tmuxVersion = version.raw }
+            // R3.8 — below the floor there is no point applying any of the policies below: they are
+            // all commands this server does not have. §4.6 takes over, and this channel ends here.
             if !version.supportsControlMode {
-                withHost(hostId) { host in
-                    host.connectionState = .degraded(
-                        reason: "tmux \(version.raw) is below the control-mode floor (2.4); passthrough required"
-                    )
-                }
+                beginPassthroughFallback(hostId: hostId, connection: connection, version: version)
+                return
             }
             // The size we asked for before knowing the version may have used the wrong syntax.
             connection.lastSentSize = nil
@@ -2532,7 +2878,16 @@ public actor SessionService {
     }
 
     /// Creates a session on an already-connected host, without opening a second channel.
-    public func newSession(hostId: String, name: String, startDirectory: String? = nil) {
+    ///
+    /// F4.11's three parameters, all of which are the host's rather than a dialog's — see
+    /// `HostConfig.startDirectory` and `HostConfig.initialCommand` for why that is the only shape
+    /// they can take.
+    public func newSession(
+        hostId: String,
+        name: String,
+        startDirectory: String? = nil,
+        initialCommand: String? = nil
+    ) {
         let name = TmuxCommand.singleLine(name)
         guard !name.isEmpty else { return }
         var command = "new-session -d -s \(TmuxCommand.quote(name))"
@@ -2543,6 +2898,14 @@ public actor SessionService {
         let directory = TmuxCommand.singleLine(startDirectory ?? "")
         if !directory.isEmpty {
             command += " -c \(TmuxCommand.quote(directory))"
+        }
+        // Last, and after every option: `shell-command` is `new-session`'s trailing positional
+        // argument, and tmux stops reading flags at the first word that is not one. It is a single
+        // argument that the far-side shell parses, so it is quoted whole rather than split here —
+        // `htop -d 10` is one command, not a command and a flag we get to interpret.
+        let initial = TmuxCommand.singleLine(initialCommand ?? "")
+        if !initial.isEmpty {
+            command += " \(TmuxCommand.quote(initial))"
         }
         send(command, kind: .userCommand("New session"), hostId: hostId)
     }
@@ -2656,6 +3019,21 @@ public actor SessionService {
             Task { [weak self] in
                 try? await self?.connectHost(hostId: hostId, mode: .attachAny)
             }
+            return
+        }
+
+        // R3.8's last row. Retrying is pointless — a host with no tmux will not grow one on the
+        // second attempt — and the message is the whole of what the user needs, so it is stated once
+        // and accompanied by the only thing that can be offered instead (§4.6).
+        if !connection.handshakeComplete, Self.describesMissingTmux(reason) {
+            log("[\(hostId)] there is no tmux on this host; offering a plain shell")
+            withHost(hostId) { host in
+                host.connectionState = .failed(reason: reason)
+                host.passthrough = PassthroughState(
+                    reason: .tmuxUnavailable, phase: .offered, detail: reason
+                )
+            }
+            broadcastState()
             return
         }
 

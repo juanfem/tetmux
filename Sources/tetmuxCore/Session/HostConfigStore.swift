@@ -19,6 +19,8 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
     public var forwardsX11: Bool
     /// `new-session -c`. Optional, and a property of the host — see `HostConfig.startDirectory`.
     public var startDirectory: String?
+    /// `new-session`'s trailing `shell-command` — see `HostConfig.initialCommand`.
+    public var initialCommand: String?
     /// T5.6 — whether this host may write the local clipboard with OSC 52.
     public var allowRemoteClipboardWrite: Bool
 
@@ -36,9 +38,11 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         extraSshArguments: String = "",
         forwardsX11: Bool = false,
         startDirectory: String? = nil,
+        initialCommand: String? = nil,
         allowRemoteClipboardWrite: Bool = false
     ) {
         self.allowRemoteClipboardWrite = allowRemoteClipboardWrite
+        self.initialCommand = initialCommand
         self.id = id
         self.name = name
         self.hostname = hostname
@@ -73,6 +77,7 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         extraSshArguments = try container.decodeIfPresent(String.self, forKey: .extraSshArguments) ?? ""
         forwardsX11 = try container.decodeIfPresent(Bool.self, forKey: .forwardsX11) ?? false
         startDirectory = try container.decodeIfPresent(String.self, forKey: .startDirectory)
+        initialCommand = try container.decodeIfPresent(String.self, forKey: .initialCommand)
         // Absent means denied. T5.6's default survives a file written before the field existed, and
         // survives the field being deleted by hand — the safe answer is the one a missing key gives.
         allowRemoteClipboardWrite =
@@ -85,7 +90,8 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
             port: port, isLocal: isLocal, customCommand: customCommand,
             usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
             forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11,
-            startDirectory: startDirectory, allowRemoteClipboardWrite: allowRemoteClipboardWrite
+            startDirectory: startDirectory, initialCommand: initialCommand,
+            allowRemoteClipboardWrite: allowRemoteClipboardWrite
         )
     }
 }
@@ -99,7 +105,8 @@ extension HostConfig {
             isLocal: isLocal, customCommand: customCommand,
             usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
             forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11,
-            startDirectory: startDirectory, allowRemoteClipboardWrite: allowRemoteClipboardWrite
+            startDirectory: startDirectory, initialCommand: initialCommand,
+            allowRemoteClipboardWrite: allowRemoteClipboardWrite
         )
     }
 }
@@ -154,6 +161,7 @@ public actor HostConfigStore {
         var local = Self.localBaseline
         if let savedLocal = saved.first(where: { $0.id == "local" }) {
             local.startDirectory = savedLocal.startDirectory
+            local.initialCommand = savedLocal.initialCommand
             local.allowRemoteClipboardWrite = savedLocal.allowRemoteClipboardWrite
         }
 

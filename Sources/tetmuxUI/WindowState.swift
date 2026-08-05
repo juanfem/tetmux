@@ -281,6 +281,17 @@ public final class WindowState: Identifiable {
         guard let host = hosts.first(where: { $0.id == saved.hostId }) else { return }
         selectedHostId = host.id
 
+        // §4.6 — a passthrough host has no session tree and will not grow one while it is in that
+        // mode, so there is nothing left for this entry to resolve *to*. Landing it here rather than
+        // leaving it pending is what stops the restore re-asserting this host on every snapshot: an
+        // entry that can never resolve pins the window to it, and clicking any other host in the
+        // tree is silently undone by the next topology change. The window keeps the host, which is
+        // as much of the entry as still means anything.
+        if host.passthrough != nil {
+            pendingRestore = nil
+            return
+        }
+
         // Id first, name second. The id is exact and is what a still-running server will still be
         // using; the name is what survives the server having been restarted in between, when every
         // id has been reissued and matching on one would land on a stranger's session.

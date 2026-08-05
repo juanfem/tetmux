@@ -51,12 +51,18 @@ public struct TetmuxApp: App {
             NewAppWindowButton(title: ApplicationShortcut.newAppWindow.title)
                 .keyboardShortcut(.newAppWindow, in: keymap)
             Divider()
-            Button(ApplicationShortcut.newWindow.title) { model.newWindow() }
-                .keyboardShortcut(.newWindow, in: keymap)
-            Button(ApplicationShortcut.splitRight.title) { model.split(leftRight: true) }
-                .keyboardShortcut(.splitRight, in: keymap)
-            Button(ApplicationShortcut.splitDown.title) { model.split(leftRight: false) }
-                .keyboardShortcut(.splitDown, in: keymap)
+            // F4.27 — a passthrough host has no tmux window and no pane tree for these to act on,
+            // and tmux's own bindings do the job in that mode. They were already inert there; being
+            // greyed out is the part that says so.
+            Group {
+                Button(ApplicationShortcut.newWindow.title) { model.newWindow() }
+                    .keyboardShortcut(.newWindow, in: keymap)
+                Button(ApplicationShortcut.splitRight.title) { model.split(leftRight: true) }
+                    .keyboardShortcut(.splitRight, in: keymap)
+                Button(ApplicationShortcut.splitDown.title) { model.split(leftRight: false) }
+                    .keyboardShortcut(.splitDown, in: keymap)
+            }
+            .disabled(model.activeHostIsPassthrough)
         }
         // Replacing `.pasteboard` rather than `.textEditing`: AppKit's own Paste lives in the
         // pasteboard group and comes first in menu order, so leaving it there put two ⌘V items in the
@@ -95,32 +101,46 @@ public struct TetmuxApp: App {
             Button(ApplicationShortcut.launcher.title) { model.toggleLauncherFromMenu() }
                 .keyboardShortcut(.launcher, in: keymap)
             Divider()
-            Button(ApplicationShortcut.renameWindow.title) { model.requestRenameWindowFromMenu() }
-                .keyboardShortcut(.renameWindow, in: keymap)
-            Button(ApplicationShortcut.renameSession.title) { model.requestRenameSessionFromMenu() }
-                .keyboardShortcut(.renameSession, in: keymap)
-            Divider()
-            // F4.12 — acts on the frontmost window's subject, like every other command here.
-            Button("Open in New Window") { model.detachActiveWindow() }
+            // Naming and re-showing a session are as meaningless on a passthrough host as splitting
+            // one: the tmux window and session these act on are exactly what §4.6 does not have. The
+            // launcher above stays enabled, because discovery across the *other* hosts is the one
+            // thing F4.27 says must keep working.
+            Group {
+                Button(ApplicationShortcut.renameWindow.title) { model.requestRenameWindowFromMenu() }
+                    .keyboardShortcut(.renameWindow, in: keymap)
+                Button(ApplicationShortcut.renameSession.title) { model.requestRenameSessionFromMenu() }
+                    .keyboardShortcut(.renameSession, in: keymap)
+                Divider()
+                // F4.12 — acts on the frontmost window's subject, like every other command here.
+                Button("Open in New Window") { model.detachActiveWindow() }
+            }
+            .disabled(model.activeHostIsPassthrough)
             Divider()
             Button(ApplicationShortcut.closeWindow.title) { model.requestCloseWindowFromMenu() }
                 .keyboardShortcut(.closeWindow, in: keymap)
+                .disabled(model.activeHostIsPassthrough)
             Button(ApplicationShortcut.closePane.title) { model.closePane() }
                 .keyboardShortcut(.closePane, in: keymap)
+                .disabled(model.activeHostIsPassthrough)
         }
         CommandMenu("Pane") {
-            Button(ApplicationShortcut.zoomPane.title) { model.toggleZoom() }
-                .keyboardShortcut(.zoomPane, in: keymap)
-            Divider()
-            Button(ApplicationShortcut.focusNextPane.title) { model.focusAdjacentPane(offset: 1) }
-                .keyboardShortcut(.focusNextPane, in: keymap)
-            Button(ApplicationShortcut.focusPreviousPane.title) { model.focusAdjacentPane(offset: -1) }
-                .keyboardShortcut(.focusPreviousPane, in: keymap)
-            Divider()
-            Button(ApplicationShortcut.nextWindow.title) { model.selectAdjacentWindow(offset: 1) }
-                .keyboardShortcut(.nextWindow, in: keymap)
-            Button(ApplicationShortcut.previousWindow.title) { model.selectAdjacentWindow(offset: -1) }
-                .keyboardShortcut(.previousWindow, in: keymap)
+            // Every item here is about a pane or a tmux window, neither of which a passthrough host
+            // has. `CommandMenu` itself takes no `.disabled`, so the group inside it does.
+            Group {
+                Button(ApplicationShortcut.zoomPane.title) { model.toggleZoom() }
+                    .keyboardShortcut(.zoomPane, in: keymap)
+                Divider()
+                Button(ApplicationShortcut.focusNextPane.title) { model.focusAdjacentPane(offset: 1) }
+                    .keyboardShortcut(.focusNextPane, in: keymap)
+                Button(ApplicationShortcut.focusPreviousPane.title) { model.focusAdjacentPane(offset: -1) }
+                    .keyboardShortcut(.focusPreviousPane, in: keymap)
+                Divider()
+                Button(ApplicationShortcut.nextWindow.title) { model.selectAdjacentWindow(offset: 1) }
+                    .keyboardShortcut(.nextWindow, in: keymap)
+                Button(ApplicationShortcut.previousWindow.title) { model.selectAdjacentWindow(offset: -1) }
+                    .keyboardShortcut(.previousWindow, in: keymap)
+            }
+            .disabled(model.activeHostIsPassthrough)
         }
     }
 }
@@ -442,7 +462,17 @@ struct RootView: View {
 
     @ViewBuilder
     private var detail: some View {
-        if let host, let session, let window {
+        // §4.6 first, because a passthrough host deliberately has no sessions and would otherwise
+        // fall through to the placeholder — which would offer to connect a host that is connected.
+        if let host, host.passthrough != nil {
+            PassthroughView(
+                host: host,
+                theme: model.theme,
+                service: model.service,
+                onStart: { model.startPassthrough(host.id) },
+                onTryControlMode: { model.tryControlMode(host.id) }
+            )
+        } else if let host, let session, let window {
             VStack(spacing: 0) {
                 // The panes stay on screen when a channel dies — they hold real scrollback and the
                 // window list is still meaningful — so this is the only place the user is told the

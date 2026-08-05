@@ -222,13 +222,40 @@ public enum TmuxCommand {
         ["-CC", "-2", "-u"] + mode.arguments
     }
 
+    /// The same channel without `-CC` — §4.6's passthrough, where tmux draws itself.
+    ///
+    /// One flag apart from the line above, and that is the point: passthrough is not a second
+    /// transport or a second code path, it is the same process spawned to talk to a person instead of
+    /// to a parser. `-2` and `-u` stay because they are about the terminal, which is now the surface
+    /// the user is looking at.
+    public static func localPassthroughArguments(mode: AttachMode) -> [String] {
+        ["-2", "-u"] + mode.arguments
+    }
+
+    /// A login shell and nothing else — R3.8's "tmux absent" row.
+    ///
+    /// The user's own shell, because that is what "a plain shell on this host" means; `-l` so it is
+    /// the same shell they would get from a terminal, with their profile loaded. Only reached when
+    /// there is no tmux to run, so nothing here persists and nothing reattaches.
+    public static func localShellInvocation(
+        shell: String? = nil
+    ) -> (executable: String, arguments: [String]) {
+        (shell.flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/sh", ["-l"])
+    }
+
+    /// The same, for a host reached through a wrapper that expects a remote command.
+    public static let remoteShellCommand = #"exec "${SHELL:-/bin/sh}" -l"#
+
     /// The single shell command string handed to the remote login shell.
     ///
     /// This must be **one** argv element. `ssh host -- sh -c "a b c"` does not do what it looks
     /// like: ssh joins everything after the destination with spaces and hands the result to the
     /// remote login shell, so `sh -c` receives only the next word and the rest becomes positional
     /// arguments — the tmux invocation never runs at all.
-    public static func remoteCommand(mode: AttachMode) -> String {
+    /// - Parameter controlMode: `false` builds §4.6's passthrough invocation, which is this command
+    ///   without `-CC`. Everything else about it — the PATH repair, the `command -v` check whose
+    ///   message is what tells the user tmux is missing, the `exec` — is wanted just as much there.
+    public static func remoteCommand(mode: AttachMode, controlMode: Bool = true) -> String {
         // Homebrew and ~/.local are common tmux locations that a non-interactive shell misses.
         let path = "PATH=\"$PATH:/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin\""
         // The sub-command and its flags are ours; only the session name is user data, and it is the
@@ -245,7 +272,7 @@ public enum TmuxCommand {
         return """
         \(path); export PATH; \
         command -v tmux >/dev/null 2>&1 || { echo "tetmux: tmux not found on remote host" >&2; exit 127; }; \
-        exec tmux -CC -2 -u \(tmuxArgs)
+        exec tmux \(controlMode ? "-CC " : "")-2 -u \(tmuxArgs)
         """
     }
 
