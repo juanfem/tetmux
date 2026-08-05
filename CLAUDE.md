@@ -518,6 +518,15 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   They are placed **before** tetmux's own `-o` options, and that ordering is the point: ssh resolves
   each parameter to the *first* value it obtains, so options appended after ours would be accepted and
   silently ignored.
+- **A start directory is a property of the host, not a question at creation time.** `new-session`
+  takes `-c`, and it is fed from `HostConfig.startDirectory` rather than from a dialog: New Session
+  deliberately puts nothing between wanting a shell and having one, which is why it has no name
+  prompt either. tmux resolves the path on its own side, so `~` and a directory that only exists
+  remotely both work — and that is also why there is no folder picker, which could only ever browse
+  this machine. It goes through `TmuxCommand.singleLine` as well as `quote`, like every other user
+  value: the field takes a pasted path, and a line break in one ends the command before the closing
+  quote and hands tmux the remainder to run. **Not settable for localhost**, because `saveHosts`
+  filters the `local` id and the sidebar offers no editor for it.
 - **Tunnels are connection options, not a managed feature.** §1.2 rules out a port-forward management
   UI, and there isn't one: forwards are `-L`/`-R`/`-D` arguments that live and die with the channel.
   Incomplete rows are dropped rather than passed to ssh (a malformed `-L` makes ssh exit before tmux

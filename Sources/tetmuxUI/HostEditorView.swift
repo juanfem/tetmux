@@ -111,6 +111,29 @@ struct HostEditorView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            // Here rather than behind a dialog at creation time, which is the whole reason it can
+            // exist: New Session deliberately puts nothing between wanting a shell and having one,
+            // and where a session starts is a thing you decide once per machine anyway. tmux resolves
+            // the path on the far side, so `~` and a directory that only exists on the remote both
+            // work — and there is no folder picker for the same reason.
+            Grid(alignment: .leading, verticalSpacing: 8) {
+                GridRow {
+                    Text("Start in").gridColumnAlignment(.trailing)
+                    TextField(
+                        "~/projects — optional",
+                        text: Binding($host.startDirectory, replacingNilWith: "")
+                    )
+                    .frame(width: 300)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
+            .padding(.top, 4)
+
+            Text("Where a new session's first pane opens, as `new-session -c`. Resolved on \(host.name.isEmpty ? "the host" : host.name), not here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         // F4.2 — the effective config, from ssh rather than from a reimplementation of its file
         // format. Keyed on the name, so `.task` cancels and re-runs as the field is edited; the sleep

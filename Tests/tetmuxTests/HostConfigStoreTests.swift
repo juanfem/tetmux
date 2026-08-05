@@ -76,7 +76,8 @@ final class HostConfigStoreTests: XCTestCase {
         )
         let host = StoredHost(
             id: "custom-devbox", name: "devbox", user: "me", port: 2222,
-            usesPassword: true, storesPasswordInKeychain: true, forwards: [forward]
+            usesPassword: true, storesPasswordInKeychain: true, forwards: [forward],
+            startDirectory: "~/work/service"
         )
 
         try await store.saveHosts([host])
@@ -85,6 +86,11 @@ final class HostConfigStoreTests: XCTestCase {
         let reloaded = try XCTUnwrap(loaded.first { $0.id == "custom-devbox" })
         XCTAssertEqual(reloaded, host, "the host came back changed")
         XCTAssertEqual(reloaded.forwards.first?.specification, "127.0.0.1:5432:db.internal:5432")
+        // Left as typed: `~` is resolved by tmux on the far side, so expanding it here would produce
+        // a path from *this* machine's home directory for a session opening on another one.
+        XCTAssertEqual(reloaded.startDirectory, "~/work/service")
+        XCTAssertEqual(reloaded.asConfig.startDirectory, "~/work/service", "lost crossing into HostConfig")
+        XCTAssertEqual(reloaded.asConfig.asStoredHost, reloaded, "lost crossing back")
     }
 
     /// §2.5 — credentials are the Keychain's job. `hosts.json` is plain text the user is invited to

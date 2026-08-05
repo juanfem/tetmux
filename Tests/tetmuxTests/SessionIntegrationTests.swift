@@ -197,6 +197,52 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// F4.11 — a host's start directory reaches `new-session -c`, and tmux resolves it on its side.
+    ///
+    /// End to end rather than as a string assertion, because the interesting part is not the command
+    /// text: it is that tmux accepts the directory and the pane really opens there, which is the only
+    /// thing the setting promises. `pane_current_path` is what reports it back.
+    func testANewSessionOpensInTheHostsStartDirectory() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-start-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let created = "\(sessionName)-started"
+        defer { runTmux(["kill-session", "-t", created]) }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let attached = sessionName
+        _ = try await waitForHost(service) { $0.sessions.contains { $0.name == attached } }
+
+        await service.newSession(hostId: "local", name: created, startDirectory: directory.path)
+
+        // `waitFor` plus an explicit assertion, not `waitForHost`: that one throws `XCTSkip` on
+        // timeout, which is exactly as green as a pass — and this test exists to fail if the start
+        // directory never arrives.
+        let arrived = try await waitFor(seconds: 15) {
+            let path = await service.getHost("local")?
+                .sessions.first { $0.name == created }?
+                .activeWindow?.panes.first?.currentPath
+            return path?.isEmpty == false
+        }
+        XCTAssertTrue(arrived, "the new session's pane never reported a working directory")
+
+        let finalHost = await service.getHost("local")
+        let path = try XCTUnwrap(
+            finalHost?.sessions.first { $0.name == created }?.activeWindow?.panes.first?.currentPath
+        )
+        // Compared through `resolvingSymlinksInPath`: /var is a symlink to /private/var on macOS, so
+        // the path handed to tmux and the path tmux reports back are the same directory spelled two
+        // ways, and comparing the strings fails for a reason that has nothing to do with the feature.
+        XCTAssertEqual(
+            URL(fileURLWithPath: path).resolvingSymlinksInPath().path,
+            directory.resolvingSymlinksInPath().path
+        )
+    }
+
     /// Control mode only streams `%output` for the session the client is attached to. Selecting
     /// another session in the sidebar therefore has to move the client with `switch-client`;
     /// otherwise its panes render once from `capture-pane` and then sit frozen forever.

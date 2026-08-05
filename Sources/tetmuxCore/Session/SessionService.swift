@@ -2343,8 +2343,13 @@ public actor SessionService {
         let name = TmuxCommand.singleLine(name)
         guard !name.isEmpty else { return }
         var command = "new-session -d -s \(TmuxCommand.quote(name))"
-        if let startDirectory, !startDirectory.isEmpty {
-            command += " -c \(TmuxCommand.quote(startDirectory))"
+        // `singleLine` as well as `quote`, exactly as the name gets: control-mode commands are
+        // newline-framed, so a value carrying a line break ends the command before tmux's parser
+        // reaches the closing quote and the remainder arrives as a *new* command that tmux runs.
+        // Quoting cannot defend against that. This is a text field that accepts a pasted path.
+        let directory = TmuxCommand.singleLine(startDirectory ?? "")
+        if !directory.isEmpty {
+            command += " -c \(TmuxCommand.quote(directory))"
         }
         send(command, kind: .userCommand("New session"), hostId: hostId)
     }

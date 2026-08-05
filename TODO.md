@@ -22,8 +22,9 @@ What is left falls into three groups, and they are not equally blocked:
   tab reordering and `move-window`, window/session state restoration, listing a host's sessions
   without attaching (F4.4), and the §8 test infrastructure — a containerised sshd matrix, chaos
   tests, a full geometry suite, a rendering corpus.
-- **Small and unblocked.** A UI for `newSession`'s start directory, and the three still-unwired
-  declarations — per-host OSC 52, an editable keymap, and ⌘⌥V's literal escape.
+- **Small and unblocked.** The three still-unwired declarations — per-host OSC 52, an editable
+  keymap, and ⌘⌥V's literal escape — and a start directory for **localhost**, which needs the host
+  editor to work for a host that has no ssh settings.
 
 ## Protocol correctness
 
@@ -344,8 +345,17 @@ What is left falls into three groups, and they are not equally blocked:
 - [~] **F4.11** has no `detach-client`: disconnect tears the pty down with `SIGHUP` instead. And
   `newSession` accepts a start directory that no caller passes.
   *`detach-client` is done, as "Detach This Client" beside Disconnect, and waited for rather than
-  merely written so `SIGHUP` cannot beat it out of the pty. The start directory still has no UI to
-  set it from; an initial command is not a parameter at all.*
+  merely written so `SIGHUP` cannot beat it out of the pty. The start directory is now a **host**
+  setting — "Start in" in the host editor — rather than a dialog at creation time, which is what lets
+  it exist at all: `createSessionWithDefaultName` deliberately puts nothing between wanting a shell
+  and having one. tmux resolves the path on its own side, so `~` and a directory that only exists
+  remotely both work, and there is deliberately no folder picker. Wiring it turned up that the
+  parameter never went through `TmuxCommand.singleLine`, so a pasted path with a line break would
+  have ended the command early and handed tmux the remainder as a new one.
+  **Two things it still does not cover.** It cannot be set for **localhost**: `saveHosts` filters the
+  `local` id and the sidebar offers no editor for it, so the host most likely to want one is the one
+  that cannot have one — giving it an editor means a conditional one, since hostname, user, port,
+  password and forwards are all meaningless there. And an initial command is still not a parameter.*
   `Sources/tetmuxCore/Session/SessionService.swift:2323`, `Sources/tetmuxUI/AppModel.swift:926`
 
 ## Infrastructure

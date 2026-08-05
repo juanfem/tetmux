@@ -17,6 +17,8 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
     /// Extra `ssh` options as typed. Split into argv elements at connect time, never run by a shell.
     public var extraSshArguments: String
     public var forwardsX11: Bool
+    /// `new-session -c`. Optional, and a property of the host — see `HostConfig.startDirectory`.
+    public var startDirectory: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -30,7 +32,8 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         storesPasswordInKeychain: Bool = false,
         forwards: [PortForward] = [],
         extraSshArguments: String = "",
-        forwardsX11: Bool = false
+        forwardsX11: Bool = false,
+        startDirectory: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -44,6 +47,7 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         self.forwards = forwards
         self.extraSshArguments = extraSshArguments
         self.forwardsX11 = forwardsX11
+        self.startDirectory = startDirectory
     }
 
     /// Decoded field by field rather than by the synthesised initialiser, so a `hosts.json` written
@@ -64,6 +68,7 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         forwards = try container.decodeIfPresent([PortForward].self, forKey: .forwards) ?? []
         extraSshArguments = try container.decodeIfPresent(String.self, forKey: .extraSshArguments) ?? ""
         forwardsX11 = try container.decodeIfPresent(Bool.self, forKey: .forwardsX11) ?? false
+        startDirectory = try container.decodeIfPresent(String.self, forKey: .startDirectory)
     }
 
     public var asConfig: HostConfig {
@@ -71,7 +76,8 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
             id: id, name: name, hostname: hostname, user: user,
             port: port, isLocal: isLocal, customCommand: customCommand,
             usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
-            forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11
+            forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11,
+            startDirectory: startDirectory
         )
     }
 }
@@ -84,7 +90,8 @@ extension HostConfig {
             id: id, name: name, hostname: hostname, user: user, port: port,
             isLocal: isLocal, customCommand: customCommand,
             usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
-            forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11
+            forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11,
+            startDirectory: startDirectory
         )
     }
 }

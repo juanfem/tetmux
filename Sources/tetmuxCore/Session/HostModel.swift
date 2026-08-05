@@ -410,6 +410,14 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
     /// `ssh -X`. A checkbox rather than something to remember to type, because it is the one extra
     /// option with a reason to be discoverable.
     public let forwardsX11: Bool
+    /// Where a new session's first pane starts, as `new-session -c` (F4.11).
+    ///
+    /// A property of the host rather than something asked for at creation time, which is the whole
+    /// reason it can exist at all: `createSessionWithDefaultName` deliberately puts *no* dialog
+    /// between wanting a shell and having one, and a start directory is a thing you decide once per
+    /// machine rather than once per session. Resolved by tmux on the far side, so `~` and a path that
+    /// only exists remotely both work.
+    public let startDirectory: String?
 
     /// What `ssh` should be given as the destination.
     public var sshDestination: String {
@@ -430,7 +438,8 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
         storesPasswordInKeychain: Bool = false,
         forwards: [PortForward] = [],
         extraSshArguments: String = "",
-        forwardsX11: Bool = false
+        forwardsX11: Bool = false,
+        startDirectory: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -444,6 +453,7 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
         self.forwards = forwards
         self.extraSshArguments = extraSshArguments
         self.forwardsX11 = forwardsX11
+        self.startDirectory = startDirectory
     }
 }
 

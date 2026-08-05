@@ -921,9 +921,15 @@ public final class AppModel {
                 knownWindowIds: [], madeAt: .now
             ))
         }
+        let host = hosts.first { $0.id == hostId }
+        // The host's start directory, if it has one. Only on the `new-session` path: the other branch
+        // connects the channel, and the session it attaches or creates is tmux's own `new-session -A`
+        // inside the ssh command, which has nowhere to put a `-c` and no reason to — a host that is
+        // not yet connected is being reached for the first time, not given a working directory.
+        let startDirectory = host?.config.startDirectory
         Task {
-            if hosts.first(where: { $0.id == hostId })?.connectionState.isActive == true {
-                await service.newSession(hostId: hostId, name: trimmed)
+            if host?.connectionState.isActive == true {
+                await service.newSession(hostId: hostId, name: trimmed, startDirectory: startDirectory)
             } else {
                 try? await service.connectHost(hostId: hostId, targetSession: trimmed)
             }
