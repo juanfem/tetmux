@@ -19,6 +19,8 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
     public var forwardsX11: Bool
     /// `new-session -c`. Optional, and a property of the host — see `HostConfig.startDirectory`.
     public var startDirectory: String?
+    /// T5.6 — whether this host may write the local clipboard with OSC 52.
+    public var allowRemoteClipboardWrite: Bool
 
     public init(
         id: String = UUID().uuidString,
@@ -33,8 +35,10 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         forwards: [PortForward] = [],
         extraSshArguments: String = "",
         forwardsX11: Bool = false,
-        startDirectory: String? = nil
+        startDirectory: String? = nil,
+        allowRemoteClipboardWrite: Bool = false
     ) {
+        self.allowRemoteClipboardWrite = allowRemoteClipboardWrite
         self.id = id
         self.name = name
         self.hostname = hostname
@@ -69,6 +73,10 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         extraSshArguments = try container.decodeIfPresent(String.self, forKey: .extraSshArguments) ?? ""
         forwardsX11 = try container.decodeIfPresent(Bool.self, forKey: .forwardsX11) ?? false
         startDirectory = try container.decodeIfPresent(String.self, forKey: .startDirectory)
+        // Absent means denied. T5.6's default survives a file written before the field existed, and
+        // survives the field being deleted by hand — the safe answer is the one a missing key gives.
+        allowRemoteClipboardWrite =
+            try container.decodeIfPresent(Bool.self, forKey: .allowRemoteClipboardWrite) ?? false
     }
 
     public var asConfig: HostConfig {
@@ -77,7 +85,7 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
             port: port, isLocal: isLocal, customCommand: customCommand,
             usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
             forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11,
-            startDirectory: startDirectory
+            startDirectory: startDirectory, allowRemoteClipboardWrite: allowRemoteClipboardWrite
         )
     }
 }
@@ -91,7 +99,7 @@ extension HostConfig {
             isLocal: isLocal, customCommand: customCommand,
             usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
             forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11,
-            startDirectory: startDirectory
+            startDirectory: startDirectory, allowRemoteClipboardWrite: allowRemoteClipboardWrite
         )
     }
 }
@@ -104,10 +112,20 @@ public actor HostConfigStore {
     /// against whatever `~/.ssh/config` happens to hold on the machine running the tests.
     private let sshConfigURL: URL
 
-    public init(directory: URL? = nil, sshConfigURL: URL? = nil) {
-        let base = directory ?? FileManager.default
+    /// `~/Library/Application Support/tetmux`, created if it is not there.
+    ///
+    /// Shared because §2.3 puts three files here — `hosts.json`, `workspace.json`, `settings.json` —
+    /// and three copies of this arithmetic is three chances for one of them to land somewhere else.
+    public static func applicationSupportDirectory() -> URL {
+        let base = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("tetmux", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
+    public init(directory: URL? = nil, sshConfigURL: URL? = nil) {
+        let base = directory ?? Self.applicationSupportDirectory()
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         self.storeURL = base.appendingPathComponent("hosts.json")
         self.sshConfigURL = sshConfigURL ?? FileManager.default
@@ -120,9 +138,26 @@ public actor HostConfigStore {
 
     /// The local host, then anything the user saved, then a conservative scan of `~/.ssh/config`
     /// (F4.2). Saved entries win over discovered ones with the same name.
+    /// The local host as it is when nobody has changed anything about it.
+    ///
+    /// Its existence is not a stored fact — there is always a local tmux — so what is persisted is
+    /// only the difference from this, exactly as for a host discovered from `~/.ssh/config`.
+    public static let localBaseline = StoredHost(id: "local", name: "localhost", isLocal: true)
+
     public func loadHosts() -> [StoredHost] {
-        var hosts: [StoredHost] = [StoredHost(id: "local", name: "localhost", isLocal: true)]
         let saved = loadSaved()
+
+        // The local host takes only the settings that mean anything without an ssh connection, and
+        // never the whole saved record. `isLocal` and the id decide which transport is used and are
+        // read all over the app, so a hand-edited `hosts.json` must not be able to turn the local
+        // host into a remote one or rename it out of the two places that look it up by name.
+        var local = Self.localBaseline
+        if let savedLocal = saved.first(where: { $0.id == "local" }) {
+            local.startDirectory = savedLocal.startDirectory
+            local.allowRemoteClipboardWrite = savedLocal.allowRemoteClipboardWrite
+        }
+
+        var hosts: [StoredHost] = [local]
 
         // Built by hand rather than with `uniqueKeysWithValues`, which traps on a duplicate — and the
         // file is documented as something the user may open and edit.
@@ -191,7 +226,11 @@ public actor HostConfigStore {
         for host in discoverSSHHosts() where discovered[host.id] == nil { discovered[host.id] = host }
 
         let persisted = hosts.filter { host in
-            guard host.id != "local" else { return false }
+            // The local host is implicit and used to be dropped outright, which meant the one host
+            // most likely to want a start directory was the one that could not have one. Kept now,
+            // but only when something was actually set on it — an unedited entry in the file would
+            // be a fact nobody stated, and would outlive a later change to what the baseline is.
+            guard host.id != "local" else { return host != Self.localBaseline }
             guard host.id.hasPrefix("ssh-") else { return true }
             // Only an override for a stanza that is still there. An entry whose `Host` block has gone
             // would never be shown again anyway — `loadHosts` applies these to discovered hosts and

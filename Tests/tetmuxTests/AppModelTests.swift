@@ -7,6 +7,28 @@ import XCTest
 @MainActor
 final class AppModelTests: XCTestCase {
 
+    /// A per-test Application Support directory.
+    ///
+    /// Not a nicety. `AppModel` writes files as a side effect of ordinary operations — rebinding a
+    /// chord persists `settings.json`, selecting a session schedules a `workspace.json` save — so a
+    /// default-constructed model in a test writes the *user's* files. It did, once: running the app
+    /// after this suite found the keymap from `testOnlyEditedBindingsAreStored` in it.
+    private var directory: URL!
+
+    override func setUpWithError() throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-model-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private func makeModel() -> AppModel {
+        AppModel(directory: directory)
+    }
+
     private func window(_ id: String, name: String = "shell", panes: [String] = ["%1"]) -> TmuxWindow {
         var window = TmuxWindow(id: id, name: name)
         window.panes = panes.map { TmuxPane(id: $0, command: "vim") }
@@ -39,7 +61,7 @@ final class AppModelTests: XCTestCase {
     /// nothing is destroyed and there is nothing to confirm.
     func testClosingAMultiLinkedWindowNeedsNoConfirmation() {
         let shared = window("@5")
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [
             TmuxSession(id: "$1", name: "one", windows: [shared], isAttached: true),
             TmuxSession(id: "$2", name: "two", windows: [shared]),
@@ -64,7 +86,7 @@ final class AppModelTests: XCTestCase {
     /// unlink outright — so this is the one case that stops and asks (F4.10).
     func testClosingASingleLinkedWindowAsksBeforeKilling() {
         let only = window("@7", name: "build", panes: ["%1", "%2"])
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [
             TmuxSession(id: "$1", name: "one", windows: [only], isAttached: true),
         ])]
@@ -86,7 +108,7 @@ final class AppModelTests: XCTestCase {
     /// assertion has to be made again for the next window.
     func testOptionClickClosingAWindowSkipsTheConfirmation() {
         let only = window("@7", name: "build", panes: ["%1", "%2"])
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [
             TmuxSession(id: "$1", name: "one", windows: [only], isAttached: true),
         ])]
@@ -104,7 +126,7 @@ final class AppModelTests: XCTestCase {
     /// A window belonging to a host we know nothing about is not silently unlinked. Treating an
     /// unknown host as "not multi-linked" is the safe direction: it asks rather than acting.
     func testClosingAWindowOnAnUnknownHostAsks() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = []
         XCTAssertNotNil(model.closeWindow(hostId: "nope", window: window("@1")))
     }
@@ -113,7 +135,7 @@ final class AppModelTests: XCTestCase {
 
     /// The first session on a host with none takes index 1, not 0.
     func testDefaultSessionNameStartsAtOne() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [])]
         XCTAssertEqual(model.defaultSessionName(hostId: "local"), "tetmux_1")
     }
@@ -121,7 +143,7 @@ final class AppModelTests: XCTestCase {
     /// A name already in use is skipped. tmux refuses a duplicate session name, and that refusal would
     /// surface as a failure banner for a command the user never typed a name for.
     func testDefaultSessionNameSkipsNamesAlreadyTaken() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [
             TmuxSession(id: "$1", name: "tetmux_1", windows: [], isAttached: true),
             TmuxSession(id: "$2", name: "tetmux_2", windows: []),
@@ -132,7 +154,7 @@ final class AppModelTests: XCTestCase {
     /// The lowest free index, not a running count: closing a session in the middle makes its name
     /// available again rather than leaving a permanent gap and climbing forever.
     func testDefaultSessionNameReusesAFreedIndex() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [
             TmuxSession(id: "$1", name: "tetmux_1", windows: [], isAttached: true),
             TmuxSession(id: "$3", name: "tetmux_3", windows: []),
@@ -142,7 +164,7 @@ final class AppModelTests: XCTestCase {
 
     /// Sessions the user named themselves are not in the way of the generated series.
     func testDefaultSessionNameIgnoresUnrelatedNames() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [
             TmuxSession(id: "$1", name: "work", windows: [], isAttached: true),
             TmuxSession(id: "$2", name: "tetmux_dev", windows: []),
@@ -155,7 +177,7 @@ final class AppModelTests: XCTestCase {
     /// Menu commands act on whichever window is key. Every window publishes its own scope now — there
     /// is no privileged main window to fall back to, because there can be several of them.
     func testFocusPublishesTheFocusedWindowsScope() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
 
         let first = WindowState()
@@ -182,7 +204,7 @@ final class AppModelTests: XCTestCase {
 
     /// Item 15. Two windows used to share one selection, so navigating in either moved both.
     func testSelectingInOneWindowLeavesTheOtherAlone() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
 
         let first = WindowState()
@@ -198,7 +220,7 @@ final class AppModelTests: XCTestCase {
     /// Item 13. One `.sheet(item:)` bound to shared model state opened the same editor once per open
     /// window; the draft belongs to the window that asked for it.
     func testTheHostEditorOpensOnlyInTheWindowThatAskedForIt() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
 
         let asking = WindowState()
@@ -211,7 +233,7 @@ final class AppModelTests: XCTestCase {
 
     /// A rename raised in one window must not put a sheet in front of another.
     func testARenameSheetIsScopedToItsWindow() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
 
         let asking = WindowState()
@@ -232,7 +254,7 @@ final class AppModelTests: XCTestCase {
     /// An ssh prompt belongs to a host, not a window, and no window asked for it — so exactly one
     /// window presents it. Shown in all of them it is a password typed once per window.
     func testExactlyOneWindowPresentsHostLevelSheets() {
-        let model = AppModel()
+        let model = makeModel()
         let first = WindowState()
         let second = WindowState()
         model.registerWindow(first)
@@ -245,7 +267,7 @@ final class AppModelTests: XCTestCase {
     /// …and closing that window promotes the next, rather than leaving nothing able to show a prompt
     /// and a host stuck at "Connecting…" forever.
     func testClosingThePresentingWindowPromotesTheNext() {
-        let model = AppModel()
+        let model = makeModel()
         let first = WindowState()
         let second = WindowState()
         model.registerWindow(first)
@@ -258,7 +280,7 @@ final class AppModelTests: XCTestCase {
     /// Registration is idempotent: SwiftUI can run `onAppear` again for a window that never went away,
     /// and a duplicated entry would outlive one `onDisappear` and keep a dead window at the head.
     func testRegisteringTheSameWindowTwiceIsHarmless() {
-        let model = AppModel()
+        let model = makeModel()
         let first = WindowState()
         let second = WindowState()
         model.registerWindow(first)
@@ -284,7 +306,7 @@ final class AppModelTests: XCTestCase {
     /// retargeting a different one would hijack whatever it was displaying to duplicate something
     /// already visible.
     func testShowingASessionPrefersTheWindowAlreadyDisplayingIt() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
         let windows = openWindows(model, 2)
         model.select(in: windows[0], host: "local", session: "$2", window: "@2")
@@ -300,7 +322,7 @@ final class AppModelTests: XCTestCase {
     /// Item 9's second rule: nothing is showing it, so the last-used window takes it. Not a new
     /// window — the menu bar picking a session should not litter the screen.
     func testShowingASessionFallsBackToTheLastUsedWindow() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
         let windows = openWindows(model, 2)
         model.focus(windows[0])
@@ -315,7 +337,7 @@ final class AppModelTests: XCTestCase {
 
     /// Item 10 — Option-click opens a new window even when one is already showing the session.
     func testPreferNewWindowAsksForOneEvenWhenTheSessionIsAlreadyShown() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
         let windows = openWindows(model, 1)
         model.select(in: windows[0], host: "local", session: "$2", window: "@2")
@@ -332,7 +354,7 @@ final class AppModelTests: XCTestCase {
     /// Item 5 — the double-clicked window takes the session when nothing else is showing it, rather
     /// than whichever window happened to be focused last.
     func testAnExplicitFallbackWinsOverTheLastUsedWindow() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
         let windows = openWindows(model, 2)
         model.focus(windows[1])
@@ -349,7 +371,7 @@ final class AppModelTests: XCTestCase {
     /// With every window closed — the menu bar extra keeps the app alive with none — there is nothing
     /// to reuse and a window has to be opened.
     func testShowingASessionWithNoWindowsOpenAsksForOne() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
 
         let target = model.showSession(hostId: "local", sessionId: "$2")
@@ -363,7 +385,7 @@ final class AppModelTests: XCTestCase {
     /// A closed window must stop being offered as somewhere to put a session. The registry holds
     /// windows weakly for the same reason, but `unregisterWindow` is what runs in practice.
     func testAClosedWindowIsNoLongerARoutingTarget() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
         let windows = openWindows(model, 2)
         model.select(in: windows[0], host: "local", session: "$2", window: "@2")
@@ -378,7 +400,7 @@ final class AppModelTests: XCTestCase {
     /// The seed is taken once. Otherwise ⌘N straight after opening a session would land on that
     /// session instead of coming up as a plain new window.
     func testASeedIsConsumedExactlyOnce() {
-        let model = AppModel()
+        let model = makeModel()
         model.openWindow(WindowSeed(hostId: "local", sessionId: "$2", collapseSidebar: true))
 
         XCTAssertEqual(model.consumeSeed()?.sessionId, "$2")
@@ -391,7 +413,7 @@ final class AppModelTests: XCTestCase {
     /// change — so a request claimed by value rather than by this method would open one window per
     /// window already on screen.
     func testAWindowRequestIsClaimedByExactlyOneWindow() {
-        let model = AppModel()
+        let model = makeModel()
         model.openWindow(WindowSeed(hostId: "local", sessionId: "$1"))
 
         XCTAssertTrue(model.claimWindowRequest(), "the first window to react should open one")
@@ -401,14 +423,14 @@ final class AppModelTests: XCTestCase {
 
     /// And with no request outstanding nothing is claimed, so an unrelated redraw opens nothing.
     func testNothingIsClaimedWithoutARequest() {
-        XCTAssertFalse(AppModel().claimWindowRequest())
+        XCTAssertFalse(makeModel().claimWindowRequest())
     }
 
     /// With every window closed there is nobody left to claim the request, so the model performs it
     /// itself. Without this the menu bar extra — the whole reason the app stays alive with no windows
     /// — switches to a session and nothing appears, and the request sits set for good.
     func testAWindowRequestWithNothingOpenIsPerformedByTheModel() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
         var opened = 0
         model.openAppWindow = { opened += 1 }
@@ -424,7 +446,7 @@ final class AppModelTests: XCTestCase {
     /// …and with a window on screen it must *not*, or the request is honoured twice: once here and
     /// once by the window observing it.
     func testAWindowRequestWithAWindowOpenIsLeftToThatWindow() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
         // Held, not discarded: the registry keeps windows weakly, so a released `WindowState` is
         // indistinguishable from a closed window and this would test the case above instead.
@@ -451,7 +473,7 @@ final class AppModelTests: XCTestCase {
     /// Nothing can be selected at the moment of asking: control mode returns no id and the session
     /// only exists, from our side, when the topology comes back.
     func testCreatingASessionSelectsItWhenItArrives() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [])]
         let state = WindowState()
         model.registerWindow(state)
@@ -475,7 +497,7 @@ final class AppModelTests: XCTestCase {
     /// reveal *in*, so the reveal has to bring its own window. Without this the session is created on
     /// the server and nobody is ever shown it — no reveal was even queued.
     func testCreatingASessionWithNothingOpenBringsItsOwnWindow() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [])]
         var opened = 0
         model.openAppWindow = { opened += 1 }
@@ -497,7 +519,7 @@ final class AppModelTests: XCTestCase {
         let existing = TmuxSession(
             id: "$1", name: "one", windows: [window("@1", panes: ["%1"])], isAttached: true
         )
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [existing])]
         let state = WindowState()
         model.registerWindow(state)
@@ -526,7 +548,7 @@ final class AppModelTests: XCTestCase {
     /// reaching for the Dock icon has no window in front of them and needs one they can find their
     /// way around from.
     func testTheDocksNewWindowAsksForOneWithTheTreeShowing() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
         _ = openWindows(model, 1)
 
@@ -556,7 +578,7 @@ final class AppModelTests: XCTestCase {
     /// and both are `preferNewWindow`: the Dock is reached from outside the app, so there is no
     /// current window the user meant to retarget — often no window at all.
     func testADockSessionItemOpensItsOwnWindowForWhicheverHostItNames() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: []), remoteHost(id: "remote-1", sessions: [])]
         let state = WindowState()
         model.registerWindow(state)
@@ -583,7 +605,7 @@ final class AppModelTests: XCTestCase {
     /// be opened at the moment of asking — `new-session` answers with no id, so there is nothing to
     /// seed one with — so the request has to survive until tmux confirms the session.
     func testCreatingASessionInANewWindowAsksForOneWhenItArrives() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [])]
         let state = WindowState()
         model.registerWindow(state)
@@ -607,7 +629,7 @@ final class AppModelTests: XCTestCase {
     /// The new window is the only place the session goes, so the request must outlive the window that
     /// asked — unlike an ordinary reveal, which has nobody to show anything to once that window closes.
     func testANewWindowRevealSurvivesTheWindowThatAskedForIt() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [])]
         var state: WindowState? = WindowState()
         model.registerWindow(state!)
@@ -624,7 +646,7 @@ final class AppModelTests: XCTestCase {
 
     /// A reveal waits for its subject rather than settling for whatever is there.
     func testAPendingRevealDoesNotSelectSomethingElse() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [])]
         let state = WindowState()
         model.registerWindow(state)
@@ -640,7 +662,7 @@ final class AppModelTests: XCTestCase {
     /// A window closed before its request resolves takes the request with it, rather than the model
     /// holding a dead window open.
     func testARevealForAClosedWindowIsDiscarded() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [])]
         var state: WindowState? = WindowState()
         model.registerWindow(state!)
@@ -660,7 +682,7 @@ final class AppModelTests: XCTestCase {
     /// Two windows on one session ask for one client. A second client on the same session would
     /// stream the same panes twice and buy nothing.
     func testTwoWindowsOnTheSameSessionAskForOneClient() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [window("@1")])])]
         // Held: the model's window registry is weak, so a window nothing keeps alive is a window
         // that closed the instant it opened.
@@ -678,7 +700,7 @@ final class AppModelTests: XCTestCase {
     /// Two sessions on screen are two clients, which is the entire point: one tmux client streams
     /// output for one session, so the second window used to be a still frame.
     func testEverySessionOnScreenIsAskedFor() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [
             TmuxSession(id: "$1", name: "one", windows: [window("@1")]),
             TmuxSession(id: "$2", name: "two", windows: [window("@2")]),
@@ -700,7 +722,7 @@ final class AppModelTests: XCTestCase {
 
     /// Closing a window gives its client back, unless another window is still showing that session.
     func testAClosedWindowStopsAskingForItsSession() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [
             TmuxSession(id: "$1", name: "one", windows: [window("@1")]),
             TmuxSession(id: "$2", name: "two", windows: [window("@2")]),
@@ -802,7 +824,7 @@ final class AppModelTests: XCTestCase {
     /// The commands behind the row buttons carry the host explicitly, so a colliding id on another
     /// host cannot receive them. Asserted on the confirmation, which is the observable half.
     func testKillTargetsTheHostTheRowBelongsTo() {
-        let model = AppModel()
+        let model = makeModel()
         let colliding = TmuxSession(
             id: "$0", name: "shared-id", windows: [window("@1", panes: ["%1"])], isAttached: true
         )
@@ -820,7 +842,7 @@ final class AppModelTests: XCTestCase {
 
     /// Likewise for renaming: `$0` exists on both hosts and the request must name which one.
     func testRenameTargetsTheHostTheRowBelongsTo() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [
             host(id: "local", sessions: [TmuxSession(id: "$0", name: "here", windows: [], isAttached: true)]),
             host(id: "remote", sessions: [TmuxSession(id: "$0", name: "there", windows: [], isAttached: true)]),
@@ -838,7 +860,7 @@ final class AppModelTests: XCTestCase {
     /// Killing a session ends every process in every window it has, and tmux has no unlink to soften
     /// it, so the confirmation has to say what is about to go.
     func testKillingASessionAsksAndNamesWhatIsRunning() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [host(sessions: [
             TmuxSession(
                 id: "$1", name: "work",
@@ -857,7 +879,7 @@ final class AppModelTests: XCTestCase {
 
     /// ⌥ skips it here too. Same modifier, same meaning, one level up the tree.
     func testOptionClickKillingASessionSkipsTheConfirmation() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
         let state = WindowState()
 
@@ -871,7 +893,7 @@ final class AppModelTests: XCTestCase {
     /// A session that is already gone raises nothing, rather than a confirmation naming a session
     /// that cannot be killed.
     func testKillingAnUnknownSessionRaisesNothing() {
-        let model = AppModel()
+        let model = makeModel()
         model.hosts = [twoSessionHost]
         let state = WindowState()
 
@@ -993,6 +1015,300 @@ final class AppModelTests: XCTestCase {
         let keymap = KeymapPolicy.default
         XCTAssertEqual(keymap.shortcut(for: keyEvent("v", [.command])), .paste)
         XCTAssertNil(keymap.shortcut(for: keyEvent("v", [.command]), literalEscapeActive: true))
+    }
+
+    // MARK: - The editable keymap (F4.19)
+
+    /// A chord has to survive `settings.json` and come back as the same chord, or a rebind is lost
+    /// on the next launch and looks like a setting that does not stick.
+    func testAChordRoundTripsThroughItsStoredForm() {
+        for binding in [
+            KeyBinding("k"),
+            KeyBinding("w", [.command, .shift]),
+            KeyBinding("]", [.command, .option]),
+            KeyBinding("=", [.command]),
+            // The one the `+` separator could eat.
+            KeyBinding("+", [.command, .shift]),
+        ] {
+            let text = binding.storageString
+            XCTAssertEqual(KeyBinding(storageString: text), binding, "round trip of \(text)")
+        }
+    }
+
+    func testAnUnparseableChordIsRejectedRatherThanGuessedAt() {
+        XCTAssertNil(KeyBinding(storageString: "k"), "a chord with no modifier is not one")
+        XCTAssertNil(KeyBinding(storageString: "meta+k"), "an unknown modifier name")
+        XCTAssertNil(KeyBinding(storageString: "cmd+ab"), "the key is one character")
+        XCTAssertNil(KeyBinding(storageString: ""))
+    }
+
+    /// F4.19/F4.20 — the application lives in `Cmd` space so everything else reaches the pane. A
+    /// rebind that could take `Ctrl+K` would take kill-line away from every shell on every host.
+    func testARebindOutsideCommandSpaceIsRefused() {
+        let model = makeModel()
+        XCTAssertEqual(
+            model.rebind(.launcher, to: KeyBinding("k", [.control])),
+            .notInCommandSpace
+        )
+        XCTAssertEqual(model.keymap.binding(for: .launcher), KeyBinding("k"), "the old binding stands")
+    }
+
+    /// Two commands on one chord means one of them silently stops working, since `shortcut(for:)`
+    /// breaks the tie by the enum case's spelling. So it is refused at the point of being typed.
+    func testARebindOntoATakenChordIsRefused() {
+        let model = makeModel()
+        XCTAssertEqual(model.rebind(.zoomPane, to: KeyBinding("k")), .conflict(.launcher))
+        XCTAssertEqual(model.keymap.binding(for: .zoomPane), KeyBinding("z", [.command, .shift]))
+        // The chord a shortcut already holds is not a conflict with itself.
+        XCTAssertEqual(model.rebind(.launcher, to: KeyBinding("k")), .applied)
+    }
+
+    /// Only the difference from the defaults is written, so a later change to a default binding
+    /// reaches everybody who never touched it.
+    func testOnlyEditedBindingsAreStored() {
+        let model = makeModel()
+        XCTAssertTrue(model.keymap.overrides.isEmpty, "an untouched keymap stores nothing")
+
+        XCTAssertEqual(model.rebind(.launcher, to: KeyBinding("j", [.command, .shift])), .applied)
+        XCTAssertEqual(model.keymap.overrides, ["launcher": "shift+cmd+j"])
+
+        // An unbinding is a decision too, and a null is how it is stated — distinct from a key that
+        // was never edited.
+        XCTAssertEqual(model.rebind(.find, to: nil), .applied)
+        XCTAssertEqual(model.keymap.overrides["find"], .some(.none))
+    }
+
+    func testStoredOverridesRebuildTheKeymap() {
+        let policy = KeymapPolicy.applying(overrides: [
+            "launcher": "shift+cmd+j",
+            "find": nil,
+            // Ignored rather than fatal: this file is one the user is invited to edit.
+            "nonsense": "cmd+q",
+            "zoomPane": "ctrl+z",
+        ])
+        XCTAssertEqual(policy.binding(for: .launcher), KeyBinding("j", [.command, .shift]))
+        XCTAssertNil(policy.binding(for: .find))
+        XCTAssertEqual(
+            policy.binding(for: .zoomPane), KeyBinding("z", [.command, .shift]),
+            "a chord outside Cmd space is discarded, not applied"
+        )
+        XCTAssertEqual(policy.binding(for: .paste), KeyBinding("v"), "untouched bindings keep the default")
+    }
+
+    /// The whole point of persisting overrides: what comes back has to intercept the same chords.
+    func testARebindChangesWhatIsIntercepted() {
+        var policy = KeymapPolicy.applying(overrides: ["launcher": "shift+cmd+j"])
+        XCTAssertEqual(policy.shortcut(for: keyEvent("j", [.command, .shift])), .launcher)
+        XCTAssertNil(policy.shortcut(for: keyEvent("k", [.command])), "the old chord is free again")
+
+        policy.rebind(.launcher, to: nil)
+        XCTAssertNil(policy.shortcut(for: keyEvent("j", [.command, .shift])))
+    }
+
+    /// The recorder reads the event the same way the interception does, or a chord records as one
+    /// thing and fires as another. ⇧⌘Y arrives with the character `Y`, upper case, because shift is
+    /// held — a keymap that stored that would never match the event it was recorded from.
+    func testARecordedChordMatchesTheEventItWasRecordedFrom() {
+        let event = keyEvent("Y", [.command, .shift])
+        guard let binding = KeyBinding(event: event) else { return XCTFail("no chord from the event") }
+        XCTAssertEqual(binding, KeyBinding("y", [.command, .shift]))
+
+        let policy = KeymapPolicy.applying(overrides: ["find": binding.storageString])
+        XCTAssertEqual(policy.shortcut(for: event), .find)
+    }
+
+    /// The chord has to survive the file, not just the struct: `[String: String?]` is exactly the
+    /// shape whose null values disappear if anything along the way uses a subscript assignment.
+    func testKeymapOverridesSurviveTheSettingsFile() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-settings-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SettingsStore(directory: directory)
+
+        var policy = KeymapPolicy.default
+        policy.rebind(.launcher, to: KeyBinding("j", [.command, .shift]))
+        policy.rebind(.find, to: nil)
+        await store.saveKeymapOverrides(policy.overrides)
+
+        let reloaded = KeymapPolicy.applying(overrides: await SettingsStore(directory: directory).keymapOverrides())
+        XCTAssertEqual(reloaded.binding(for: .launcher), KeyBinding("j", [.command, .shift]))
+        XCTAssertNil(reloaded.binding(for: .find), "an unbound shortcut must not come back bound")
+        XCTAssertEqual(reloaded.binding(for: .paste), KeyBinding("v"))
+    }
+
+    /// The other file, the same question: a window's place has to come back as the window's place.
+    func testAWorkspaceSurvivesItsFile() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-workspace-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let entries = [
+            WorkspaceWindow(
+                hostId: "local", sessionId: "$1", sessionName: "work",
+                windowId: "@2", windowName: "vim", sidebarShown: false,
+                frame: [10, 20, 900, 600]
+            ),
+            WorkspaceWindow(hostId: "remote", sessionId: "$4", sessionName: "build"),
+        ]
+        await WorkspaceStore(directory: directory).save(entries)
+        let reloaded = await WorkspaceStore(directory: directory).load()
+        XCTAssertEqual(reloaded, entries)
+    }
+
+    /// A file written before a field existed, and one a person has edited down to the essentials,
+    /// are the same case: one missing key must not discard the whole workspace.
+    func testAWorkspaceEntryDecodesWithFieldsMissing() throws {
+        let json = Data(#"[{"hostId": "local", "sessionName": "work"}]"#.utf8)
+        let decoded = try JSONDecoder().decode([WorkspaceWindow].self, from: json)
+        XCTAssertEqual(decoded.count, 1)
+        XCTAssertEqual(decoded[0].sessionName, "work")
+        XCTAssertNil(decoded[0].windowId)
+        XCTAssertTrue(decoded[0].sidebarShown, "the tree shows unless the file says otherwise")
+    }
+
+    // MARK: - Reordering tabs
+
+    /// The rule every tab bar has: the dragged tab takes the target's position and the tabs between
+    /// them shift by one. Which side of the target that is depends on the direction of travel, and
+    /// getting it wrong makes a rightward drag by one position do nothing at all.
+    func testDraggingATabRightwardsLandsAfterItsTarget() {
+        let order = ["@1", "@2", "@3", "@4"]
+        // @1 onto @3: @1 goes after @3, so it is inserted before @4.
+        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@1", onto: "@3"), .some("@4"))
+        // Onto the last one there is nothing after it, so it lands at the end.
+        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@1", onto: "@4"), .some(nil))
+    }
+
+    func testDraggingATabLeftwardsLandsOnItsTarget() {
+        let order = ["@1", "@2", "@3", "@4"]
+        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@4", onto: "@2"), .some("@2"))
+        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@3", onto: "@1"), .some("@1"))
+    }
+
+    func testDroppingATabOnItselfIsNotAMove() {
+        XCTAssertNil(AppModel.dropDestination(order: ["@1", "@2"], dragged: "@1", onto: "@1"))
+        XCTAssertNil(AppModel.dropDestination(order: ["@1", "@2"], dragged: "@9", onto: "@1"))
+    }
+
+    /// Adjacent tabs swap, in both directions — the ordinary case, and the one where an off-by-one
+    /// in either branch shows up as a drag that does nothing.
+    func testDraggingOntoAnAdjacentTabSwapsThem() {
+        let order = ["@1", "@2", "@3"]
+        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@1", onto: "@2"), .some("@3"))
+        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@2", onto: "@1"), .some("@1"))
+    }
+
+    // MARK: - Workspace restoration
+
+    /// A relaunch against a still-running tmux server matches on the id, which is exact.
+    func testARestoredWindowFindsItsSessionById() {
+        let state = WindowState()
+        state.beginRestore(WorkspaceWindow(
+            hostId: "local", sessionId: "$2", sessionName: "work", windowId: "@7", windowName: "vim"
+        ))
+        state.reconcile(with: [host(sessions: [
+            TmuxSession(id: "$1", name: "other", windows: [window("@1")], isAttached: true),
+            TmuxSession(id: "$2", name: "work", windows: [window("@7", name: "vim"), window("@8")]),
+        ])])
+
+        XCTAssertEqual(state.selectedSessionId, "$2")
+        XCTAssertEqual(state.selectedWindowId, "@7")
+        XCTAssertNil(state.pendingRestore, "a resolved restore is spent")
+    }
+
+    /// The server was restarted in between, so every id was reissued and matching on one would land
+    /// on a stranger's session. The names are what survive.
+    func testARestoredWindowFallsBackToTheSessionName() {
+        let state = WindowState()
+        state.beginRestore(WorkspaceWindow(
+            hostId: "local", sessionId: "$2", sessionName: "work", windowId: "@7", windowName: "vim"
+        ))
+        state.reconcile(with: [host(sessions: [
+            TmuxSession(id: "$9", name: "work", windows: [window("@3", name: "vim")], isAttached: true),
+        ])])
+
+        XCTAssertEqual(state.selectedSessionId, "$9")
+        XCTAssertEqual(state.selectedWindowId, "@3")
+        XCTAssertNil(state.pendingRestore)
+    }
+
+    /// A remote host has not been connected yet, so there is nothing to select — but the window must
+    /// wait *there* rather than being pulled onto the first host in the list, which is where it would
+    /// have to be dragged back from.
+    func testARestoredWindowWaitsOnItsHostUntilTheSessionsArrive() {
+        let state = WindowState()
+        state.beginRestore(WorkspaceWindow(hostId: "remote", sessionId: "$1", sessionName: "work"))
+        let local = host(sessions: [TmuxSession(id: "$1", name: "local", windows: [window("@1")], isAttached: true)])
+        let remote = HostState(config: HostConfig(id: "remote", name: "remote"), connectionState: .disconnected)
+
+        state.reconcile(with: [local, remote])
+        XCTAssertEqual(state.selectedHostId, "remote")
+        XCTAssertNotNil(state.pendingRestore, "still waiting: the session does not exist yet")
+
+        let connected = HostState(
+            config: HostConfig(id: "remote", name: "remote"),
+            connectionState: .connected,
+            sessions: [TmuxSession(id: "$1", name: "work", windows: [window("@4")], isAttached: true)],
+            activeSessionId: "$1"
+        )
+        state.reconcile(with: [local, connected])
+        XCTAssertEqual(state.selectedSessionId, "$1")
+        XCTAssertEqual(state.selectedWindowId, "@4")
+        XCTAssertNil(state.pendingRestore)
+    }
+
+    /// The user has said where this window belongs, which outranks where it was last time — a
+    /// pending restore left in place would move the window again when its host finally connected.
+    func testSelectingSomethingCancelsAPendingRestore() {
+        let model = makeModel()
+        model.hosts = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [window("@1")], isAttached: true)])]
+        let state = WindowState()
+        state.beginRestore(WorkspaceWindow(hostId: "remote", sessionId: "$9", sessionName: "gone"))
+        model.registerWindow(state)
+
+        model.select(in: state, host: "local", session: "$1", window: "@1")
+        XCTAssertNil(state.pendingRestore)
+    }
+
+    /// An unresolved restore is written back unchanged. Quitting before a remote host was ever
+    /// connected must not replace the session the user wants with whatever the reconciler picked.
+    func testAnUnresolvedRestoreIsWrittenBackRatherThanOverwritten() {
+        let state = WindowState()
+        let saved = WorkspaceWindow(hostId: "remote", sessionId: "$9", sessionName: "gone", sidebarShown: false)
+        state.beginRestore(saved)
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+
+        XCTAssertEqual(state.workspaceEntry(in: []), saved)
+    }
+
+    func testAResolvedWindowIsRecordedWithBothItsIdAndItsName() {
+        let hosts = [host(sessions: [
+            TmuxSession(id: "$2", name: "work", windows: [window("@7", name: "vim")], isAttached: true),
+        ])]
+        let state = WindowState()
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$2"
+        state.selectedWindowId = "@7"
+
+        let entry = state.workspaceEntry(in: hosts)
+        XCTAssertEqual(entry.sessionId, "$2")
+        XCTAssertEqual(entry.sessionName, "work")
+        XCTAssertEqual(entry.windowId, "@7")
+        XCTAssertEqual(entry.windowName, "vim")
+        XCTAssertTrue(entry.sidebarShown)
+    }
+
+    /// A frame off every screen is a window the user cannot reach, and one saved there would come
+    /// back invisible on every launch afterwards.
+    func testAWorkspaceFrameIsOnlyUsedWhenItIsARealOne() {
+        XCTAssertNil(WorkspaceWindow(frame: [0, 0, 0, 0]).rect)
+        XCTAssertNil(WorkspaceWindow(frame: [10, 20]).rect)
+        XCTAssertNil(WorkspaceWindow().rect)
+        XCTAssertEqual(
+            WorkspaceWindow(frame: [10, 20, 900, 600]).rect,
+            NSRect(x: 10, y: 20, width: 900, height: 600)
+        )
     }
 
     private func keyEvent(_ character: String, _ flags: NSEvent.ModifierFlags) -> NSEvent {

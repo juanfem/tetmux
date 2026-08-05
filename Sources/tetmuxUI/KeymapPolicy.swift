@@ -72,6 +72,81 @@ public struct KeyBinding: Equatable, Sendable {
     }
 
     public var keyEquivalent: KeyEquivalent { KeyEquivalent(key) }
+
+    // MARK: - Text forms
+
+    /// The order modifier symbols are written in on macOS: ⌃⌥⇧⌘, control outermost, command nearest
+    /// the key. Every menu in the system does it this way, so a settings table that did not would
+    /// look wrong beside the menu showing the same chord.
+    private static let displayOrder: [(EventModifiers, String, String)] = [
+        (.control, "⌃", "ctrl"),
+        (.option, "⌥", "alt"),
+        (.shift, "⇧", "shift"),
+        (.command, "⌘", "cmd"),
+    ]
+
+    /// `⇧⌘W`, for anywhere a person reads it.
+    public var displayString: String {
+        let symbols = Self.displayOrder
+            .filter { modifiers.contains($0.0) }
+            .map(\.1)
+            .joined()
+        return symbols + String(key).uppercased()
+    }
+
+    /// `cmd+shift+w`, for `settings.json`.
+    ///
+    /// Words rather than `EventModifiers.rawValue`, which is what a `Codable` conformance would have
+    /// produced. §2.3 chose JSON here precisely so the files can be read and edited by hand, and
+    /// `{"closeWindow": 18}` is not that — nor is it stable in any sense the reader can check.
+    public var storageString: String {
+        let names = Self.displayOrder.filter { modifiers.contains($0.0) }.map(\.2)
+        return (names + [String(key)]).joined(separator: "+")
+    }
+
+    /// Parses `storageString` back, rejecting anything it does not recognise.
+    ///
+    /// A `+` bound as the key survives: the components are taken with empty ones kept, so `cmd++`
+    /// splits to `["cmd", "", ""]` and the empty tail is read as the character it was split on.
+    public init?(storageString: String) {
+        let parts = storageString.lowercased().split(
+            separator: "+", omittingEmptySubsequences: false
+        ).map(String.init)
+        guard parts.count >= 2 else { return nil }
+
+        var modifiers: EventModifiers = []
+        for name in parts.dropLast() where !name.isEmpty {
+            guard let match = Self.displayOrder.first(where: { $0.2 == name }) else { return nil }
+            modifiers.insert(match.0)
+        }
+        let tail = parts[parts.count - 1]
+        // An empty tail is only ever the `+` that the split consumed.
+        let keyText = tail.isEmpty ? "+" : tail
+        guard keyText.count == 1, let key = keyText.first else { return nil }
+        guard !modifiers.isEmpty else { return nil }
+
+        self.key = key
+        self.modifiers = modifiers
+    }
+
+    /// The chord an `NSEvent` carries, or `nil` for a key that cannot be part of one.
+    ///
+    /// `charactersIgnoringModifiers` deliberately, and lowercased: ⇧⌘W arrives with the character
+    /// `W` and ⌘⇧= arrives as `+` on some layouts, and a keymap that stored what the shift key did
+    /// to the character would never match the event it was recorded from.
+    public init?(event: NSEvent) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard let character = event.charactersIgnoringModifiers?.lowercased().first,
+              !character.isNewline else { return nil }
+        var modifiers: EventModifiers = []
+        if flags.contains(.command) { modifiers.insert(.command) }
+        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.option) { modifiers.insert(.option) }
+        if flags.contains(.control) { modifiers.insert(.control) }
+        guard !modifiers.isEmpty else { return nil }
+        self.key = character
+        self.modifiers = modifiers
+    }
 }
 
 public struct KeymapPolicy: Sendable {
@@ -121,6 +196,66 @@ public struct KeymapPolicy: Sendable {
 
     public mutating func rebind(_ shortcut: ApplicationShortcut, to binding: KeyBinding?) {
         bindings[shortcut] = binding
+    }
+
+    // MARK: - Editing (F4.19)
+
+    /// What else is already on this chord, if anything.
+    ///
+    /// The check has to exist because `shortcut(for:)` resolves a tie by rawValue order, which is a
+    /// tiebreak and not an answer: with two commands on ⌘D one of them silently stops working and
+    /// which one depends on the spelling of an enum case. So a duplicate is refused at the point of
+    /// being typed rather than resolved afterwards.
+    public func shortcut(boundTo binding: KeyBinding, excluding shortcut: ApplicationShortcut? = nil) -> ApplicationShortcut? {
+        bindings.first { $0.key != shortcut && $0.value == binding }?.key
+    }
+
+    /// Whether a chord may be bound at all.
+    ///
+    /// ⌘ is required, and that is a design constraint rather than a limitation (F4.19/F4.20). The
+    /// whole default set lives in `Cmd` space so that everything else — every bare `Ctrl` chord,
+    /// readline, Emacs, tmux's own prefix — reaches the pane untouched. A rebind that took `Ctrl+K`
+    /// would take kill-line away from every shell on every host, which is the one thing the keymap
+    /// policy exists to promise will not happen.
+    public static func isBindable(_ binding: KeyBinding) -> Bool {
+        binding.modifiers.contains(.command)
+    }
+
+    /// Only what the user changed, keyed by the shortcut's raw value.
+    ///
+    /// The difference from the defaults rather than the whole map, so a later change to a default
+    /// binding reaches everyone who never touched it — the alternative freezes today's defaults into
+    /// every settings file that has ever been written. An explicit `null` is a shortcut deliberately
+    /// unbound, which is not the same as one that was never edited.
+    public var overrides: [String: String?] {
+        var result: [String: String?] = [:]
+        for shortcut in ApplicationShortcut.allCases {
+            let mine = bindings[shortcut]
+            let standard = Self.default.bindings[shortcut]
+            guard mine != standard else { continue }
+            // `updateValue`, not a subscript assignment. Assigning `nil` through the subscript of a
+            // `[String: String?]` *removes* the key rather than storing a null, so a deliberately
+            // unbound shortcut would be indistinguishable from one nobody touched — and would come
+            // back with its default chord on the next launch.
+            result.updateValue(mine?.storageString, forKey: shortcut.rawValue)
+        }
+        return result
+    }
+
+    /// The defaults with `overrides` applied. Anything unparseable is ignored rather than fatal: this
+    /// comes from a file the user is invited to edit, and one bad line must not cost the whole keymap.
+    public static func applying(overrides: [String: String?]) -> KeymapPolicy {
+        var policy = KeymapPolicy.default
+        for (name, chord) in overrides {
+            guard let shortcut = ApplicationShortcut(rawValue: name) else { continue }
+            guard let chord else {
+                policy.bindings[shortcut] = nil
+                continue
+            }
+            guard let binding = KeyBinding(storageString: chord), isBindable(binding) else { continue }
+            policy.bindings[shortcut] = binding
+        }
+        return policy
     }
 
     /// Which application shortcut, if any, an `NSEvent` should be taken as.

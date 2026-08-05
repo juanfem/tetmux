@@ -14,9 +14,6 @@ public struct TerminalTheme: Equatable, Sendable {
     public var fontSize: CGFloat
     /// T5.8 — ligatures off by default.
     public var ligatures: Bool
-    /// T5.6 — a remote host silently overwriting the local clipboard is an injection vector, so
-    /// OSC 52 writes are denied unless the user opts in per host. Reads are never permitted.
-    public var allowRemoteClipboardWrite: Bool
 
     /// How much scrollback a pane keeps locally.
     ///
@@ -29,7 +26,6 @@ public struct TerminalTheme: Equatable, Sendable {
         fontName: "SF Mono",
         fontSize: 12,
         ligatures: false,
-        allowRemoteClipboardWrite: false,
         scrollbackLines: 10_000
     )
 
@@ -119,6 +115,8 @@ struct TerminalPaneView: NSViewRepresentable {
     let rows: Int
     let isFocused: Bool
     let theme: TerminalTheme
+    /// T5.6 — this host's opt-in, not an application-wide one. See `HostConfig`.
+    let allowsRemoteClipboardWrite: Bool
     let service: SessionService
     let onFocusRequest: () -> Void
 
@@ -326,9 +324,15 @@ struct TerminalPaneView: NSViewRepresentable {
             TerminalPaneView.openExternalLink(link)
         }
 
-        /// T5.6 — denied unless the host is explicitly trusted for it.
+        /// T5.6 — denied unless *this host* is explicitly trusted for it.
+        ///
+        /// The gate used to be a `TerminalTheme` field with no persistence key, no control anywhere
+        /// in the app and no way to become true, so its own doc comment's "unless the user opts in
+        /// per host" described something that did not exist. It is a `HostConfig` field now, which
+        /// is the only shape the promise can actually take: trusting the machine on your desk to set
+        /// your clipboard is a different decision from trusting a shared box you ssh into.
         func clipboardCopy(source: TerminalView, content: Data) {
-            guard parent.theme.allowRemoteClipboardWrite else { return }
+            guard parent.allowsRemoteClipboardWrite else { return }
             guard let text = String(data: content, encoding: .utf8) else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)

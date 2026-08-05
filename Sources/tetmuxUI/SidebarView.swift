@@ -314,9 +314,14 @@ struct SidebarView: View {
                 Button("Reconnect") { model.reconnect(host.id) }
                 Button("New Session") { model.createSessionWithDefaultName(hostId: host.id, revealIn: state) }
             }
+            Divider()
+            // The local host is editable too now — it has a start directory and a clipboard policy,
+            // which are the two settings that do not depend on there being a connection to make. It
+            // is still not removable: it is not a stored host, it is the tmux on this machine.
+            Button(host.config.isLocal ? "Local tmux Settings…" : "Edit Host…") {
+                model.presentEditHost(host.id, in: state)
+            }
             if !host.config.isLocal {
-                Divider()
-                Button("Edit Host…") { model.presentEditHost(host.id, in: state) }
                 Button("Remove Host", role: .destructive) { model.removeHost(host.id) }
             }
         }
@@ -552,6 +557,12 @@ struct SidebarView: View {
                     collapseSidebar: true, preferNewWindow: true
                 )
             }
+            // The same two items the tab carries: a window is the same thing in both places, and a
+            // command that exists on one and not the other is the kind of gap that makes a tree feel
+            // unrelated to the content beside it.
+            WindowSessionMenus(
+                model: model, hostId: host.id, sessionId: session.id, windowId: window.id
+            )
             Divider()
             Button("Close Window…", role: .destructive) {
                 model.select(in: state, host: host.id, session: session.id, window: window.id)

@@ -8,6 +8,8 @@ struct StatusBarView: View {
     let session: TmuxSession
     let window: TmuxWindow
     let focusedPaneId: String?
+    /// F4.21 — whether the next chord is going to the pane rather than to the application.
+    let literalEscapeArmed: Bool
 
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
@@ -32,6 +34,18 @@ struct StatusBarView: View {
             }
 
             Spacer(minLength: 8)
+
+            // A mode that changes what the next keystroke does has to be visible while it is on;
+            // otherwise ⌥⌘V pressed by accident makes the *following* chord vanish with nothing to
+            // explain it. Accented and worded rather than a dot: it says which key it is waiting for.
+            if literalEscapeArmed {
+                Text("next chord → pane")
+                    .font(.caption2)
+                    .foregroundStyle(Color.accentColor)
+                    .help("The next key you press is sent to the pane instead of tetmux (⌥⌘V)")
+                    .accessibilityLabel("Next chord goes to the pane")
+                separator
+            }
 
             if let pane {
                 Text("\(pane.cols)×\(pane.rows)")

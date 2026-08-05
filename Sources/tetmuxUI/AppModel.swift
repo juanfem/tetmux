@@ -9,7 +9,9 @@ import tetmuxCore
 @Observable
 public final class AppModel {
     public let service = SessionService()
-    public let store = HostConfigStore()
+    public let store: HostConfigStore
+    public let workspace: WorkspaceStore
+    public let settings: SettingsStore
 
     public var hosts: [HostState] = []
     /// Written by the settings pane and by ⌘+/⌘−, and persisted on every change.
@@ -22,7 +24,65 @@ public final class AppModel {
             theme.save()
         }
     }
-    public var keymap = KeymapPolicy.default
+    /// F4.19/F4.22 — the one policy every surface consults, now loaded from `settings.json` rather
+    /// than fixed at compile time.
+    ///
+    /// Written through `rebind` and `resetKeymap`, which persist. Assigning the whole map from
+    /// outside is deliberately not a thing anyone does: the conflict check belongs with the write.
+    public private(set) var keymap = KeymapPolicy.default
+
+    /// F4.21 — ⌥⌘V has been pressed and the next chord belongs to the pane, not to the application.
+    ///
+    /// Observable because it has to be *visible*: a mode that changes what the next keystroke does
+    /// and says nothing is indistinguishable from the application having hung. The status bar shows
+    /// it, and it clears itself on the next key whatever that key turns out to be.
+    public var literalEscapeArmed = false
+
+    /// The one event monitor in the app. See `KeyEventMonitor` for why the escape cannot be a view.
+    @ObservationIgnored private var keyMonitor: KeyEventMonitor?
+
+    /// Arms the escape from the menu item, which is the discoverable half of the chord.
+    public func armLiteralEscape() {
+        literalEscapeArmed = true
+    }
+
+    /// Why a rebind was refused, for the settings pane to say so in place of failing silently.
+    public enum RebindResult: Equatable {
+        case applied
+        /// The chord is already taken, by this command.
+        case conflict(ApplicationShortcut)
+        /// No ⌘ in it. See `KeymapPolicy.isBindable`.
+        case notInCommandSpace
+    }
+
+    /// F4.19 — changes one binding and writes the difference from the defaults to `settings.json`.
+    ///
+    /// A conflict is refused rather than resolved. `KeymapPolicy.shortcut(for:)` breaks a tie by the
+    /// enum case's spelling, which decides *something* but nothing anybody meant, so two commands on
+    /// one chord means one of them quietly stops working.
+    @discardableResult
+    public func rebind(_ shortcut: ApplicationShortcut, to binding: KeyBinding?) -> RebindResult {
+        if let binding {
+            guard KeymapPolicy.isBindable(binding) else { return .notInCommandSpace }
+            if let owner = keymap.shortcut(boundTo: binding, excluding: shortcut) {
+                return .conflict(owner)
+            }
+        }
+        keymap.rebind(shortcut, to: binding)
+        persistKeymap()
+        return .applied
+    }
+
+    /// Puts every binding back to the documented default, and empties the file's keymap entry.
+    public func resetKeymap() {
+        keymap = .default
+        persistKeymap()
+    }
+
+    private func persistKeymap() {
+        let overrides = keymap.overrides
+        Task { [settings] in await settings.saveKeymapOverrides(overrides) }
+    }
 
     /// An ssh prompt waiting on the user, when it could not be answered from the Keychain.
     ///
@@ -151,7 +211,17 @@ public final class AppModel {
         }
     }
 
-    public init() {}
+    /// `directory` is Application Support unless something says otherwise.
+    ///
+    /// Injectable because the model writes three files as a side effect of ordinary operations —
+    /// rebinding a chord persists, selecting a session schedules a workspace save — and a test that
+    /// exercised either used to write the *user's* `settings.json` and `workspace.json`. That was
+    /// found by running the app after the suite and finding somebody else's keymap in it.
+    public init(directory: URL? = nil) {
+        store = HostConfigStore(directory: directory)
+        workspace = WorkspaceStore(directory: directory)
+        settings = SettingsStore(directory: directory)
+    }
 
     // MARK: - Windows and scope
 
@@ -224,9 +294,16 @@ public final class AppModel {
         windowOrder.append(state.id)
         focusOrder.append(state.id)
         syncDisplayedSessions()
+        // The next window of a restored workspace, if there is one left to open.
+        openNextRestoredWindow()
+        scheduleWorkspaceSave()
     }
 
     public func unregisterWindow(_ id: UUID) {
+        // Before the window leaves the registry, while it can still be asked what it was showing.
+        // Closing one window of several is a deliberate change to the workspace and the file has to
+        // hear about it; the guard in `workspaceEntries` covers the case where it was the last one.
+        let remaining = openWindows.filter { $0.id != id }.map { $0.workspaceEntry(in: hosts) }
         windowOrder.removeAll { $0 == id }
         focusOrder.removeAll { $0 == id }
         windowsById.removeValue(forKey: id)
@@ -234,6 +311,10 @@ public final class AppModel {
         // The session that window was showing may now be on no screen at all, and its client is one
         // nobody needs.
         syncDisplayedSessions()
+        if !remaining.isEmpty {
+            workspaceSaveTask?.cancel()
+            Task { [workspace] in await workspace.save(remaining) }
+        }
     }
 
     /// Every registered window that is still alive, in registration order.
@@ -283,6 +364,24 @@ public final class AppModel {
     public func bootstrap() async {
         guard stateTask == nil else { return }
 
+        // Before the monitor, which asks the keymap what the escape chord is.
+        keymap = KeymapPolicy.applying(overrides: await settings.keymapOverrides())
+        keyMonitor = KeyEventMonitor(model: self)
+
+        // Read before the hosts, so the first window — which is already on screen by the time this
+        // runs — can take its entry on the next snapshot rather than after the second one.
+        restoreQueue = await workspace.load()
+        // The window that ran `bootstrap` appeared before the file had been read, so its `onAppear`
+        // found an empty queue and claimed nothing. Give it the first entry here and start the chain
+        // that opens the rest. If it somehow has not registered yet, this does nothing and its own
+        // `onAppear` takes the entry by the ordinary route — the chain starts either way.
+        if let state = openWindows.first, state.pendingRestore == nil, let first = restoreQueue.first {
+            restoreQueue.removeFirst()
+            state.beginRestore(first)
+            state.reconcile(with: hosts)
+            openNextRestoredWindow()
+        }
+
         stateTask = Task { [weak self] in
             guard let self else { return }
             for await snapshot in await self.service.stateStream() {
@@ -312,10 +411,72 @@ public final class AppModel {
         hosts = snapshot
         respondToAuthenticationPrompts(in: snapshot)
         resolveReveals()
+        // Restoration is resolved here rather than only in each window's `onChange`, because a
+        // window's session becoming attachable and the window learning about it have to happen in
+        // that order: `syncDisplayedSessions` below reads the selections, and a SwiftUI `onChange` is
+        // not guaranteed to have run by then. Without this a restored session got no tmux client
+        // until something unrelated changed the topology again — panes on screen and frozen.
+        for window in openWindows where window.pendingRestore != nil {
+            window.resolveRestore(with: snapshot)
+        }
         // A window can be pointed at a session before tmux has told us it exists — creating one, or
         // reconnecting — and a session can only be attached to by id once it does. Every snapshot is
         // therefore a chance for a displayed session to become attachable.
         syncDisplayedSessions()
+        scheduleWorkspaceSave()
+    }
+
+    // MARK: - Workspace (§4.3 — view state, never session contents)
+
+    /// Saved windows not yet handed to a window, in the order they were written.
+    @ObservationIgnored private var restoreQueue: [WorkspaceWindow] = []
+    @ObservationIgnored private var workspaceSaveTask: Task<Void, Never>?
+
+    /// Taken by each window as it appears, oldest first.
+    public func consumeRestore() -> WorkspaceWindow? {
+        restoreQueue.isEmpty ? nil : restoreQueue.removeFirst()
+    }
+
+    /// Asks for one more window while the queue is not empty.
+    ///
+    /// One at a time rather than all at once: `requestedWindow` holds a single request and every open
+    /// window observes it, so N requests in a row would be claimed by whichever window reacted first
+    /// and the rest would be lost. Each restored window asks for the next as it registers, which
+    /// terminates when the queue drains.
+    private func openNextRestoredWindow() {
+        guard !restoreQueue.isEmpty else { return }
+        openWindow(WindowSeed())
+    }
+
+    /// Records the workspace shortly after it changes.
+    ///
+    /// Debounced because the things that move it — focus, selection, a topology snapshot — arrive in
+    /// bursts, and each one would otherwise be a file write. The delay is short enough that a crash
+    /// loses at most the last selection, which is the same thing a crash loses anyway.
+    public func scheduleWorkspaceSave() {
+        workspaceSaveTask?.cancel()
+        workspaceSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, let self else { return }
+            let entries = self.workspaceEntries()
+            await self.workspace.save(entries)
+        }
+    }
+
+    /// Every open window's place in the tree, in registration order.
+    ///
+    /// Empty is never written: the app deliberately outlives its last window
+    /// (`applicationShouldTerminateAfterLastWindowClosed` is false), so closing them all and quitting
+    /// from the menu bar would otherwise erase a workspace the user never meant to discard.
+    func workspaceEntries() -> [WorkspaceWindow] {
+        openWindows.map { $0.workspaceEntry(in: hosts) }
+    }
+
+    /// The synchronous save for ⌘Q. See `WorkspaceStore.saveNow`.
+    public func saveWorkspaceNow() {
+        let entries = workspaceEntries()
+        guard !entries.isEmpty else { return }
+        WorkspaceStore.saveNow(entries)
     }
 
     // MARK: - Authentication
@@ -430,7 +591,11 @@ public final class AppModel {
         state.selectedSessionId = sessionId
         state.selectedWindowId = windowId
         state.focusedPaneId = nil
+        // The user has said where this window belongs, which outranks where it was last time. A
+        // restore left pending would otherwise move the window again the moment its host connected.
+        state.pendingRestore = nil
         activeScope = state.scope(in: hosts)
+        scheduleWorkspaceSave()
         // What this window shows has changed, so the set of sessions needing a client has too. It no
         // longer moves the one client to the newly selected session — that is what made every other
         // window a still frame, and it is why picking a session used to show the not-attached banner
@@ -771,6 +936,71 @@ public final class AppModel {
 
     public func killWindow(hostId: String, windowId: String) {
         Task { await service.killWindow(hostId: hostId, windowId: windowId) }
+    }
+
+    // MARK: - Window ordering
+
+    /// A tab dropped onto another tab, in the form `SessionService.moveWindow` takes.
+    ///
+    /// The rule is the one every tab bar has: the dragged tab takes the position of the tab it was
+    /// dropped on, and everything between them shifts up by one. Which side of the target that lands
+    /// on therefore depends on the direction of travel — dragging rightwards means *after* the
+    /// target, leftwards means *before* it — and getting that wrong makes a rightward drag by one
+    /// position do nothing at all, which reads as the whole feature being broken.
+    ///
+    /// Returns the window to insert in front of, `nil` for the end of the strip, and `.none` for a
+    /// drop that is not a move. Static and pure because the arithmetic is the whole of it: the tmux
+    /// side is one command, and this is the part that can be wrong without anything saying so.
+    static func dropDestination(order: [String], dragged: String, onto target: String) -> String?? {
+        guard dragged != target,
+              let from = order.firstIndex(of: dragged),
+              let onto = order.firstIndex(of: target) else { return .none }
+
+        var remaining = order
+        remaining.remove(at: from)
+        guard let targetIndex = remaining.firstIndex(of: target) else { return .none }
+        // Rightwards: land after the target, which is the window currently following it — or the end
+        // of the strip when the target is last. Leftwards: land on the target itself.
+        let insertAt = from < onto ? targetIndex + 1 : targetIndex
+        return .some(insertAt < remaining.count ? remaining[insertAt] : nil)
+    }
+
+    /// Reorders a tab that was dragged onto another one.
+    public func moveWindow(hostId: String, sessionId: String, dragged: String, onto target: String) {
+        guard let session = hosts.first(where: { $0.id == hostId })?
+            .sessions.first(where: { $0.id == sessionId }) else { return }
+        guard let before = Self.dropDestination(
+            order: session.windows.map(\.id), dragged: dragged, onto: target
+        ) else { return }
+        Task {
+            await service.moveWindow(
+                hostId: hostId, sessionId: sessionId, windowId: dragged, before: before
+            )
+        }
+    }
+
+    /// Moves a window out of this session and into another one on the same host.
+    ///
+    /// Not a close and not a kill: the window and everything running in it carries on, one level of
+    /// the tree over. It is the only way to undo having created a window in the wrong session, which
+    /// until now meant killing it and starting again.
+    public func moveWindowToSession(hostId: String, windowId: String, from: String, to: String) {
+        Task { await service.moveWindow(hostId: hostId, windowId: windowId, fromSession: from, toSession: to) }
+    }
+
+    /// Links a window into a second session, leaving it in this one.
+    ///
+    /// The inverse of the unlink behind ⇧⌘W (F4.9), and what makes that path reachable: a window
+    /// linked to one session cannot be closed without being killed, so a window that matters in two
+    /// places should be in both rather than copied by hand.
+    public func linkWindowToSession(hostId: String, windowId: String, to sessionId: String) {
+        Task { await service.linkWindow(hostId: hostId, windowId: windowId, toSession: sessionId) }
+    }
+
+    /// The other sessions of a host, for the two submenus above. Empty when there is nowhere to go,
+    /// which is what the menus check rather than offering a submenu with nothing in it.
+    public func otherSessions(hostId: String, excluding sessionId: String) -> [TmuxSession] {
+        hosts.first { $0.id == hostId }?.sessions.filter { $0.id != sessionId } ?? []
     }
 
     public func killSession(hostId: String, sessionId: String) {

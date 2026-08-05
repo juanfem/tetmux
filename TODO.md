@@ -4,7 +4,7 @@ From the audit of 2026-08-04. Ordered by what actually breaks for a user, not by
 Each item names the evidence, because the ones that matter here are all silent failures — nothing
 in this list announces itself, which is why they survived this long.
 
-**35 done, 5 partial, 7 open.**
+**38 done, 4 partial, 5 open.**
 
 References on **done** items are as they were when the audit ran, so they point into the commit
 before each fix rather than into current `main` — they are kept because the evidence is the useful
@@ -19,13 +19,12 @@ What is left falls into three groups, and they are not equally blocked:
   (The R3.6 matrix was in this group and is out of it: the binaries turned out to build from source
   in about a minute each, so nothing was needed but the script to do it.)
 - **Real features, sized like features.** Passthrough fallback (F4.27, which is also the "offer a
-  plain shell" row of R3.8), copy mode, an editable keymap with a settings file, per-host OSC 52,
-  tab reordering and `move-window`, window/session state restoration, listing a host's sessions
-  without attaching (F4.4), and the §8 test infrastructure — a containerised sshd matrix, chaos
-  tests, a full geometry suite, a rendering corpus.
-- **Small and unblocked.** The three still-unwired declarations — per-host OSC 52, an editable
-  keymap, and ⌘⌥V's literal escape — and a start directory for **localhost**, which needs the host
-  editor to work for a host that has no ssh settings.
+  plain shell" row of R3.8), copy mode, listing a host's sessions without attaching (F4.4), and the
+  §8 test infrastructure — a containerised sshd matrix, chaos tests, a full geometry suite, a
+  rendering corpus.
+- **Small and unblocked.** Nothing, for the moment. The four that were here — per-host OSC 52, an
+  editable keymap, ⌘⌥V's literal escape, and a start directory for localhost — are done, along with
+  tab reordering, `move-window`, and workspace restoration from the group above.
 
 ## Protocol correctness
 
@@ -219,17 +218,44 @@ What is left falls into three groups, and they are not equally blocked:
   sidebar leaves its tab off-screen with no indicator and no overflow menu.
   `Sources/tetmuxUI/AppMain.swift:322-341`
 
-- [ ] **No tab reordering and no way to move a window between sessions.** No `onMove`/`draggable`
+- [x] **No tab reordering and no way to move a window between sessions.** No `onMove`/`draggable`
   on the tab strip; `SessionService` exposes `unlink-window` but no `move-window`, `swap-window`, or
   `link-window` — none of the three appears anywhere in `Sources/`. Renaming is well covered at both
   levels; ordering is not.
   `Sources/tetmuxCore/Session/SessionService.swift:2302`, `Sources/tetmuxUI/AppMain.swift:436-461`
+  *Tabs drag to reorder, and "Move to Session" / "Link to Session" are on both the tab's context menu
+  and the sidebar's window row. Three things turned up that the entry did not predict.
+  `move-window -a`/`-b` is **tmux 3.2**, not 3.0 — verified against the R3.6 matrix, where 3.0 answers
+  `illegal option -- b` and offers only `[-dkr]` — so below 3.2 the same permutation is built out of
+  `swap-window`, which 3.0 does have: a move from one position to another *is* a run of adjacent
+  swaps, and the windows it passes shift by one exactly as an insert would move them. Indices are
+  never computed, because a session's are arbitrary and often not contiguous; every command addresses
+  windows by `@id`. And the source of a move is qualified with its session (`-s $2:@7`), since a
+  window linked into several is reachable by id from any of them and an unqualified `-s` leaves tmux
+  to pick which one it is taken out of.
+  **The reorder also needed a fix one layer down, and it was a pre-existing bug:** `applyWindows`
+  updated windows in place and appended new ones, so the model kept whatever order it first learned
+  them in. `list-windows` order was discarded, which meant a window moved from another tmux client —
+  or by `swap-window`, or by `movew` typed at a prompt — changed nothing visible here at all.*
 
-- [ ] **Nothing is restored on relaunch.** No `@SceneStorage`/`@AppStorage` anywhere; `UserDefaults`
+- [x] **Nothing is restored on relaunch.** No `@SceneStorage`/`@AppStorage` anywhere; `UserDefaults`
   now carries the terminal appearance and nothing else. `bootstrap` restores `hosts.json` and then
   each window is dropped onto the first host and its active session; `WindowSeed` is in-memory only.
   The sessions survived the relaunch — the window-to-session layout did not.
   `Sources/tetmuxUI/AppModel.swift:283-307`, `Sources/tetmuxUI/WindowState.swift:13`, `:155-180`
+  *`workspace.json` (§2.3) now records one entry per macOS window — host, session, tmux window, tree
+  state, frame — and reopens them. Deliberately not `@SceneStorage`, which restores a scene's own
+  value into the same scene: what has to come back is a relationship between a window and a tmux
+  session that does not exist until the host has connected and answered `list-sessions`, a round trip
+  after the window is already on screen. So each window holds its entry in `pendingRestore` and
+  `reconcile` retries it on every snapshot. Both an id and a name are stored, and they answer
+  different questions: `$3` is exact and is what a still-running server will still be using — the
+  common case, since quitting tetmux does not stop tmux — while the name is what survives a server
+  restart, where matching on a reissued id would land on a stranger's session. There is no expiry: a
+  window restored onto a remote host waits on that host, connect placeholder and all, until the user
+  connects it, and only an explicit `select` cancels it. Verified end to end by hand: an entry naming
+  `$999` fell back to the session name, resolved the id, picked the window by name, and kept its
+  collapsed tree; two entries came back as two windows on two sessions with their own frames.*
 
 - [~] **Pane contents are invisible to VoiceOver.** SwiftTerm's accessibility service is an empty
   stub and `makeNSView` adds no label, value, or role. The chrome around it is labelled thoroughly,
@@ -322,7 +348,7 @@ What is left falls into three groups, and they are not equally blocked:
   fixtures turned out to carry hand-edited checksums that no tmux ever emitted; the real ones,
   zoomed `window_visible_layout` included, all verify.*
 
-- [~] **Declared and never wired**, all four confirmed still unreferenced outside `Tests/`:
+- [x] **Declared and never wired**, all four confirmed still unreferenced outside `Tests/`:
   the OSC 52 opt-in is a global `TerminalTheme` field with no persistence key, no settings control
   and no `HostConfig` field, so it can never become true and its own doc comment's "unless the user
   opts in per host" is fiction (T5.6); `KeymapPolicy.rebind` and `shortcut(for:)` have no production
@@ -331,12 +357,34 @@ What is left falls into three groups, and they are not equally blocked:
   passed (F4.21); `HostConfigStore.resolveEffectiveConfig` (`ssh -G`) is dead code (F4.2).
   `Sources/tetmuxUI/TerminalSurface.swift:19`, `Sources/tetmuxUI/KeymapPolicy.swift:107`, `:122-143`,
   `Sources/tetmuxCore/Session/HostConfigStore.swift:226`
-  *One of the four is wired: `ssh -G` now fills the host editor's User and Port placeholders and says
-  what an alias resolves to, so a field left blank shows what ssh will actually use rather than
-  "optional". Display only, deliberately — the connection is still made with the *name* so ssh
-  applies its own `Match` blocks. Wiring it turned up a bug in the dead code itself: the map was
-  last-wins, and `identityfile` repeats once per candidate key, so it reported whichever default came
-  last as though someone had chosen it. The other three are untouched.*
+  *All four are wired now. `ssh -G` fills the host editor's User and Port placeholders and says what
+  an alias resolves to — display only, deliberately, since the connection is still made with the
+  *name* so ssh applies its own `Match` blocks. Wiring it turned up a bug in the dead code itself:
+  the map was last-wins, and `identityfile` repeats once per candidate key, so it reported whichever
+  default came last as though someone had chosen it.*
+  *T5.6 moved off `TerminalTheme` and onto `HostConfig`, which is the only shape the promise can
+  take: trusting the machine on your desk to set your clipboard is a different decision from trusting
+  a shared box you ssh into, and an application-wide flag makes both at once. Denied when the field is
+  absent, so a `hosts.json` written before it existed — or edited to remove it — gets the safe answer.*
+  *F4.21 needed the one event monitor in the app, and had to. Every other binding is a SwiftUI
+  `keyboardShortcut` on a menu item, which AppKit resolves in `performKeyEquivalent` before any view
+  is offered the event, so there is no view-level hook that could let ⌘K through to a pane running
+  fzf. A local `NSEvent` monitor runs earlier — `NSApplication.sendEvent` calls monitors before it
+  dispatches key equivalents — and the armed chord is delivered to the pane's `keyDown` directly
+  rather than passed on, since passing it on is exactly the interception being escaped. It asks
+  `KeymapPolicy.shortcut(for:literalEscapeActive:)` rather than matching anything itself, so F4.22
+  survives the new surface. The mode shows in the status bar: one that changes what the next
+  keystroke does and says nothing is indistinguishable from the app having hung.*
+  *F4.19's keymap is editable from a Keys tab and stored in `settings.json` (§2.3) as the difference
+  from the defaults — so a later change to a default reaches everyone who never touched it, and an
+  explicit `null` is a shortcut deliberately unbound rather than one never edited. ⌘ is required,
+  which is a design constraint and not a limitation: F4.20's promise that `Ctrl+K` stays kill-line is
+  only true while the app lives entirely in `Cmd` space. A chord already in use is refused rather than
+  resolved, because `shortcut(for:)` breaks a tie by the enum case's spelling — which decides
+  something, but nothing anybody meant. Two traps: the recorder has to answer `performKeyEquivalent`,
+  not `keyDown`, or the menu takes every ⌘ chord before it is ever seen; and `overrides` has to use
+  `updateValue`, since assigning `nil` through a `[String: String?]` subscript removes the key instead
+  of storing a null and an unbound shortcut would come back bound.*
 
 - [ ] **F4.4** never lists a host's sessions without attaching — `list-sessions` only goes down an
   already-attached channel, so the only way to see what is on a host is `connectHost`, which
@@ -353,10 +401,13 @@ What is left falls into three groups, and they are not equally blocked:
   remotely both work, and there is deliberately no folder picker. Wiring it turned up that the
   parameter never went through `TmuxCommand.singleLine`, so a pasted path with a line break would
   have ended the command early and handed tmux the remainder as a new one.
-  **Two things it still does not cover.** It cannot be set for **localhost**: `saveHosts` filters the
-  `local` id and the sidebar offers no editor for it, so the host most likely to want one is the one
-  that cannot have one — giving it an editor means a conditional one, since hostname, user, port,
-  password and forwards are all meaningless there. And an initial command is still not a parameter.*
+  **Localhost is covered now**, which needed both halves the entry predicted: `saveHosts` keeps the
+  `local` entry when it differs from a baseline — the same "persist only the override" rule discovered
+  hosts already had — and the editor is conditional, since hostname, user, port, password, tunnels and
+  ssh options are all properties of a connection it does not make. Only the settings that mean
+  something without one are read back from the file, so a hand-edited `hosts.json` cannot turn the
+  local host into a remote one or rename it out of the places that look it up.
+  **Still not covered:** an initial command is not a parameter.*
   `Sources/tetmuxCore/Session/SessionService.swift:2323`, `Sources/tetmuxUI/AppModel.swift:926`
 
 ## Infrastructure

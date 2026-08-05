@@ -35,19 +35,32 @@ struct HostEditorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(draft.isNew ? "Add SSH Host" : "Edit \(draft.host.name)")
+            Text(title)
                 .font(.headline)
                 .padding(.bottom, 12)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    destinationSection
-                    Divider()
-                    authenticationSection
-                    Divider()
-                    forwardsSection
-                    Divider()
-                    sshOptionsSection
+                    // The local host has no destination, no credentials, no tunnels and no ssh
+                    // options — every one of those is a property of a connection it does not make.
+                    // Showing them disabled would be a form four-fifths greyed out; showing them
+                    // enabled would invite settings that could never take effect. So the editor is
+                    // conditional, and this is why the local host had no editor at all until now.
+                    if host.isLocal {
+                        localSection
+                        Divider()
+                        clipboardSection
+                    } else {
+                        destinationSection
+                        Divider()
+                        authenticationSection
+                        Divider()
+                        forwardsSection
+                        Divider()
+                        clipboardSection
+                        Divider()
+                        sshOptionsSection
+                    }
                 }
                 .padding(.trailing, 2)
             }
@@ -71,6 +84,59 @@ struct HostEditorView: View {
         }
         .padding(20)
         .frame(width: 520)
+    }
+
+    private var title: String {
+        if host.isLocal { return "Local tmux" }
+        return draft.isNew ? "Add SSH Host" : "Edit \(draft.host.name)"
+    }
+
+    // MARK: - Local
+
+    /// Everything the local host actually has: where its sessions start.
+    ///
+    /// The name is not editable and there is no field for it. "localhost" is looked up by id
+    /// throughout, and a renamed local host would be a host that half the app could no longer find.
+    private var localSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Sessions").font(.subheadline).fontWeight(.semibold)
+
+            Grid(alignment: .leading, verticalSpacing: 8) {
+                GridRow {
+                    Text("Start in").gridColumnAlignment(.trailing)
+                    TextField(
+                        "~/projects — optional",
+                        text: Binding($host.startDirectory, replacingNilWith: "")
+                    )
+                    .frame(width: 300)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
+
+            Text("Where a new session's first pane opens, as `new-session -c`. Left blank, tmux uses whatever it would have used anyway.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Clipboard
+
+    /// T5.6 — the per-host opt-in the requirement always described and the code never had.
+    private var clipboardSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Clipboard").font(.subheadline).fontWeight(.semibold)
+
+            Toggle("Let programs on this host set the Mac clipboard", isOn: $host.allowRemoteClipboardWrite)
+            Text(
+                host.isLocal
+                    ? "OSC 52, which is how a program in a pane copies to the clipboard — tmux's own copy commands use it. Off by default here too: a pane's contents are still whatever is running in it."
+                    : "OSC 52, which is how a program in a pane copies to the clipboard. Off by default: a sequence in ordinary output can replace what you are about to paste, and a pane's contents are text from another machine. Reading the clipboard is never permitted, at any setting."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     // MARK: - Destination

@@ -419,6 +419,15 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
     /// only exists remotely both work.
     public let startDirectory: String?
 
+    /// T5.6 — whether a program in this host's panes may write the Mac's clipboard with OSC 52.
+    ///
+    /// Per host and denied by default, which is the whole of what T5.6 asks for and what the flag on
+    /// `TerminalTheme` could not express: an application-wide setting is a decision about a machine
+    /// you trust and a machine you do not at the same time. A pane's contents are remote text, and a
+    /// sequence in them can replace whatever the user was about to paste — including into a shell.
+    /// Clipboard *reads* are never permitted at any setting and have no field here to turn on.
+    public let allowRemoteClipboardWrite: Bool
+
     /// What `ssh` should be given as the destination.
     public var sshDestination: String {
         let target = hostname ?? name
@@ -439,8 +448,10 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
         forwards: [PortForward] = [],
         extraSshArguments: String = "",
         forwardsX11: Bool = false,
-        startDirectory: String? = nil
+        startDirectory: String? = nil,
+        allowRemoteClipboardWrite: Bool = false
     ) {
+        self.allowRemoteClipboardWrite = allowRemoteClipboardWrite
         self.id = id
         self.name = name
         self.hostname = hostname
@@ -609,6 +620,10 @@ public struct TmuxVersion: Comparable, Sendable {
     public var supportsFlowControl: Bool { self >= TmuxVersion("3.2")! }
     /// Below this, control mode is too different to drive; §4.6 passthrough applies.
     public var supportsControlMode: Bool { self >= TmuxVersion("2.4")! }
+    /// `move-window -a`/`-b`, which places a window next to another one instead of at a numbered
+    /// index. Added in 3.2; 3.0 answers `move-window: illegal option -- b` and offers only `[-dkr]`.
+    /// Below it, the same reordering is built out of `swap-window`.
+    public var movesWindowsRelatively: Bool { self >= TmuxVersion("3.2")! }
     /// `window-size manual` plus `resize-window -t @id`, which is what lets one macOS window size its
     /// tmux window independently of another's. Below it, `window-size latest` and `refresh-client -C`
     /// are the only mechanism and every client's size is a vote (F4.17).

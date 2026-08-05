@@ -1450,6 +1450,9 @@ public actor SessionService {
         var rejected: [(windowId: String, reason: String, layout: String)] = []
         withHost(hostId) { host in
             var seenBySession: [String: Set<String>] = [:]
+            /// The order `list-windows` reported, which is tmux's own window order. Kept separately
+            /// from `seenBySession` because a set cannot answer the question this exists for.
+            var orderBySession: [String: [String]] = [:]
             for line in lines {
                 // The name is last and may itself contain `|`, so it takes whatever is left.
                 let fields = line.split(separator: "|", maxSplits: 8, omittingEmptySubsequences: false)
@@ -1466,6 +1469,7 @@ public actor SessionService {
                 let name = String(fields[8])
 
                 seenBySession[sessionId, default: []].insert(windowId)
+                orderBySession[sessionId, default: []].append(windowId)
 
                 guard let sessionIndex = host.sessions.firstIndex(where: { $0.id == sessionId }) else { continue }
                 if let windowIndex = host.sessions[sessionIndex].windows.firstIndex(where: { $0.id == windowId }) {
@@ -1502,6 +1506,21 @@ public actor SessionService {
                 let sessionId = host.sessions[sessionIndex].id
                 guard let seen = seenBySession[sessionId] else { continue }
                 host.sessions[sessionIndex].windows.removeAll { !seen.contains($0.id) }
+
+                // Put them in the order tmux just reported. Windows are updated in place and new
+                // ones are appended above, so without this the model kept whatever order it first
+                // learned them in — and a window moved by `move-window`, by another client, or by
+                // `swap-window` changed nothing visible at all. It is `list-windows`' order, which is
+                // window index order, which is the order the tab strip and the tree are supposed to
+                // be showing.
+                if let order = orderBySession[sessionId] {
+                    var position: [String: Int] = [:]
+                    for (index, id) in order.enumerated() where position[id] == nil { position[id] = index }
+                    host.sessions[sessionIndex].windows.sort {
+                        (position[$0.id] ?? .max) < (position[$1.id] ?? .max)
+                    }
+                }
+
                 if let active = host.sessions[sessionIndex].activeWindowId,
                    !seen.contains(active) {
                     host.sessions[sessionIndex].activeWindowId = host.sessions[sessionIndex].windows.first?.id
@@ -2319,6 +2338,96 @@ public actor SessionService {
     /// F4.9 — closing a tab unlinks the window from the session; it never kills what is running.
     public func unlinkWindow(hostId: String, windowId: String) {
         send("unlink-window -t \(windowId)", kind: .userCommand("Close window"), hostId: hostId)
+    }
+
+    // MARK: - Window ordering
+
+    /// Reorders a window inside its session, putting it where a dragged tab was dropped.
+    ///
+    /// `before` is the window the dragged one should land in front of, or `nil` for the end of the
+    /// strip — the same "insert before this element, or append" shape `onMove` has, which is what the
+    /// tab strip can say without knowing anything about tmux indices.
+    ///
+    /// Indices are deliberately never mentioned. A session's window indices are arbitrary and often
+    /// not contiguous — `base-index`, a killed window, `renumber-windows` off — so computing a target
+    /// index from a position in the strip would be right until the first gap. Both branches below
+    /// address windows by their `@id`, which says what was dragged onto what regardless of numbering.
+    ///
+    /// Two branches, because `move-window -a`/`-b` is tmux 3.2 and the SRD's floor is 3.0 (verified
+    /// against the R3.6 matrix: 3.0 answers `illegal option -- b`, 3.2a onward accept it). Below 3.2
+    /// the same permutation is built out of `swap-window`, which 3.0 does have: moving an element from
+    /// one position to another *is* a run of adjacent swaps toward the target, and the elements it
+    /// passes shift by one exactly as an insert would move them. That costs one command per position
+    /// crossed rather than one command, which is why it is the fallback and not the mechanism.
+    public func moveWindow(hostId: String, sessionId: String, windowId: String, before: String?) {
+        guard let order = windowOrder(hostId: hostId, sessionId: sessionId),
+              let from = order.firstIndex(of: windowId) else { return }
+
+        // Where the window lands once it has been taken out of the strip. Removing it first is what
+        // makes "drop before the window after me" a no-op rather than a move by one.
+        var remaining = order
+        remaining.remove(at: from)
+        let to = before.flatMap { remaining.firstIndex(of: $0) } ?? remaining.count
+        guard to != from else { return }
+
+        let connection = connections[hostId]
+        // Unknown version is treated as modern, like every other version gate here: an old server
+        // answers with an error the user sees, where assuming old on a new one would silently take
+        // the slow path forever.
+        let supportsRelativeMove = connection?.version.map(\.movesWindowsRelatively) ?? true
+        if supportsRelativeMove {
+            // `-b <that window>`, or `-a <the last one>` when the drop was past the end.
+            let anchor = to < remaining.count ? remaining[to] : remaining[remaining.count - 1]
+            let flag = to < remaining.count ? "-b" : "-a"
+            // The source is qualified with its session: a window linked into several sessions is
+            // reachable by `@id` from any of them, and an unqualified `-s` leaves tmux to pick which
+            // session it is being taken out of. Verified on 3.5 — `move-window -s A:@1 -t C:` removes
+            // it from A alone and leaves the link in B.
+            send(
+                "move-window \(flag) -s \(TmuxCommand.quote("\(sessionId):\(windowId)")) -t \(anchor)",
+                kind: .userCommand("Reorder window"), hostId: hostId
+            )
+            return
+        }
+
+        // Bubble it, one neighbour at a time. `remaining` is the strip without the dragged window, so
+        // the sequence of windows it has to pass is exactly the slice between the two positions.
+        // `-d` so the selection does not follow it: the tab that was in front stays in front.
+        let passed = to > from ? Array(remaining[from..<to]) : Array(remaining[to..<from]).reversed()
+        for neighbour in passed {
+            send("swap-window -d -s \(windowId) -t \(neighbour)",
+                 kind: .userCommand("Reorder window"), hostId: hostId)
+        }
+    }
+
+    /// Moves a window out of one session and into another (F4.9's other half — nothing is killed).
+    ///
+    /// Appended to the destination rather than placed: `-t $id:` with no index is tmux's own "next
+    /// free index there", and there is no drop position to honour when the gesture is a menu item.
+    public func moveWindow(hostId: String, windowId: String, fromSession: String, toSession: String) {
+        guard fromSession != toSession else { return }
+        send(
+            "move-window -s \(TmuxCommand.quote("\(fromSession):\(windowId)"))"
+                + " -t \(TmuxCommand.quote("\(toSession):"))",
+            kind: .userCommand("Move window"), hostId: hostId
+        )
+    }
+
+    /// Links a window into a second session, leaving it in the first.
+    ///
+    /// The inverse of `unlinkWindow`, and the thing that makes F4.9's unlink path reachable at all: a
+    /// window in one session cannot be closed without being killed, and this is how it comes to be in
+    /// two.
+    public func linkWindow(hostId: String, windowId: String, toSession: String) {
+        send(
+            "link-window -s \(windowId) -t \(TmuxCommand.quote("\(toSession):"))",
+            kind: .userCommand("Link window"), hostId: hostId
+        )
+    }
+
+    /// The session's windows in tmux's own order, which is the order `list-windows` reported them in.
+    private func windowOrder(hostId: String, sessionId: String) -> [String]? {
+        hosts[hostId]?.sessions.first { $0.id == sessionId }?.windows.map(\.id)
     }
 
     public func killWindow(hostId: String, windowId: String) {

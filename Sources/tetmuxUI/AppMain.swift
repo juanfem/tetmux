@@ -66,6 +66,14 @@ public struct TetmuxApp: App {
         CommandGroup(replacing: .pasteboard) {
             Button(ApplicationShortcut.paste.title) { model.pasteIntoFocusedPane() }
                 .keyboardShortcut(.paste, in: keymap)
+            Divider()
+            // F4.21. The chord itself is taken by `KeyEventMonitor` before this item ever sees it —
+            // it has to be, since the whole point is to run ahead of menu key equivalents — so this
+            // is here to *say* the escape exists and what it is bound to. Clicking it arms the mode
+            // as well, which is the only way to reach it with the keymap rebound to something the
+            // menu cannot show.
+            Button(ApplicationShortcut.sendNextLiteral.title) { model.armLiteralEscape() }
+                .keyboardShortcut(.sendNextLiteral, in: keymap)
         }
         // Find lives in `.textEditing`, which used to be replaced wholesale by the Paste button
         // above — which is what unplugged SwiftTerm's find bar. It is reachable only through the
@@ -180,6 +188,10 @@ public final class TetmuxAppDelegate: NSObject, NSApplicationDelegate {
     /// host that is wedged at the transport layer cannot hold the app open either.
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model else { return .terminateNow }
+        // Synchronously, and before anything else: the debounced save may not have fired since the
+        // last window was moved, and after this returns there may be no run loop left to fire it in.
+        // ⌘Q is also the *usual* way this app is closed, since it deliberately outlives its windows.
+        model.saveWorkspaceNow()
         Task { @MainActor in
             let cleanup = Task { await model.service.shutdown() }
             let deadline = Task { try? await Task.sleep(for: .seconds(3)) }
@@ -322,13 +334,17 @@ struct RootView: View {
         // Item 9 needs to bring a *particular* window forward, which SwiftUI cannot do.
         .background(WindowAccessor { state.nsWindow = $0 })
         .onAppear {
-            model.registerWindow(state)
             // Handed over rather than claimed: the model has to be able to open a window when there
             // is none left to observe `requestedWindow`, and `openWindow` can only be read here.
             model.openAppWindow = { openWindow(id: RootScene.mainWindowId) }
+            // Where this window was when the app last quit, if there is an entry left for it. Taken
+            // before `registerWindow`, which is what asks for the *next* restored window — so the
+            // queue is one shorter by the time that happens and the chain terminates.
+            if let saved = model.consumeRestore() { state.beginRestore(saved) }
             // A window opened to show something specific starts there rather than on whatever the
             // reconciler would otherwise pick. Consumed once, so ⌘N's plain window is unaffected.
             if let seed = model.consumeSeed() { state.apply(seed) }
+            model.registerWindow(state)
             state.reconcile(with: model.hosts)
             if controlActiveState == .key { model.focus(state) }
         }
@@ -343,6 +359,18 @@ struct RootView: View {
         .onChange(of: model.hosts) { _, hosts in
             state.reconcile(with: hosts)
             if controlActiveState == .key { model.activeScope = state.scope(in: hosts) }
+        }
+        // Collapsing the tree, moving the window, and resizing it are all workspace state that
+        // nothing else observes — the frame is read out of the `NSWindow` at save time, so without a
+        // nudge here it would only ever be recorded when something unrelated changed. The move and
+        // resize notifications are AppKit's because SwiftUI publishes neither, and they are filtered
+        // to this window: every open window is listening to the same two.
+        .onChange(of: state.sidebarVisibility) { _, _ in model.scheduleWorkspaceSave() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMoveNotification)) { note in
+            if (note.object as? NSWindow) === state.nsWindow { model.scheduleWorkspaceSave() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEndLiveResizeNotification)) { note in
+            if (note.object as? NSWindow) === state.nsWindow { model.scheduleWorkspaceSave() }
         }
         .onChange(of: state.focusedPaneId) { _, _ in
             if controlActiveState == .key { model.activeScope = state.scope(in: model.hosts) }
@@ -448,7 +476,11 @@ struct RootView: View {
                     }
                 }
                 Divider()
-                StatusBarView(host: host, session: session, window: window, focusedPaneId: state.focusedPaneId)
+                StatusBarView(
+                    host: host, session: session, window: window,
+                    focusedPaneId: state.focusedPaneId,
+                    literalEscapeArmed: model.literalEscapeArmed
+                )
             }
         } else if let host {
             HostPlaceholderView(host: host) { model.reconnect(host.id) }
@@ -477,7 +509,9 @@ struct RootView: View {
             // window, now that every tab is built: the hidden ones are real views with real frames,
             // and letting them drive the one client size would put the last one laid out in charge.
             drivesClientSize: model.activeWindowState?.id == state.id
-                && state.selectedWindowId == window.id
+                && state.selectedWindowId == window.id,
+            // T5.6 — the host's own opt-in, denied unless someone said otherwise for this host.
+            allowsRemoteClipboardWrite: host.config.allowRemoteClipboardWrite
         )
     }
 }
@@ -491,6 +525,13 @@ struct WindowTabBar: View {
     /// §7 — Reduce Motion is a system preference about vestibular comfort, not a style choice, so
     /// the movement is dropped and the outcome kept: the tab still ends up on screen.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The tab currently being dragged, shared by the strip rather than held per tab.
+    ///
+    /// A drop's insertion point is on one side of the target or the other depending on which way the
+    /// drag is travelling, and `isTargeted` says only *that* something is over the tab, never what.
+    /// Without this the indicator would be drawn on the leading edge always and would be wrong for
+    /// every rightward drag — an insertion marker that lies is worse than none.
+    @State private var draggingWindowId: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -565,6 +606,7 @@ struct WindowTabBar: View {
             session: session,
             window: window,
             isSelected: window.id == state.selectedWindowId,
+            draggingWindowId: $draggingWindowId,
             openWindow: openWindow
         )
     }
@@ -580,9 +622,13 @@ private struct WindowTab: View {
     let session: TmuxSession
     let window: TmuxWindow
     let isSelected: Bool
+    @Binding var draggingWindowId: String?
     let openWindow: OpenWindowAction
 
     @State private var isHovering = false
+    /// Whether a dragged tab is currently over this one, which is the only thing that says where it
+    /// would land — a tab strip has no gaps to open up the way a list does.
+    @State private var isDropTarget = false
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
     /// ⌥ skips the close confirmation here for the same reason it does in the tree — this is the same
@@ -597,6 +643,16 @@ private struct WindowTab: View {
     /// §7 — the ⌥ state has to be readable without hue, and only when the user has asked for that.
     private var saysArmedWithoutColour: Bool {
         modifiers.isOptionHeld && differentiateWithoutColor
+    }
+
+    /// Which side of this tab a drop would insert on — the side the drag came from, which is where
+    /// the gap in the strip conceptually is. Matches `AppModel.dropDestination`'s rule, so the marker
+    /// and the command agree.
+    private var dropIndicatorEdge: Alignment {
+        guard let dragged = draggingWindowId,
+              let from = session.windows.firstIndex(where: { $0.id == dragged }),
+              let onto = session.windows.firstIndex(where: { $0.id == window.id }) else { return .leading }
+        return from < onto ? .trailing : .leading
     }
 
     /// The window's label, with the focused pane's part in medium.
@@ -695,7 +751,43 @@ private struct WindowTab: View {
                     .allowsHitTesting(false)
             }
         }
+        // Where a dragged tab would land. A rule between two tabs rather than a fill on one, because
+        // the answer *is* a position between two tabs — highlighting the target would say "onto this
+        // one", which is not what dropping does — and on the side the drag is coming from.
+        .overlay(alignment: dropIndicatorEdge) {
+            if isDropTarget, draggingWindowId != nil, draggingWindowId != window.id {
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: 2)
+                    .allowsHitTesting(false)
+            }
+        }
         .onHover { isHovering = $0 }
+        // Plain text rather than a declared UTType: an exported type needs an Info.plist to be
+        // declared in, and `swift run` has no bundle. Every drop is checked against this session's
+        // own window ids below, so a stray text drag from another application matches nothing and is
+        // refused — which is the same protection a private type would have given.
+        .onDrag {
+            draggingWindowId = window.id
+            return NSItemProvider(object: window.id as NSString)
+        }
+        .onDrop(of: [.text], isTargeted: $isDropTarget) { providers in
+            defer { draggingWindowId = nil }
+            guard let provider = providers.first, let hostId = state.selectedHostId else { return false }
+            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                guard let dragged = object as? String else { return }
+                Task { @MainActor in
+                    // The id has to name a window of *this* session. A tab dragged from another
+                    // window of the app is a different gesture (it would be a move between sessions,
+                    // which is the menu below), and anything else is not ours at all.
+                    guard session.windows.contains(where: { $0.id == dragged }) else { return }
+                    model.moveWindow(
+                        hostId: hostId, sessionId: session.id, dragged: dragged, onto: window.id
+                    )
+                }
+            }
+            return true
+        }
         .help(window.displayLabel)
         .accessibilityLabel("Window \(window.displayLabel), \(window.paneCount) panes")
         .contextMenu {
@@ -709,10 +801,52 @@ private struct WindowTab: View {
                     collapseSidebar: true, preferNewWindow: true
                 )
             }
+            WindowSessionMenus(
+                model: model,
+                hostId: state.selectedHostId,
+                sessionId: session.id,
+                windowId: window.id
+            )
             Divider()
             Button("Close Window…", role: .destructive) {
                 select()
                 model.requestCloseWindow(in: state)
+            }
+        }
+    }
+}
+
+/// "Move to Session" and "Link to Session", which are the same two items wherever a window is
+/// listed — the tab strip and the sidebar's window row.
+///
+/// Both are non-destructive and neither has a keyboard route, so they live in the context menu with
+/// the other things done *to* a window. Absent entirely when the host has only the one session:
+/// a submenu whose only content is "no other sessions" is a worse answer than not offering it.
+struct WindowSessionMenus: View {
+    @Bindable var model: AppModel
+    let hostId: String?
+    let sessionId: String
+    let windowId: String
+
+    var body: some View {
+        let others = hostId.map { model.otherSessions(hostId: $0, excluding: sessionId) } ?? []
+        if let hostId, !others.isEmpty {
+            Divider()
+            Menu("Move to Session") {
+                ForEach(others) { target in
+                    Button(target.name) {
+                        model.moveWindowToSession(
+                            hostId: hostId, windowId: windowId, from: sessionId, to: target.id
+                        )
+                    }
+                }
+            }
+            Menu("Link to Session") {
+                ForEach(others) { target in
+                    Button(target.name) {
+                        model.linkWindowToSession(hostId: hostId, windowId: windowId, to: target.id)
+                    }
+                }
             }
         }
     }

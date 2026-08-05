@@ -100,6 +100,9 @@ Where things are, since the invariants below name symbols without saying which f
 | `SidebarView.swift` · `StatusBarView.swift` | Host/session/window tree (drawn glyphs); F4.28 footer. |
 | `LauncherOverlay.swift` | ⌘K fuzzy launcher over hosts, sessions and windows (F4.25/F4.26). |
 | `SettingsView.swift` · `KeymapPolicy.swift` | The `Settings` scene; shortcut table. |
+| `KeymapSettingsView.swift` · `ShortcutRecorder.swift` | The editable keymap and its chord recorder. |
+| `KeyEventMonitor.swift` | The one `NSEvent` monitor: ⌥⌘V's literal escape (F4.21). |
+| `WorkspaceStore.swift` · `SettingsStore.swift` | `workspace.json` and `settings.json`. |
 | `ContrastPolicy.swift` | Increase Contrast, resolved once for every site that honours it. |
 | `DestructiveActionModal.swift` | The F4.10 confirmation, which says *why* the close is a kill. |
 | `BellNotifier.swift` · `KeychainStore.swift` | F4.31 background bells; per-host passwords. |
@@ -154,6 +157,17 @@ close it while the thread sat in a 1000 ms `poll` holding that number by value, 
 handed back the same fd had its bytes consumed by the old, already-finished stream — a hole where the
 `%begin` should have been, or a handshake that never arrived and a host stuck at "Connecting…". The
 fd outliving `terminate` by up to one poll interval is the accepted cost.
+
+**`list-windows` order is the window order, and the model has to be re-sorted into it.**
+`applyWindows` updates known windows in place and appends new ones, which keeps identity stable but
+says nothing about position — so without an explicit sort each session kept whatever order it first
+learned its windows in, and a `move-window` or `swap-window` from anywhere (our own reorder, another
+client, `movew` typed at a prompt) changed nothing visible. Tab reordering is `move-window -b`/`-a`
+on tmux ≥ 3.2 and a run of adjacent `swap-window`s below it — 3.0 answers `illegal option -- b` —
+and both address windows by `@id`, never by index: a session's indices are arbitrary and often not
+contiguous, so a position in the strip is not an index. The *source* of a move carries its session
+(`-s $2:@7`), because a window linked into several sessions is reachable by id from any of them and
+an unqualified `-s` leaves tmux to choose which one it leaves.
 
 **State broadcasts are for topology changes only.** `SessionService.ingest` diffs `HostState` and
 broadcasts only when it actually changed. Broadcasting on `%output` rebuilds the SwiftUI tree for
@@ -469,9 +483,27 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   auto-connect policy. Local tmux is always reachable, needs no credentials and cannot prompt for
   anything, so the click was a step with no decision in it. A remote host connecting unbidden can
   raise a password sheet, and several of them at launch is worse than a click.
-- **OSC 52 clipboard writes are denied by default and reads are never permitted** (T5.6). The per-host
-  opt-in T5.6 describes does not exist yet: `allowRemoteClipboardWrite` has no field on `HostConfig`
-  and no UI, so writes are currently denied unconditionally.
+- **OSC 52 clipboard writes are denied by default and reads are never permitted** (T5.6).
+  `allowRemoteClipboardWrite` is a `HostConfig` field, not a `TerminalTheme` one, and that is the
+  point: trusting the machine on your desk to set your clipboard is a different decision from
+  trusting a shared box you ssh into, and an application-wide flag makes both at once. It is passed
+  down to the pane from the host rather than read from the theme, and a missing key in `hosts.json`
+  means denied — so a file written before the field existed gets the safe answer.
+- **Workspace restoration is `pendingRestore` on each window, not `@SceneStorage`.** What has to come
+  back is a relationship between a macOS window and a tmux session, and that session does not exist
+  until the host has connected and answered `list-sessions` — a round trip after the window is
+  already on screen, which is exactly what scene storage cannot express. So `workspace.json` is read
+  once at launch, each window holds its entry, and `reconcile` retries it on every snapshot. The
+  entry carries **both** an id and a name because they answer different questions: `$3` is exact and
+  is what a still-running server is still using (the common case — quitting tetmux does not stop
+  tmux), while the name is what survives a server restart, where matching a reissued id would land
+  on a stranger's session. There is no expiry — a window restored onto a remote host waits there
+  until someone connects it — and only an explicit `select` cancels one. An *unresolved* restore is
+  written back unchanged, or quitting before that host was ever reached would replace the session the
+  user wants with whatever the reconciler picked. Restoration is resolved in `AppModel.apply` and not
+  only in each window's `onChange`, because `syncDisplayedSessions` reads the selections in the same
+  pass and a SwiftUI `onChange` is not guaranteed to have run by then: a restored session otherwise
+  got no tmux client until something unrelated changed the topology, i.e. panes on screen and frozen.
 - Authentication failures are not retried; other disconnects back off 1 s → 60 s with jitter and a
   circuit breaker after 8 attempts (F4.14). An explicit reconnect — `reconnectNow`, behind the
   banner button, the sidebar row, and the placeholder's Retry — clears that breaker, because a click
@@ -525,8 +557,16 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   remotely both work — and that is also why there is no folder picker, which could only ever browse
   this machine. It goes through `TmuxCommand.singleLine` as well as `quote`, like every other user
   value: the field takes a pasted path, and a line break in one ends the command before the closing
-  quote and hands tmux the remainder to run. **Not settable for localhost**, because `saveHosts`
-  filters the `local` id and the sidebar offers no editor for it.
+  quote and hands tmux the remainder to run.
+- **The local host is persisted only as the difference from a baseline, and its editor is a different
+  editor.** `HostConfigStore.localBaseline` is what "localhost, unedited" means; `saveHosts` keeps
+  the `local` entry only when it differs, which is the same rule discovered `ssh-` hosts already had
+  and for the same reason — its *existence* is not a stored fact. `loadHosts` takes only the fields
+  that mean something without a connection (start directory, clipboard policy) and never the whole
+  record, so a hand-edited `hosts.json` cannot flip `isLocal` or rename the host out of the places
+  that look it up. `HostEditorView` branches on `isLocal` rather than disabling fields: hostname,
+  user, port, password, tunnels and ssh options are all properties of a connection it does not make,
+  and a form four-fifths greyed out is a worse answer than a form with two rows in it.
 - **Tunnels are connection options, not a managed feature.** §1.2 rules out a port-forward management
   UI, and there isn't one: forwards are `-L`/`-R`/`-D` arguments that live and die with the channel.
   Incomplete rows are dropped rather than passed to ssh (a malformed `-L` makes ssh exit before tmux
@@ -634,7 +674,28 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   with the sidebar collapsed, not the separate `DetachedScene` type it used to — that had its own view,
   a reduced feature set, and a button to convert itself into a real window, three things to maintain
   for a result that wanted to be a normal window all along.
-- **Anything that belongs to a window lives on `WindowState`, not `AppModel`.** Selection, focused
+- **The keymap has exactly one event monitor, and it exists because the ordinary route cannot be
+escaped.** Every binding is a SwiftUI `keyboardShortcut` on a menu item, which AppKit resolves in
+`performKeyEquivalent` before any view is offered the event — so no view-level hook could ever let
+⌘K through to a pane running fzf. `KeyEventMonitor` is a local `NSEvent` monitor, which runs earlier
+still (`NSApplication.sendEvent` calls monitors before dispatching key equivalents), and F4.21's
+armed chord is delivered to the pane's `keyDown` **directly** rather than passed on: passing it on
+hands it straight back to the menu, which is the interception being escaped. It asks
+`KeymapPolicy.shortcut(for:literalEscapeActive:)` rather than matching anything itself, so F4.22's
+single policy module survives the new surface. New key handling belongs in the policy, not here.
+
+**A rebind must have ⌘ in it, and a taken chord is refused rather than resolved.** The whole default
+set lives in `Cmd` space so that everything else reaches the pane untouched — that is the entire
+content of F4.20's promise about `Ctrl+K` — so `KeymapPolicy.isBindable` rejects anything without
+⌘, in the recorder and again when a hand-edited `settings.json` is applied. Two commands on one
+chord is not resolvable either: `shortcut(for:)` breaks the tie by the enum case's spelling, so one
+of them silently stops working. The chord recorder answers **`performKeyEquivalent`**, not
+`keyDown`, or the menu takes every ⌘ chord before the field sees it. And `KeymapPolicy.overrides`
+builds its map with `updateValue`: assigning `nil` through a `[String: String?]` subscript *removes*
+the key, which would make a deliberately unbound shortcut indistinguishable from an untouched one
+and bring its default back on the next launch.
+
+**Anything that belongs to a window lives on `WindowState`, not `AppModel`.** Selection, focused
   pane, and every sheet the user can raise are per macOS window. Sharing them on the model produced two
   bugs with one cause: clicking a session in one window retargeted all of them, and one
   `.sheet(item:)` bound to shared state opened the same dialog once per open window. `RootView` owns one per window; the
@@ -661,6 +722,16 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   `Commands` has no environment to read one from. ⌥⌘W closes a pane and ⇧⌘W a tmux window, kept a
   modifier apart from ⌘W's macOS window on purpose given the blast radii; ⌥⌘[ / ⌥⌘] move between panes
   in the **rendered** tree, so zoom is respected.
+- **A dropped tab lands on the side the drag came from, and the marker has to agree.** The rule every
+  tab bar has is that the dragged tab takes the target's position and everything between shifts by
+  one — so a rightward drag inserts *after* the target and a leftward one *before* it.
+  `AppModel.dropDestination` is that arithmetic, static and pure because it is the part that can be
+  wrong with nothing to say so: get it backwards and a drag by one position does nothing at all.
+  `isTargeted` reports only that *something* is over a tab, never what, so the strip shares a
+  `draggingWindowId` — otherwise the insertion rule would be drawn on the leading edge always and
+  would lie for every rightward drag. The payload is plain text rather than a declared `UTType`
+  because an exported type needs an `Info.plist` to be declared in and `swift run` has no bundle;
+  every drop is checked against the session's own window ids, so a stray text drag matches nothing.
 - **A window can be asked for but not opened, and not addressed either.** `AppModel.requestedWindow`
   records the request and any open window performs it — via `claimWindowRequest()`, because *every*
   window observes it and a plain nil check on the delivered value opens one window per window already
@@ -790,8 +861,14 @@ as a hang rather than an assertion. CI installs tmux and fails if that skip fire
 indistinguishable from a passing one in a green check.
 
 The test target links `tetmuxUI` as well as `tetmuxCore`. `AppModelTests` covers the decisions that
-need no channel and no window — the F4.9 close decision, scope resolution, keymap matching — which
-were previously unreachable rather than untested.
+need no channel and no window — the F4.9 close decision, scope resolution, keymap matching, tab-drop
+arithmetic, workspace resolution — which were previously unreachable rather than untested.
+
+**An `AppModel` in a test must be given a directory.** It writes files as a side effect of ordinary
+operations: rebinding a chord persists `settings.json`, and selecting a session or registering a
+window schedules a `workspace.json` save. A default-constructed one in a test therefore writes the
+*user's* files, and did — running the app after the suite found `testOnlyEditedBindingsAreStored`'s
+keymap in it. Hence `AppModel(directory:)` and the per-test temporary directory in `setUpWithError`.
 
 Flow-control decisions are asserted through the **diagnostic logger**, not `HostState`: pausing a pane
 is a property of the channel and deliberately invisible to the model, so `LogSink` is the only seam
@@ -847,8 +924,19 @@ rather than fixed.
   one is persisted as the difference from what discovery produces, and only while its `Host` block
   still exists. Before that, a forward or ssh option added to a discovered host worked all session and
   vanished on relaunch, while the Keychain flag it wrote survived and the two then disagreed.
+- `~/Library/Application Support/tetmux/workspace.json` — one entry per macOS window: host, session
+  (id *and* name), tmux window, whether the tree was showing, and the frame. §4.3's view state and
+  nothing else — tmux is the persistence layer for everything in a pane. Written debounced, on window
+  close, and synchronously from `applicationShouldTerminate`, which is the usual way this app is
+  closed. An empty list is never written: the app outlives its last window, so closing them all and
+  quitting from the menu bar would otherwise erase a workspace nobody meant to discard.
+- `~/Library/Application Support/tetmux/settings.json` — the keymap, as the difference from the
+  defaults. A `null` is a shortcut deliberately unbound. The terminal's *appearance* deliberately
+  stays in `UserDefaults` below: font and scrollback are ordinary application preferences the system
+  already has a place for, while a keymap is a document somebody may want to read, diff, or copy to
+  another Mac — which is §2.3's whole argument for JSON.
 - `~/Library/Preferences` (`UserDefaults`) — `terminal.fontName`, `fontSize`, `ligatures`,
-  `scrollbackLines`. Appearance only; nothing about hosts, windows or sessions is restored on relaunch.
+  `scrollbackLines`. Appearance only.
 - `~/Library/Caches/tetmux/cm-%C` — ssh `ControlMaster` socket. Kept short on purpose: unix socket
   paths cap at 104 bytes and Application Support plus ssh's 40-char hash runs close to it.
 - Login Keychain — per-host passwords, opt-in, as `kSecClassInternetPassword` with protocol ssh keyed

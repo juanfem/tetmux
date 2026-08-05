@@ -107,9 +107,65 @@ public final class WindowState: Identifiable {
     /// SwiftUI has no way to bring a *particular* window of a `WindowGroup` forward — `openWindow(id:)`
     /// makes a new one — so items 5 and 9 need the AppKit handle. Weak: the window owns itself, and a
     /// closed one must not be held open by this reference.
-    @ObservationIgnored public weak var nsWindow: NSWindow?
+    @ObservationIgnored public weak var nsWindow: NSWindow? {
+        didSet { applyRestoredFrame() }
+    }
+
+    /// What this window was showing when the app last quit, until the topology can satisfy it.
+    ///
+    /// Held rather than applied, because at the moment a window appears its host is not connected —
+    /// the local one is still handshaking and a remote one is waiting to be asked — so there is no
+    /// session to select yet. `reconcile` retries it on every snapshot and clears it once it lands.
+    /// There is deliberately **no expiry**: a remote host is restored the moment the user connects
+    /// it, which may be minutes later, and a timeout would silently turn that into "the window came
+    /// back on the wrong session" with nothing to explain why.
+    @ObservationIgnored public var pendingRestore: WorkspaceWindow?
+
+    /// The saved frame, applied once the `NSWindow` exists. Cleared when it does, so a window later
+    /// resized by the user is not snapped back by a second `WindowAccessor` pass.
+    @ObservationIgnored private var restoredFrame: NSRect?
 
     public init() {}
+
+    /// Takes a saved window as this window's starting point.
+    ///
+    /// The sidebar and the frame apply immediately — they need nothing from tmux. The selection
+    /// cannot, so it waits in `pendingRestore`.
+    public func beginRestore(_ saved: WorkspaceWindow) {
+        pendingRestore = saved
+        sidebarVisibility = saved.sidebarShown ? .all : .detailOnly
+        restoredFrame = saved.rect
+        applyRestoredFrame()
+    }
+
+    private func applyRestoredFrame() {
+        guard let restoredFrame, let nsWindow else { return }
+        self.restoredFrame = nil
+        // Only if it is still somewhere a person can reach. A monitor unplugged since the last
+        // launch leaves a frame off every screen, and a window restored there is gone as far as the
+        // user is concerned — with no way to bring it back but deleting a file they do not know about.
+        guard NSScreen.screens.contains(where: { $0.visibleFrame.intersects(restoredFrame) }) else { return }
+        nsWindow.setFrame(restoredFrame, display: false)
+    }
+
+    /// This window, in the form the workspace file keeps.
+    public func workspaceEntry(in hosts: [HostState]) -> WorkspaceWindow {
+        // An unresolved restore is written back unchanged rather than overwritten with where the
+        // window has landed in the meantime. Quitting before a remote host was ever connected would
+        // otherwise replace the session the user actually wants with whatever the reconciler picked.
+        if let pendingRestore { return pendingRestore }
+        let session = selectedSession(in: hosts)
+        let window = selectedWindow(in: hosts)
+        return WorkspaceWindow(
+            hostId: selectedHostId,
+            sessionId: session?.id,
+            sessionName: session?.name,
+            windowId: window?.id,
+            windowName: window?.name,
+            sidebarShown: sidebarVisibility != .detailOnly,
+            frame: nsWindow.map { [$0.frame.minX, $0.frame.minY, $0.frame.width, $0.frame.height] }
+        )
+    }
 
     /// Brings this window to the front. Item 9's "bring forward the one already attached".
     public func bringToFront() {
@@ -184,6 +240,7 @@ public final class WindowState: Identifiable {
     /// selection; now each window keeps its own place in the tree, which is the point — two windows
     /// showing two different sessions of one host is the ordinary case, not an edge case.
     public func reconcile(with hosts: [HostState]) {
+        resolveRestore(with: hosts)
         if selectedHostId == nil || !hosts.contains(where: { $0.id == selectedHostId }) {
             selectedHostId = hosts.first?.id
         }
@@ -208,6 +265,40 @@ public final class WindowState: Identifiable {
         let paneIds = window.layoutTree?.paneIds ?? window.panes.map(\.id)
         if let focused = focusedPaneId, paneIds.contains(focused) { return }
         focusedPaneId = window.preferredPaneId
+    }
+
+    /// Puts this window back where the last launch left it, as soon as tmux can say where that is.
+    ///
+    /// Runs ahead of the ordinary reconciliation on every snapshot and is a no-op once it has landed.
+    /// The host is claimed as soon as it exists, even with no sessions yet, so a window restored onto
+    /// a remote host waits *there* — showing that host's connect placeholder — rather than being
+    /// pulled onto the first host in the list by the reconciler below and having to be dragged back.
+    ///
+    /// Non-private so the id-then-name rule can be asserted from a plain host list, with no window
+    /// and no channel: it is the whole of the restoration that can be silently wrong.
+    func resolveRestore(with hosts: [HostState]) {
+        guard let saved = pendingRestore else { return }
+        guard let host = hosts.first(where: { $0.id == saved.hostId }) else { return }
+        selectedHostId = host.id
+
+        // Id first, name second. The id is exact and is what a still-running server will still be
+        // using; the name is what survives the server having been restarted in between, when every
+        // id has been reissued and matching on one would land on a stranger's session.
+        var session = host.sessions.first { $0.id == saved.sessionId }
+        if session == nil, let name = saved.sessionName {
+            session = host.sessions.first { $0.name == name }
+        }
+        guard let session else { return }
+
+        var window = session.windows.first { $0.id == saved.windowId }
+        if window == nil, let name = saved.windowName {
+            window = session.windows.first { $0.name == name }
+        }
+
+        selectedSessionId = session.id
+        selectedWindowId = window?.id ?? session.activeWindow?.id
+        focusedPaneId = nil
+        pendingRestore = nil
     }
 }
 

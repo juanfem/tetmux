@@ -119,11 +119,12 @@ final class HostConfigStoreTests: XCTestCase {
     }
 
     /// The local host is implicit and `ssh-` entries are re-derived from `~/.ssh/config` on each
-    /// launch; persisting either leaves stale entries behind when the config changes.
-    func testDiscoveredAndLocalHostsAreNotPersisted() async throws {
+    /// launch; persisting an *unedited* one of either leaves a stale entry behind when the config
+    /// changes.
+    func testDiscoveredAndUneditedLocalHostsAreNotPersisted() async throws {
         let store = HostConfigStore(directory: directory)
         try await store.saveHosts([
-            StoredHost(id: "local", name: "localhost", isLocal: true),
+            HostConfigStore.localBaseline,
             StoredHost(id: "ssh-devbox", name: "devbox"),
             StoredHost(id: "custom-keeper", name: "keeper"),
         ])
@@ -132,6 +133,53 @@ final class HostConfigStoreTests: XCTestCase {
         XCTAssertTrue(written.contains("custom-keeper"))
         XCTAssertFalse(written.contains("\"local\""))
         XCTAssertFalse(written.contains("ssh-devbox"))
+    }
+
+    /// An *edited* local host is kept, which is what lets localhost have a start directory at all —
+    /// the host most likely to want one used to be the only one that could not have one.
+    func testAnEditedLocalHostIsPersistedAndComesBack() async throws {
+        let store = HostConfigStore(directory: directory)
+        var local = HostConfigStore.localBaseline
+        local.startDirectory = "~/projects"
+        local.allowRemoteClipboardWrite = true
+        try await store.saveHosts([local, StoredHost(id: "custom-keeper", name: "keeper")])
+
+        let reloaded = await HostConfigStore(directory: directory).loadHosts()
+        let restored = try XCTUnwrap(reloaded.first { $0.id == "local" })
+        XCTAssertEqual(restored.startDirectory, "~/projects")
+        XCTAssertTrue(restored.allowRemoteClipboardWrite)
+        XCTAssertTrue(restored.isLocal)
+        XCTAssertEqual(restored.name, "localhost")
+    }
+
+    /// Only the settings that mean anything without a connection are taken from the file. `isLocal`
+    /// and the name decide which transport is used and are looked up all over the app, so a
+    /// hand-edited `hosts.json` must not be able to turn the local host into a remote one.
+    func testTheLocalHostCannotBeEditedIntoARemoteOne() async throws {
+        let store = HostConfigStore(directory: directory)
+        try await store.saveHosts([
+            StoredHost(
+                id: "local", name: "not-localhost", hostname: "elsewhere.example",
+                user: "someone", isLocal: false, startDirectory: "/tmp"
+            )
+        ])
+
+        let reloaded = await HostConfigStore(directory: directory).loadHosts()
+        let restored = try XCTUnwrap(reloaded.first { $0.id == "local" })
+        XCTAssertTrue(restored.isLocal)
+        XCTAssertEqual(restored.name, "localhost")
+        XCTAssertNil(restored.hostname)
+        XCTAssertNil(restored.user)
+        XCTAssertEqual(restored.startDirectory, "/tmp", "…but the settings that do apply are kept")
+    }
+
+    /// T5.6 — the default has to be "denied" for a file written before the field existed, and for a
+    /// file somebody deleted the field from. A missing key is the safe answer either way.
+    func testClipboardWriteIsDeniedWhenTheFieldIsAbsent() throws {
+        let json = Data(#"[{"id": "custom-a", "name": "a", "isLocal": false}]"#.utf8)
+        let decoded = try JSONDecoder().decode([StoredHost].self, from: json)
+        XCTAssertFalse(decoded[0].allowRemoteClipboardWrite)
+        XCTAssertFalse(decoded[0].asConfig.allowRemoteClipboardWrite)
     }
 
     /// Writes an `~/.ssh/config` for the store to discover, so the rules below are asserted against a

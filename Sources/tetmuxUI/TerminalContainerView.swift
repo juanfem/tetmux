@@ -27,6 +27,10 @@ public struct TerminalContainerView: View {
     /// 2.9 there is no per-window sizing at all, and `refresh-client -C` is then the single knob for
     /// every window the client shows — two windows setting it would just overwrite each other.
     let drivesClientSize: Bool
+    /// T5.6 — whether *this host* may write the Mac's clipboard with OSC 52. Passed down from the
+    /// host's config rather than read from the theme: it is a statement about one machine's
+    /// trustworthiness, and the theme is application-wide.
+    let allowsRemoteClipboardWrite: Bool
 
     /// Divider thickness between splits, in points.
     private let dividerWidth: CGFloat = 1
@@ -61,7 +65,8 @@ public struct TerminalContainerView: View {
         service: SessionService,
         focusedPaneId: Binding<String?>,
         owner: UUID,
-        drivesClientSize: Bool = true
+        drivesClientSize: Bool = true,
+        allowsRemoteClipboardWrite: Bool = false
     ) {
         self.hostId = hostId
         self.window = window
@@ -70,6 +75,7 @@ public struct TerminalContainerView: View {
         self._focusedPaneId = focusedPaneId
         self.owner = owner
         self.drivesClientSize = drivesClientSize
+        self.allowsRemoteClipboardWrite = allowsRemoteClipboardWrite
     }
 
     public var body: some View {
@@ -343,6 +349,7 @@ public struct TerminalContainerView: View {
             rows: rows,
             isFocused: focused,
             theme: theme,
+            allowsRemoteClipboardWrite: allowsRemoteClipboardWrite,
             service: service,
             onFocusRequest: { focus(paneId) }
         )

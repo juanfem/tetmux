@@ -16,6 +16,7 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             terminal.tabItem { Label("Terminal", systemImage: "terminal") }
+            KeymapSettingsView(model: model).tabItem { Label("Keys", systemImage: "keyboard") }
         }
         .frame(width: 460)
         .padding(20)

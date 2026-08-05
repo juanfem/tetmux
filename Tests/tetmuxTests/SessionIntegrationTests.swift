@@ -381,7 +381,12 @@ final class SessionIntegrationTests: XCTestCase {
         defer { runTmux(["kill-session", "-t", other]) }
         runTmux(["new-session", "-d", "-s", other])
 
-        let model = await AppModel()
+        // Its own Application Support directory: the model persists the workspace as a side effect
+        // of a window registering, and a test must not write the user's `workspace.json`.
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-integration-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let model = await AppModel(directory: scratch)
         let service = await model.service
         await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
         try await service.connectHost(hostId: "local", targetSession: sessionName)
@@ -1245,6 +1250,162 @@ final class SessionIntegrationTests: XCTestCase {
         XCTAssertEqual(
             tmuxQuery(["display-message", "-p", "-t", paneId, "#{pane_pid}"]), pid,
             "closing a tab killed the process (F4.9)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// Dragging a tab reorders the session's windows, and the order the strip shows is the order
+    /// `list-windows` reports — so this is the assertion the whole feature reduces to.
+    ///
+    /// Against whatever tmux is on PATH, which is 3.2 or newer on any machine this runs on, so it
+    /// exercises the `move-window -b` branch. The `swap-window` fallback below 3.2 is asserted from
+    /// the fixture matrix's own probing rather than here; there is one tmux on the box.
+    func testDraggingATabReordersTheSession() async throws {
+        runTmux(["new-session", "-d", "-s", sessionName, "-n", "one"])
+        runTmux(["new-window", "-t", sessionName, "-n", "two"])
+        runTmux(["new-window", "-t", sessionName, "-n", "three"])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let host = try await waitForHost(service) { host in
+            host.sessions.first { $0.name == self.sessionName }?.windows.count == 3
+        }
+        let session = try XCTUnwrap(host.sessions.first { $0.name == sessionName })
+        let ids = session.windows.map(\.id)
+
+        // The last window onto the first: it lands in front of it, and the other two shift up.
+        await service.moveWindow(
+            hostId: "local", sessionId: session.id, windowId: ids[2], before: ids[0]
+        )
+
+        let name = sessionName
+        let expected = [ids[2], ids[0], ids[1]]
+        let reordered = try await waitFor(seconds: 10) {
+            guard let host = await service.getHost("local"),
+                  let session = host.sessions.first(where: { $0.name == name }) else { return false }
+            return session.windows.map(\.id) == expected
+        }
+        XCTAssertTrue(reordered, "the windows did not end up in the dropped order")
+        // …and tmux agrees, rather than only our model having moved them.
+        XCTAssertEqual(
+            tmuxQuery(["list-windows", "-t", sessionName, "-F", "#{window_id}"])?
+                .components(separatedBy: "\n").first,
+            ids[2]
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// Moving a window to another session is not a close and not a kill: the same window, with the
+    /// same process behind it, one level of the tree over.
+    func testMovingAWindowToAnotherSessionKeepsWhatIsRunningInIt() async throws {
+        let other = "\(sessionName)-target"
+        defer { runTmux(["kill-session", "-t", other]) }
+        runTmux(["new-session", "-d", "-s", sessionName, "-n", "one"])
+        runTmux(["new-window", "-t", sessionName, "-n", "movable"])
+        runTmux(["new-session", "-d", "-s", other])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let host = try await waitForHost(service) { host in
+            host.sessions.first { $0.name == self.sessionName }?.windows.count == 2
+        }
+        let source = try XCTUnwrap(host.sessions.first { $0.name == sessionName })
+        let moving = try XCTUnwrap(source.windows.first { $0.name == "movable" })
+        let paneId = try XCTUnwrap(
+            tmuxQuery(["list-panes", "-t", moving.id, "-F", "#{pane_id}"])?
+                .components(separatedBy: "\n").first
+        )
+        let pid = try XCTUnwrap(tmuxQuery(["display-message", "-p", "-t", paneId, "#{pane_pid}"]))
+        let targetId = try XCTUnwrap(
+            tmuxQuery(["list-sessions", "-f", "#{==:#{session_name},\(other)}", "-F", "#{session_id}"])
+        )
+
+        await service.moveWindow(
+            hostId: "local", windowId: moving.id, fromSession: source.id, toSession: targetId
+        )
+
+        // Waited for through the model, which is what a `@Sendable` predicate can reach; tmux's own
+        // answer is asserted below, once.
+        let sourceId = source.id
+        let movedId = moving.id
+        let arrived = try await waitFor(seconds: 10) {
+            guard let host = await service.getHost("local") else { return false }
+            let stillInSource = host.sessions.first { $0.id == sourceId }?
+                .windows.contains { $0.id == movedId } ?? false
+            let inTarget = host.sessions.first { $0.id == targetId }?
+                .windows.contains { $0.id == movedId } ?? false
+            return inTarget && !stillInSource
+        }
+        XCTAssertTrue(arrived, "the window never moved to the target session")
+        XCTAssertEqual(
+            tmuxQuery([
+                "list-windows", "-t", other,
+                "-f", "#{==:#{window_id},\(moving.id)}", "-F", "#{window_id}",
+            ]),
+            moving.id,
+            "the model says it moved and tmux does not"
+        )
+        XCTAssertNil(
+            tmuxQuery([
+                "list-windows", "-t", self.sessionName,
+                "-f", "#{==:#{window_id},\(moving.id)}", "-F", "#{window_id}",
+            ]),
+            "the window is still linked into the session it was moved out of"
+        )
+        XCTAssertEqual(
+            tmuxQuery(["display-message", "-p", "-t", paneId, "#{pane_pid}"]), pid,
+            "moving a window killed the process in it"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// `link-window` is the inverse of F4.9's unlink, and the thing that makes the unlink path
+    /// reachable at all: a window in one session cannot be closed without being killed.
+    func testLinkingAWindowPutsItInBothSessions() async throws {
+        let other = "\(sessionName)-target"
+        defer { runTmux(["kill-session", "-t", other]) }
+        runTmux(["new-session", "-d", "-s", sessionName, "-n", "shared"])
+        runTmux(["new-session", "-d", "-s", other])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let windowId = try XCTUnwrap(
+            host.sessions.first { $0.name == sessionName }?.windows.first?.id
+        )
+        let targetId = try XCTUnwrap(
+            tmuxQuery(["list-sessions", "-f", "#{==:#{session_name},\(other)}", "-F", "#{session_id}"])
+        )
+
+        await service.linkWindow(hostId: "local", windowId: windowId, toSession: targetId)
+
+        let linked = try await waitFor(seconds: 10) {
+            guard let host = await service.getHost("local") else { return false }
+            return host.sessions.first { $0.id == targetId }?
+                .windows.contains { $0.id == windowId } ?? false
+        }
+        XCTAssertTrue(linked, "the window was never linked into the second session")
+        XCTAssertEqual(
+            tmuxQuery([
+                "list-windows", "-t", other,
+                "-f", "#{==:#{window_id},\(windowId)}", "-F", "#{window_id}",
+            ]),
+            windowId,
+            "the model says it is linked and tmux does not"
+        )
+        XCTAssertEqual(
+            tmuxQuery([
+                "list-windows", "-t", self.sessionName,
+                "-f", "#{==:#{window_id},\(windowId)}", "-F", "#{window_id}",
+            ]),
+            windowId,
+            "linking took the window out of its original session — that would be a move"
         )
 
         await service.disconnectHost(hostId: "local")
