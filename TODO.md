@@ -397,3 +397,20 @@ on a collapsed host.
 
 Since the audit, and not on its list: the reserved-scroller gutter that made every full-width program
 wrap a few columns early, and the README rewritten against what the code actually does.
+
+Two more found while fixing other things, both in the same arithmetic and both worth naming because
+neither announces itself:
+
+- **`TerminalGeometryTests` had been red since the commit that introduced it.** It measured the
+  theme's cell at 2× against a view that resolves its own scale factor and, with no window and no
+  screen under `xctest`, lands on 1×. The failure was nowhere near the defect the test exists to
+  catch. Nothing in CI would have gone green over it — it was simply never run again after the commit
+  that added it.
+- **The pane's cell size was snapped to `NSScreen.main`'s density rather than the window's.**
+  `NSScreen.main` is the screen holding whichever window has keyboard focus *anywhere on the system*,
+  so on a desk with a 1× monitor beside a 2× built-in it changed answer every time the user clicked
+  into another application on the other display. SwiftTerm meanwhile resolves its own `cellDimension`
+  from `window?.backingScaleFactor`. Measured in that configuration: a 572pt pane on the Retina
+  display asked tmux for 71 columns while its own grid drew 76. `@Environment(\.displayScale)` is the
+  fix, plus an `onChange` to re-ask — a window dragged between displays keeps its size in points, so
+  nothing else in the container would ever have noticed.

@@ -243,6 +243,20 @@ depends on nothing but the font, which breaks the loop at its source. `sizeChang
 is deliberately ignored for the same reason — it fires when SwiftTerm re-derives its grid from the
 frame we just gave it, so acting on it is reacting to our own last action.
 
+**…and the scale factor it snaps to is the *window's*, which is not `NSScreen.main`.** The mirror is
+only a mirror if both sides resolve the same density: `ceil(w × scale) / scale` moves the cell by a
+whole point between 1× and 2× — 12pt SF Mono advances `W` by 7.2, which is 8.0 at 1× and 7.5 at 2×.
+`NSScreen.main` is *not* this window's screen; it is the screen holding whichever window has keyboard
+focus anywhere on the system, so with a 1× monitor beside a 2× built-in it changes answer every time
+you click into another application on the other display, while the window has not moved. SwiftTerm
+resolves its own `cellDimension` from `window?.backingScaleFactor` and gets the real one, so the two
+halves of §3.3 came apart: measured on that desk, a 572pt pane on the Retina display asked tmux for
+71 columns while its grid drew 76 — five columns tmux never writes into, and the reverse arrangement
+is the early-wrapping failure the scroller gutter used to cause. `@Environment(\.displayScale)`
+follows the window; nothing else does. It also has to *re-ask* on a change, because a window dragged
+to another display keeps its size in points and `requestSizes` hangs off `proxy.size` — without
+`onChange(of:)` the panes keep the old display's grid until something unrelated resizes them.
+
 **A resize handle has to be an `NSView`, and its identity must not move.** A pane surface is
 SwiftTerm's `TerminalView`, a real `NSView` that tracks the mouse for selection; a SwiftUI
 `DragGesture` layered over it in a `ZStack` never sees an event, whatever the z-order says. Hence

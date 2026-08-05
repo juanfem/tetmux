@@ -83,4 +83,34 @@ final class TerminalGeometryTests: XCTestCase {
             XCTAssertEqual(Int(width / cell.width), cols, "\(cols) columns did not survive the round trip")
         }
     }
+
+    /// A 1× and a 2× display give the same font *different* cell widths, so asking with the wrong
+    /// one is not a rounding difference — it is several columns.
+    ///
+    /// This is what made `NSScreen.main` the wrong source. It is not the window's screen; it is the
+    /// screen holding whichever window has keyboard focus anywhere on the system, so clicking into
+    /// another application on the other monitor changed the answer while the window had not moved.
+    /// SwiftTerm meanwhile resolves its own `cellDimension` from `window?.backingScaleFactor` and
+    /// gets the real one, so the two sides of §3.3 came apart. Measured on a 1× monitor beside a 2×
+    /// built-in: a 572pt pane asked tmux for 71 columns while its own grid drew 76.
+    ///
+    /// The fix is `@Environment(\.displayScale)`, which follows the window. There is nothing here to
+    /// assert about the environment itself — that is SwiftUI's — so what is pinned is the reason it
+    /// matters: the two scale factors disagree by whole columns, and a future "just use 2" would
+    /// bring the bug straight back.
+    func testTheTwoScaleFactorsDisagreeByWholeColumns() {
+        let theme = TerminalTheme.default
+        let oneX = theme.cellSize(backingScaleFactor: 1).width
+        let twoX = theme.cellSize(backingScaleFactor: 2).width
+        XCTAssertNotEqual(oneX, twoX, "a font that snapped the same way at both densities would make this moot")
+
+        // A pane the size of the one that was measured misbehaving.
+        let paneWidth: CGFloat = 572
+        let asked = Int(paneWidth / oneX)
+        let drawn = Int(paneWidth / twoX)
+        XCTAssertGreaterThanOrEqual(
+            drawn - asked, 3,
+            "expected the wrong scale factor to cost several columns, not a rounding error"
+        )
+    }
 }

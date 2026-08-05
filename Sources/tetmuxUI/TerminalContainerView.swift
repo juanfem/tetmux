@@ -37,12 +37,22 @@ public struct TerminalContainerView: View {
     @Environment(\.controlActiveState) private var controlActiveState
     @Environment(\.colorSchemeContrast) private var contrast
 
-    /// Pixel density of the screen the panes are on, for snapping the cell size to whole pixels the
-    /// way SwiftTerm does. Wrong only on the first frame of a window dragged between displays of
-    /// different densities, where the cost is at most a sub-pixel of cell width.
-    private var backingScaleFactor: CGFloat {
-        NSScreen.main?.backingScaleFactor ?? 2
-    }
+    /// Pixel density of the display **this window** is on, for snapping the cell size to whole pixels
+    /// the way SwiftTerm does.
+    ///
+    /// From the environment, and it has to be: `NSScreen.main` is not the window's screen, it is the
+    /// screen holding whichever window has keyboard focus *anywhere on the system*. With a 1× monitor
+    /// beside a 2× built-in display, clicking into another app on the other screen changes the answer
+    /// while this window has not moved — so the two sides of the geometry contract come apart, since
+    /// SwiftTerm resolves its own `cellDimension` from `window?.backingScaleFactor` and gets the real
+    /// one. Measured: 12pt SF Mono advances `W` by 7.2, which snaps to 7.5 at 2× and 8.0 at 1×, and a
+    /// 572pt pane on the Retina display asked tmux for 71 columns while its grid drew 76 — five dead
+    /// columns tmux never writes into. The other way round it is the early-wrapping failure that the
+    /// reserved-scroller gutter used to cause.
+    ///
+    /// `\.displayScale` follows the window between displays, which `NSScreen.main` read from a
+    /// background application does not do reliably at all.
+    @Environment(\.displayScale) private var backingScaleFactor
 
     public init(
         hostId: String,
@@ -76,6 +86,12 @@ public struct TerminalContainerView: View {
             claimSize()
         }
         .onAppear { if controlActiveState == .key { claimSize() } }
+        // Dragging a window to a display of a different density changes the *cell* size without
+        // changing the container's size in points, so nothing else here would notice: `requestSizes`
+        // hangs off `proxy.size`, which is identical before and after the move. Without this the
+        // panes keep the grid they were given for the old display until something unrelated resizes
+        // them — which, on a desk with a 1× monitor beside a 2× laptop, is most of the time.
+        .onChange(of: backingScaleFactor) { _, _ in requestSizes() }
         .onDisappear {
             let (hostId, windowId, owner) = (self.hostId, window.id, self.owner)
             Task { await service.releaseWindowSize(hostId: hostId, windowId: windowId, owner: owner) }
