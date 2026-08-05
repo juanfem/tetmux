@@ -465,6 +465,24 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   that says why (F4.10, no "don't ask again" escape). Both halves have a regression test, including
   one asserting tmux still refuses; if that ever stops being true the confirmation can go.
   `%window-close` cannot distinguish the two, so it schedules a topology refresh rather than guessing.
+- **A linked window says so, because the link is what decides whether closing it is reversible.**
+  `AppModel.closeOutcome` is the single decision and both the action and the tooltips ask it, so a
+  control cannot promise something the click will not do. That matters most with ⌥ held, which skips
+  the confirmation that would otherwise be the first time anyone is told this close is a kill. The
+  marker is a badge — the session glyph, halved, with a count — on the tab and the tree, and the
+  words are in `help` and the accessibility label, which names the other sessions rather than
+  counting them ("also in beta" is checkable; "linked into 3 sessions" is a number to go and
+  resolve). On a tab the words are the *whole* answer: the strip shows one session's windows, so
+  there is no second tab the badge could point at. Nothing here is carried by hue, so
+  `differentiateWithoutColor` needs no branch.
+- **Hovering a linked row marks every row that window appears on, and it does so by accident of the
+  key.** The sidebar's `key(_:_:)` is host + *window*, not host + session + window, so the same
+  linked window in two sessions is one key — which is why both rows' close buttons have always
+  appeared together. The hover wash makes that explicable instead of mysterious, and it is drawn only
+  for a linked window: washing every hovered row would change how the whole tree behaves and would
+  say nothing, since the point is that one window is highlighted in two places. Selection is
+  deliberately *not* the channel — `isShowing` is session-qualified and means "this is what this
+  macOS window is showing", so marking the twins with it would assert something false.
 - **⌥ on a close or kill button skips the confirmation, and is read at click time.** The confirmation
   exists because the user cannot be assumed to know that closing the last link of a window ends what
   is running in it; holding ⌥ *is* saying so, which is what the modifier means on a destructive

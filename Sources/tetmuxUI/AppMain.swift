@@ -640,6 +640,33 @@ private struct WindowTab: View {
         model.select(in: state, host: state.selectedHostId ?? "", session: session.id, window: window.id)
     }
 
+    /// F4.9 — the sessions this window is in, which decides what closing the tab does.
+    private var linkedSessions: [TmuxSession] {
+        guard let hostId = state.selectedHostId else { return [] }
+        return model.linkedSessions(hostId: hostId, windowId: window.id)
+    }
+
+    /// The tab's own tooltip, which is where a linked window says where else it lives — the badge
+    /// beside the name can only count them, and on a tab there is no second row to point at.
+    private var tabHelp: String {
+        let base = "\(window.displayLabel), \(window.paneCount) panes"
+        let others = linkedSessions.filter { $0.id != session.id }.map(\.name)
+        guard !others.isEmpty else { return base }
+        let named = others.count > 1
+            ? others.dropLast().joined(separator: ", ") + " and " + (others.last ?? "")
+            : (others.first ?? "")
+        return "\(base) — also in \(named)"
+    }
+
+    /// What the ✕ will do, in words. See `AppModel.closeDescription`.
+    private var closeHelp: String {
+        guard let hostId = state.selectedHostId else { return "Close \(window.name)" }
+        let sentence = model.closeDescription(
+            hostId: hostId, windowId: window.id, in: session.id, windowName: window.name
+        )
+        return modifiers.isOptionHeld ? "\(sentence), without asking" : sentence
+    }
+
     /// §7 — the ⌥ state has to be readable without hue, and only when the user has asked for that.
     private var saysArmedWithoutColour: Bool {
         modifiers.isOptionHeld && differentiateWithoutColor
@@ -701,6 +728,11 @@ private struct WindowTab: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
+                    // The same marker the tree carries. Here it is the *whole* visible answer rather
+                    // than half of one: the strip shows a single session's windows, so there is no
+                    // second tab it could point at — which is why the glyph comes with a count and
+                    // the tooltip below names the sessions.
+                    LinkedWindowBadge(sessionCount: linkedSessions.count)
                 }
                 .contentShape(Rectangle())
             }
@@ -735,7 +767,8 @@ private struct WindowTab: View {
             // Always laid out, only sometimes visible: hiding it outright would resize the tab under
             // the pointer on hover, and the strip would shuffle as the mouse crossed it.
             .opacity(isHovering || isSelected ? 1 : 0)
-            .accessibilityLabel("Close window \(window.name)")
+            .help(closeHelp)
+            .accessibilityLabel(closeHelp)
         }
         .padding(.leading, 10)
         .padding(.trailing, 6)
@@ -788,8 +821,8 @@ private struct WindowTab: View {
             }
             return true
         }
-        .help(window.displayLabel)
-        .accessibilityLabel("Window \(window.displayLabel), \(window.paneCount) panes")
+        .help(tabHelp)
+        .accessibilityLabel(tabHelp)
         .contextMenu {
             Button("Rename Window…") {
                 model.requestRenameWindow(in: state, hostId: state.selectedHostId, windowId: window.id)

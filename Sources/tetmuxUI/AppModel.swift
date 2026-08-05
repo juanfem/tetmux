@@ -788,18 +788,65 @@ public final class AppModel {
     /// nothing to ask. The caller owns the sheet: a detached window keeps its own, because a sheet
     /// bound to shared state presents itself in every open window at once.
     public func closeWindow(hostId: String, window: TmuxWindow) -> PendingClose? {
-        guard linkedSessionCount(hostId: hostId, windowId: window.id) > 1 else {
-            return closeRequest(hostId: hostId, window: window)
+        guard case .kills = closeOutcome(hostId: hostId, windowId: window.id) else {
+            Task { await service.unlinkWindow(hostId: hostId, windowId: window.id) }
+            return nil
         }
-        Task { await service.unlinkWindow(hostId: hostId, windowId: window.id) }
-        return nil
+        return closeRequest(hostId: hostId, window: window)
     }
 
-    /// How many of the host's sessions this window is linked to. `list-windows -a` reports a linked
-    /// window once per session, so the model already carries it in each one.
-    private func linkedSessionCount(hostId: String, windowId: String) -> Int {
-        guard let host = hosts.first(where: { $0.id == hostId }) else { return 0 }
-        return host.sessions.count { session in session.windows.contains { $0.id == windowId } }
+    /// What closing a window will actually do (F4.9).
+    ///
+    /// Exposed, and asked by the close controls as well as by `closeWindow`, because the difference
+    /// is invisible and irreversible in one direction: linked into several sessions, closing is
+    /// `unlink-window` and nothing dies; linked into one, closing *is* killing. The confirmation
+    /// explains that at the moment of the click, but ⌥ skips the confirmation — so without something
+    /// saying it beforehand, "this tab goes away" and "this build dies" are the same gesture with no
+    /// visible difference. One decision, two readers, so a tooltip cannot promise what the action
+    /// will not do.
+    public enum CloseOutcome: Equatable {
+        /// The window leaves this session and carries on in the ones named.
+        case unlinks(remaining: [String])
+        /// This session is its only one, so removing it there is destroying it.
+        case kills
+    }
+
+    public func closeOutcome(hostId: String, windowId: String, in sessionId: String? = nil) -> CloseOutcome {
+        let linked = linkedSessions(hostId: hostId, windowId: windowId)
+        guard linked.count > 1 else { return .kills }
+        return .unlinks(remaining: linked.filter { $0.id != sessionId }.map(\.name))
+    }
+
+    /// The host's sessions this window is linked into, in tree order.
+    ///
+    /// `list-windows -a` reports a linked window once per session, so the model already carries it in
+    /// each one and this is a filter rather than a query.
+    public func linkedSessions(hostId: String, windowId: String) -> [TmuxSession] {
+        guard let host = hosts.first(where: { $0.id == hostId }) else { return [] }
+        return host.sessions.filter { session in session.windows.contains { $0.id == windowId } }
+    }
+
+    /// Whether a window is in more than one session, which is what the tree and the tab strip mark.
+    public func isLinked(hostId: String, windowId: String) -> Bool {
+        linkedSessions(hostId: hostId, windowId: windowId).count > 1
+    }
+
+    /// The sentence a close control puts in its tooltip, and what a screen reader is told.
+    ///
+    /// Names the sessions rather than counting them: "it stays in build and deploy" is checkable and
+    /// "linked into 3 sessions" is a number the user then has to go and resolve. Truncated past three,
+    /// because a tooltip is not a list.
+    public func closeDescription(
+        hostId: String, windowId: String, in sessionId: String?, windowName: String
+    ) -> String {
+        switch closeOutcome(hostId: hostId, windowId: windowId, in: sessionId) {
+        case .kills:
+            return "Close \(windowName) — this is its only session, so it ends what is running in it"
+        case .unlinks(let remaining):
+            let named = remaining.prefix(3).joined(separator: ", ")
+            let rest = remaining.count > 3 ? " and \(remaining.count - 3) more" : ""
+            return "Remove \(windowName) from this session — it keeps running in \(named)\(rest)"
+        }
     }
 
     /// Only ever reached from the confirmation above, which is the single place a window is killed.

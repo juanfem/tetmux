@@ -131,6 +131,70 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.closeWindow(hostId: "nope", window: window("@1")))
     }
 
+    // MARK: - Saying that a window is linked (F4.9)
+
+    /// The close controls and `closeWindow` ask the same question, so a tooltip cannot promise
+    /// something the click will not do.
+    func testCloseOutcomeNamesWhereTheWindowSurvives() {
+        let shared = window("@5", name: "build")
+        let model = makeModel()
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [shared], isAttached: true),
+            TmuxSession(id: "$2", name: "two", windows: [shared]),
+            TmuxSession(id: "$3", name: "three", windows: [shared]),
+        ])]
+
+        XCTAssertEqual(
+            model.closeOutcome(hostId: "local", windowId: "@5", in: "$1"),
+            .unlinks(remaining: ["two", "three"]),
+            "the sessions it keeps running in are the ones it is not being removed from"
+        )
+        XCTAssertTrue(model.isLinked(hostId: "local", windowId: "@5"))
+    }
+
+    /// The other half, and the one that matters: this session is its only one, so closing is killing.
+    func testCloseOutcomeSaysWhenClosingKills() {
+        let only = window("@7", name: "build")
+        let model = makeModel()
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [only], isAttached: true),
+        ])]
+
+        XCTAssertEqual(model.closeOutcome(hostId: "local", windowId: "@7", in: "$1"), .kills)
+        XCTAssertFalse(model.isLinked(hostId: "local", windowId: "@7"))
+        XCTAssertTrue(
+            model.closeDescription(hostId: "local", windowId: "@7", in: "$1", windowName: "build")
+                .contains("ends what is running in it"),
+            "the tooltip has to say that this one is irreversible"
+        )
+    }
+
+    /// The tooltip names the sessions rather than counting them — "it stays in two and three" is
+    /// checkable where "linked into 3 sessions" is a number the user then has to go and resolve.
+    func testCloseDescriptionNamesTheSurvivingSessions() {
+        let shared = window("@5", name: "build")
+        let model = makeModel()
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [shared], isAttached: true),
+            TmuxSession(id: "$2", name: "two", windows: [shared]),
+        ])]
+
+        let description = model.closeDescription(
+            hostId: "local", windowId: "@5", in: "$1", windowName: "build"
+        )
+        XCTAssertTrue(description.contains("keeps running in two"), description)
+        XCTAssertFalse(description.contains("one"), "the session it is leaving is not one it survives in")
+    }
+
+    /// An unknown host is not silently "linked into nothing": `closeWindow` treats it as the case that
+    /// asks, and the description has to agree with that rather than promising a safe unlink.
+    func testAnUnknownHostIsDescribedAsTheCaseThatAsks() {
+        let model = makeModel()
+        model.hosts = []
+        XCTAssertEqual(model.closeOutcome(hostId: "nope", windowId: "@1", in: nil), .kills)
+        XCTAssertNotNil(model.closeWindow(hostId: "nope", window: window("@1")))
+    }
+
     // MARK: - Default session names
 
     /// The first session on a host with none takes index 1, not 0.

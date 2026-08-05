@@ -538,6 +538,12 @@ struct SidebarView: View {
         // `@1` in session `$0` highlights on every host that has one, which is every host.
         let isSelected = state.isShowing(hostId: host.id, sessionId: session.id, windowId: window.id)
         let label = window.displayLabel
+        let linked = model.linkedSessions(hostId: host.id, windowId: window.id)
+        // `key` is host + *window*, not host + session + window, so the same linked window in two
+        // sessions is one key — which is what makes hovering either row mark both of them without
+        // anything having to look the twins up. (It is also why the close buttons already appeared on
+        // both, long before anything said why.)
+        let isHovered = hoveredRow == rowKey
         return HStack(spacing: 4) {
             Button {
                 model.select(in: state, host: host.id, session: session.id, window: window.id)
@@ -558,13 +564,15 @@ struct SidebarView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Spacer(minLength: 4)
+                    LinkedWindowBadge(sessionCount: linked.count)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             // The full text when it does not fit — the label is the only identification a window has,
-            // and a truncated one can easily be identical to its neighbour's.
-            .help(label)
+            // and a truncated one can easily be identical to its neighbour's — plus where else this
+            // window lives, which is the thing the badge can only count.
+            .help(linked.count > 1 ? "\(label) — also in \(otherSessionNames(linked, excluding: session.id))" : label)
             // Same gesture as a session row, one level down: show this window and get out of the way.
             .simultaneousGesture(TapGesture(count: 2).onEnded {
                 focus(host: host, session: session, window: window)
@@ -573,10 +581,12 @@ struct SidebarView: View {
             rowActions {
                 RowButton(
                     glyph: .cross,
-                    help: modifiers.isOptionHeld
-                        ? "Close \(window.name) without asking"
-                        : "Close \(window.name)",
-                    isVisible: hoveredRow == rowKey || isSelected,
+                    // F4.9 in a tooltip. The two outcomes are one gesture apart and only one of them
+                    // can be undone, and ⌥ skips the confirmation that would otherwise be the first
+                    // time anybody is told which one this is. Asked of the model rather than derived
+                    // here, so the sentence and the action cannot disagree.
+                    help: closeHelp(host: host, session: session, window: window),
+                    isVisible: isHovered || isSelected,
                     isArmed: modifiers.isOptionHeld
                 ) {
                     model.select(in: state, host: host.id, session: session.id, window: window.id)
@@ -588,7 +598,7 @@ struct SidebarView: View {
         .padding(.vertical, 1)
         .background(
             RoundedRectangle(cornerRadius: 5)
-                .fill(isSelected ? ContrastPolicy.selectionFill(contrast) : Color.clear)
+                .fill(rowFill(isSelected: isSelected, isHovered: isHovered, linked: linked.count > 1))
         )
         .overlay {
             if isSelected {
@@ -598,7 +608,37 @@ struct SidebarView: View {
             }
         }
         .onHover { hovering(rowKey, $0) }
-        .accessibilityLabel("Window \(label), \(window.paneCount) panes")
+        .accessibilityLabel(
+            "Window \(label), \(window.paneCount) panes"
+                + (linked.count > 1 ? ", also in \(otherSessionNames(linked, excluding: session.id))" : "")
+        )
+    }
+
+    /// A window row's background.
+    ///
+    /// Selection wins, and the hover wash is only for a *linked* window. Washing every hovered row
+    /// would be a change to how the whole tree behaves, and it would say nothing: what makes this
+    /// worth drawing is that the same window is highlighted in two places at once, which is only
+    /// true when there is a second place. The wash is `ContrastPolicy`'s, like every other one — the
+    /// signal is a faint fill at standard contrast and an obvious one at increased.
+    private func rowFill(isSelected: Bool, isHovered: Bool, linked: Bool) -> Color {
+        if isSelected { return ContrastPolicy.selectionFill(contrast) }
+        if isHovered && linked { return ContrastPolicy.hoverFill(contrast) }
+        return .clear
+    }
+
+    /// "build and deploy" — the sessions a window is in other than this one.
+    private func otherSessionNames(_ linked: [TmuxSession], excluding sessionId: String) -> String {
+        let names = linked.filter { $0.id != sessionId }.map(\.name)
+        guard names.count > 1 else { return names.first ?? "" }
+        return names.dropLast().joined(separator: ", ") + " and " + (names.last ?? "")
+    }
+
+    private func closeHelp(host: HostState, session: TmuxSession, window: TmuxWindow) -> String {
+        let sentence = model.closeDescription(
+            hostId: host.id, windowId: window.id, in: session.id, windowName: window.name
+        )
+        return modifiers.isOptionHeld ? "\(sentence), without asking" : sentence
     }
 
     @ViewBuilder
@@ -875,6 +915,63 @@ private struct SessionStackIcon: View {
         shape
             .strokeBorder(lineWidth: TreeIcon.stroke)
             .frame(width: Self.rect.width, height: Self.rect.height)
+    }
+}
+
+/// A window that is in more than one session: the session glyph, halved.
+///
+/// Deliberately built from `SessionStackIcon`'s vocabulary rather than a chain or a link symbol. The
+/// tree already says "layered rectangles = a thing containing windows", so two of them beside a count
+/// reads as "this window is in that many of those" with nothing new to learn — where a chain link
+/// would be a fresh glyph meaning something the tree has no other word for. Drawn rather than an SF
+/// Symbol for the reason every glyph here is: `link` is stroked to its own weight and would sit
+/// heavier beside the pane icon at 13px than either of them is meant to.
+///
+/// No clearance cut, unlike `SessionStackIcon`: at this size the two rules are already a rule apart,
+/// and the erase is what that icon needs to survive being drawn much larger on a tinted row.
+private struct LinkedSessionsIcon: View {
+    private static let rect = CGSize(width: 7, height: 5)
+    private static let offset: CGFloat = 2.5
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            outline
+            outline.offset(x: Self.offset, y: Self.offset)
+        }
+        .frame(
+            width: Self.rect.width + Self.offset,
+            height: Self.rect.height + Self.offset,
+            alignment: .topLeading
+        )
+    }
+
+    private var outline: some View {
+        RoundedRectangle(cornerRadius: 1)
+            .strokeBorder(lineWidth: TreeIcon.stroke)
+            .frame(width: Self.rect.width, height: Self.rect.height)
+    }
+}
+
+/// The marker itself: the glyph and how many sessions, wherever a linked window is listed.
+///
+/// A count and not just a mark, because "in more than one" and "in four" are different amounts of
+/// surprise when the window is renamed or killed. The words are on the row's `help` and its
+/// accessibility label, which is also what answers `differentiateWithoutColor` here — nothing about
+/// this signal is carried by hue, so there is nothing to replace.
+struct LinkedWindowBadge: View {
+    let sessionCount: Int
+
+    var body: some View {
+        if sessionCount > 1 {
+            HStack(spacing: 3) {
+                LinkedSessionsIcon()
+                Text("\(sessionCount)")
+                    .font(.caption2)
+                    .monospacedDigit()
+            }
+            .foregroundStyle(.secondary)
+            .accessibilityHidden(true)
+        }
     }
 }
 
