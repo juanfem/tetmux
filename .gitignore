@@ -14,3 +14,7 @@ xcuserdata/
 
 # Packaging output
 /dist/
+
+# The R3.6 tmux matrix: sources and binaries built by Scripts/build-tmux-matrix.sh. A means, not an
+# artifact — what gets committed is the fixtures they were used to capture.
+/.tmux-matrix/

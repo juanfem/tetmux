@@ -799,7 +799,30 @@ there is. The stalled-viewer test never reads its stream, on purpose — reading
 measure nothing.
 
 Protocol tests replay byte streams captured verbatim from tmux 3.7b. When fixing a protocol bug, add
-the real captured bytes rather than a hand-written approximation. `SshPromptDetectorTests` follows the
+the real captured bytes rather than a hand-written approximation.
+
+**The R3.6 matrix is real now, and it is a local recording rather than a CI job.**
+`Scripts/build-tmux-matrix.sh` builds tmux 3.0/3.2a/3.3a/3.4/3.5 from pinned, checksummed tarballs
+into a gitignored `.tmux-matrix/`; `Scripts/capture-fixtures.py` drives each under a pty and writes
+`Tests/tetmuxTests/Fixtures/tmux-<version>.<scenario>.stream`; `ControlCodecMatrixTests` replays
+them. Capture must **not** move into CI: a fixture's value is that it is a frozen record, so a
+regression shows as the parser disagreeing with it — regenerate it each run and the test asserts
+"the parser agrees with whatever tmux just said", which is true by construction. The inputs are
+pinned releases, so a rebuild is byte-identical forever. The scripts exist for *provenance*: without
+them the fixtures are one person's word about what they once saw.
+
+Three things keep a capture a record of a **version** rather than of a machine, and each was a real
+leak before it was fixed: `-f /dev/null` so nobody's `~/.tmux.conf` gets in; every pane running
+`cat` so a fixture holds protocol instead of somebody's shell prompt; each binary installed as plain
+`tmux` in a directory of its own, because tmux names a window after the command running in it and a
+binary called `tmux-3.5` puts `%window-renamed @0 tmux-3.5` in the stream. Automatic rename is off
+by default in the preamble for the same reason — one 3.0 capture came back naming a window
+`kernel_task`.
+
+Assertions are about **structure, not bytes**: captures carry wall-clock timestamps and server-wide
+command numbers, so two recordings of one version are never identical and a golden file would fail
+for reasons nobody can act on. What is pinned is that the same actions build the same model on every
+version, plus the protocol facts the code branches on. `SshPromptDetectorTests` follows the
 same rule with OpenSSH: its fixtures were captured by driving `ssh` and `ssh-keygen` under `pty.fork`,
 and the details a plausible-looking fake gets wrong (the leading `\r`, the trailing space, the absent
 newline) are exactly the ones detection depends on.

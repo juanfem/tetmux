@@ -1,0 +1,26 @@
+P1000p%begin 1785923873 257 0
+%end 1785923873 257 0
+%window-add @0
+%sessions-changed
+%session-changed $0 fixture
+%begin 1785923874 262 1
+%end 1785923874 262 1
+%begin 1785923875 263 1
+%end 1785923875 263 1
+%window-pane-changed @0 %1
+%layout-change @0 8205,80x24,0,0{40x24,0,0,0,39x24,41,0,1} 8205,80x24,0,0{40x24,0,0,0,39x24,41,0,1} *
+%begin 1785923875 266 1
+%end 1785923875 266 1
+%window-pane-changed @0 %2
+%layout-change @0 d67e,80x24,0,0{40x24,0,0,0,39x24,41,0[39x12,41,0,1,39x11,41,13,2]} d67e,80x24,0,0{40x24,0,0,0,39x24,41,0[39x12,41,0,1,39x11,41,13,2]} *
+%begin 1785923876 269 1
+%end 1785923876 269 1
+%layout-change @0 8205,80x24,0,0{40x24,0,0,0,39x24,41,0,1} 8205,80x24,0,0{40x24,0,0,0,39x24,41,0,1} *
+%window-pane-changed @0 %1
+%begin 1785923876 272 1
+%end 1785923876 272 1
+%session-window-changed $0 @1
+%window-add @1
+%begin 1785923877 275 1
+%end 1785923877 275 1
+%unlinked-window-close @0

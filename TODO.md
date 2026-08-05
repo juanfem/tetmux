@@ -4,7 +4,7 @@ From the audit of 2026-08-04. Ordered by what actually breaks for a user, not by
 Each item names the evidence, because the ones that matter here are all silent failures — nothing
 in this list announces itself, which is why they survived this long.
 
-**34 done, 5 partial, 8 open.**
+**35 done, 5 partial, 7 open.**
 
 References on **done** items are as they were when the audit ran, so they point into the commit
 before each fix rather than into current `main` — they are kept because the evidence is the useful
@@ -15,8 +15,9 @@ What is left falls into three groups, and they are not equally blocked:
 
 - **Needs credentials or hardware nobody here has.** Developer ID signing and notarisation need an
   Apple Developer account; an updater needs somewhere to host an appcast and a key to sign it; the
-  R3.6 fixture matrix needs tmux 3.0/3.2a/3.3a/3.4/3.5 binaries to capture from; P6 wants latency
-  measured in CI on real hardware. These are decisions before they are work.
+  P6 wants latency measured in CI on real hardware. These are decisions before they are work.
+  (The R3.6 matrix was in this group and is out of it: the binaries turned out to build from source
+  in about a minute each, so nothing was needed but the script to do it.)
 - **Real features, sized like features.** Passthrough fallback (F4.27, which is also the "offer a
   plain shell" row of R3.8), copy mode, an editable keymap with a settings file, per-host OSC 52,
   tab reordering and `move-window`, window/session state restoration, listing a host's sessions
@@ -373,12 +374,20 @@ What is left falls into three groups, and they are not equally blocked:
   currently paper over with a quarantine workaround.
   `Scripts/package-dmg.sh:136`
 
-- [ ] **R3.6 fixture matrix is one version.** Everything is captured from 3.7b; the SRD asks for
+- [x] **R3.6 fixture matrix is one version.** Everything is captured from 3.7b; the SRD asks for
   3.0, 3.2a, 3.3a, 3.4 and 3.5, and CI installs a single Homebrew tmux. The version-conditional
   code paths are therefore all untested on the versions they exist for — the integration tests
   self-skip on an old server rather than exercising the fallback, and `TmuxVersion`'s unit tests
   cover the predicate rather than the paths behind it.
   `.github/workflows/ci.yml`, `Tests/tetmuxTests/SessionIntegrationTests.swift:997`, `:1302`, `:1350`
+  *All five versions build from pinned checksummed tarballs (`Scripts/build-tmux-matrix.sh`), and
+  `Scripts/capture-fixtures.py` records ten scenarios from each under a pty — 50 fixtures, 200 KB.
+  `ControlCodecMatrixTests` replays them and pins the layout-change field count, zoom's visible
+  layout, octal escaping, rename ids, and `%exit` back to 3.0. Deliberately **not** a CI job: a
+  fixture is a frozen record, and regenerating it each run makes the test a tautology.
+  **Still open at the level below this:** the integration suite continues to run against whatever
+  `tmux` is on PATH, so old-version *behaviour* — as opposed to parsing — is still untested. That is
+  §8's containerised matrix, below.*
 
 - [ ] **P6.1–P6.7 are unmeasured.** No latency, throughput, CPU or memory instrumentation exists —
   no `os_signpost`, no `measure(`, nothing in CI — against §8's "latency measurement in CI on real

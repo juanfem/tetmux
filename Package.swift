@@ -61,7 +61,11 @@ let package = Package(
             // (F4.9), prompt handling, keymap resolution — that needed no AppKit to exercise and was
             // simply unreachable from a test bundle that did not link it.
             dependencies: ["tetmuxCore", "tetmuxUI"],
-            path: "Tests/tetmuxTests"
+            path: "Tests/tetmuxTests",
+            // R3.6's recorded byte streams, one per tmux version per scenario, written by
+            // Scripts/capture-fixtures.py. `.copy` rather than `.process`: these are raw protocol
+            // captures containing arbitrary bytes, and processing would be free to transform them.
+            resources: [.copy("Fixtures")]
         ),
     ]
 )

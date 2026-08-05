@@ -1,0 +1,11 @@
+P1000p%begin 1785923881 257 0
+%end 1785923881 257 0
+%window-add @0
+%sessions-changed
+%session-changed $0 fixture
+%begin 1785923882 262 1
+%end 1785923882 262 1
+%begin 1785923883 263 1
+%end 1785923883 263 1
+%exit
+\

@@ -1,0 +1,20 @@
+P1000p%begin 1785923862 257 0
+%end 1785923862 257 0
+%window-add @0
+%sessions-changed
+%session-changed $0 fixture
+%begin 1785923863 262 1
+%end 1785923863 262 1
+%begin 1785923863 263 1
+%end 1785923863 263 1
+%begin 1785923864 264 1
+%end 1785923864 264 1
+%window-renamed @0 fixture-window
+%begin 1785923864 266 1
+%end 1785923864 266 1
+%session-renamed $0 fixture-session
+%begin 1785923865 268 1
+%end 1785923865 268 1
+%begin 1785923865 269 1
+%end 1785923865 269 1
+%window-renamed @0 back

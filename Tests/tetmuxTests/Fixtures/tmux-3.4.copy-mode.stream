@@ -1,0 +1,15 @@
+P1000p%begin 1785923962 265 0
+%end 1785923962 265 0
+%window-add @0
+%sessions-changed
+%session-changed $0 fixture
+%begin 1785923963 271 1
+%end 1785923963 271 1
+%begin 1785923964 272 1
+%end 1785923964 272 1
+%pane-mode-changed %0
+%begin 1785923964 274 1
+%end 1785923964 274 1
+%begin 1785923965 275 1
+%end 1785923965 275 1
+%pane-mode-changed %0

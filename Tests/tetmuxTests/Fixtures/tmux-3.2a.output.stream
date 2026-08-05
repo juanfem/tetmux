@@ -1,0 +1,23 @@
+P1000p%begin 1785923883 257 0
+%end 1785923883 257 0
+%window-add @0
+%sessions-changed
+%session-changed $0 fixture
+%begin 1785923884 262 1
+%end 1785923884 262 1
+%begin 1785923885 263 1
+%end 1785923885 263 1
+%output %0 hello\015
+%output %0 \012hello\015\012
+%begin 1785923885 264 1
+%end 1785923885 264 1
+%output %0 ^[[1mbold^[[0
+%output %0 m\015\012\033[1mbold\033[0m\015\012
+%begin 1785923886 265 1
+%end 1785923886 265 1
+%output %0 \134not-an-escape\015
+%output %0 \012\134not-an-escape\015\012
+%begin 1785923886 266 1
+%end 1785923886 266 1
+%output %0 éü€\015\012
+%output %0 éü€\015\012
