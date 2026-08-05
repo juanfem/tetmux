@@ -1301,9 +1301,32 @@ final class AppModelTests: XCTestCase {
             ),
             WorkspaceWindow(hostId: "remote", sessionId: "$4", sessionName: "build"),
         ]
-        await WorkspaceStore(directory: directory).save(entries)
+        let saved = Workspace(
+            windows: entries,
+            watchedWindows: [WatchedWindow(hostId: "remote", windowId: "@9")]
+        )
+        await WorkspaceStore(directory: directory).save(saved)
         let reloaded = await WorkspaceStore(directory: directory).load()
-        XCTAssertEqual(reloaded, entries)
+        XCTAssertEqual(reloaded, saved)
+    }
+
+    /// The file used to *be* the array of windows, and one written by a previous version is the
+    /// ordinary state of every upgrade. Discarding it would greet the feature by throwing away the
+    /// user's window arrangement.
+    func testAWorkspaceWrittenBeforeTheEnvelopeStillLoads() {
+        let json = Data(#"[{"hostId": "local", "sessionName": "work", "sidebarShown": false}]"#.utf8)
+        let workspace = WorkspaceStore.decode(json)
+        XCTAssertEqual(workspace.windows.count, 1)
+        XCTAssertEqual(workspace.windows[0].sessionName, "work")
+        XCTAssertFalse(workspace.windows[0].sidebarShown)
+        XCTAssertTrue(workspace.watchedWindows.isEmpty)
+    }
+
+    /// …and one written after it, missing the new key, is the same case one layer up.
+    func testAWorkspaceEnvelopeDecodesWithFieldsMissing() {
+        let workspace = WorkspaceStore.decode(Data(#"{"windows": []}"#.utf8))
+        XCTAssertTrue(workspace.windows.isEmpty)
+        XCTAssertTrue(workspace.watchedWindows.isEmpty)
     }
 
     /// A file written before a field existed, and one a person has edited down to the essentials,
@@ -1518,6 +1541,212 @@ final class AppModelTests: XCTestCase {
             WorkspaceWindow(frame: [10, 20, 900, 600]).rect,
             NSRect(x: 10, y: 20, width: 900, height: 600)
         )
+    }
+
+    // MARK: - Activity notifications (F4.31)
+
+    private func activeWindow(_ id: String, name: String = "build", active: Bool) -> TmuxWindow {
+        var window = TmuxWindow(id: id, name: name)
+        window.hasActivity = active
+        return window
+    }
+
+    /// The event is the *transition*, and everything below is a way of getting that wrong.
+    func testAWatchedWindowThatStartsPrintingIsReported() {
+        let before = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
+            activeWindow("@1", active: false),
+        ])])]
+        let after = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
+            activeWindow("@1", active: true),
+        ])])]
+
+        let alerts = AppModel.newlyActive(
+            from: before, to: after, watching: [WatchedWindow(hostId: "local", windowId: "@1")]
+        )
+        XCTAssertEqual(alerts.map(\.windowId), ["@1"])
+    }
+
+    /// `hasActivity` stays true until somebody looks at the window, so reporting on the value rather
+    /// than the transition would re-fire on every topology snapshot — a job that printed once would
+    /// notify for the rest of the afternoon.
+    func testAWindowThatWasAlreadyActiveDoesNotFireAgain() {
+        let snapshot = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
+            activeWindow("@1", active: true),
+        ])])]
+
+        let alerts = AppModel.newlyActive(
+            from: snapshot, to: snapshot, watching: [WatchedWindow(hostId: "local", windowId: "@1")]
+        )
+        XCTAssertTrue(alerts.isEmpty)
+    }
+
+    func testAnUnwatchedWindowIsNeverReported() {
+        let before = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
+            activeWindow("@1", active: false),
+            activeWindow("@2", active: false),
+        ])])]
+        let after = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
+            activeWindow("@1", active: true),
+            activeWindow("@2", active: true),
+        ])])]
+
+        let alerts = AppModel.newlyActive(
+            from: before, to: after, watching: [WatchedWindow(hostId: "local", windowId: "@2")]
+        )
+        XCTAssertEqual(alerts.map(\.windowId), ["@2"])
+    }
+
+    /// tmux ids are per server, so a watch on `local`'s `@1` must say nothing about another host's.
+    func testTheWatchDoesNotCrossHosts() {
+        let before = [remoteHost(id: "build-box", sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [activeWindow("@1", active: false)]),
+        ])]
+        let after = [remoteHost(id: "build-box", sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [activeWindow("@1", active: true)]),
+        ])]
+
+        let alerts = AppModel.newlyActive(
+            from: before, to: after, watching: [WatchedWindow(hostId: "local", windowId: "@1")]
+        )
+        XCTAssertTrue(alerts.isEmpty)
+    }
+
+    /// A window that has only just appeared has no previous value. Attaching to a server whose
+    /// watched window is already active is not the same event as it becoming active, and treating it
+    /// as one means a banner on every reconnect.
+    func testAWindowSeenForTheFirstTimeIsNotReported() {
+        let after = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
+            activeWindow("@1", active: true),
+        ])])]
+
+        let alerts = AppModel.newlyActive(
+            from: [], to: after, watching: [WatchedWindow(hostId: "local", windowId: "@1")]
+        )
+        XCTAssertTrue(alerts.isEmpty)
+    }
+
+    /// A window linked into several sessions is one window (F4.9's subject) and appears once in each.
+    /// Reporting per appearance would notify twice for one event.
+    func testALinkedWindowIsReportedOnce() {
+        let quiet = activeWindow("@5", active: false)
+        let loud = activeWindow("@5", active: true)
+        let before = [host(sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [quiet]),
+            TmuxSession(id: "$2", name: "two", windows: [quiet]),
+        ])]
+        let after = [host(sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [loud]),
+            TmuxSession(id: "$2", name: "two", windows: [loud]),
+        ])]
+
+        let alerts = AppModel.newlyActive(
+            from: before, to: after, watching: [WatchedWindow(hostId: "local", windowId: "@5")]
+        )
+        XCTAssertEqual(alerts.count, 1)
+        XCTAssertEqual(alerts.first?.label, "build")
+    }
+
+    /// Watching is a toggle and it persists. The round trip through the file is covered separately;
+    /// this is the decision.
+    func testWatchingAWindowIsAToggle() {
+        let model = makeModel()
+        XCTAssertFalse(model.isWatching(hostId: "local", windowId: "@1"))
+        model.toggleWatch(hostId: "local", windowId: "@1")
+        XCTAssertTrue(model.isWatching(hostId: "local", windowId: "@1"))
+        XCTAssertFalse(model.isWatching(hostId: "local", windowId: "@2"))
+        model.toggleWatch(hostId: "local", windowId: "@1")
+        XCTAssertFalse(model.isWatching(hostId: "local", windowId: "@1"))
+    }
+
+    // MARK: - The session-gone offer (F4.15)
+
+    /// A window that had the session on screen when it ended is offered it back by name. Everything
+    /// this asserts is a thing that is silently wrong when it is wrong: the offer either never
+    /// appears, or appears over the wrong window with somebody else's session named in it.
+    func testTheWindowThatWasInTheEndedSessionIsOfferedItBack() {
+        var hosts = [host(sessions: [TmuxSession(id: "$1", name: "work", windows: [window("@1")])])]
+        let state = WindowState()
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+        state.reconcile(with: hosts)
+
+        // What the server ending looks like: the sessions are gone, not merely out of reach.
+        hosts[0].sessions = []
+        hosts[0].activeSessionId = nil
+        hosts[0].connectionState = .disconnected
+        hosts[0].endedSessionName = "work"
+
+        XCTAssertEqual(state.recreatableSessionName(in: hosts[0]), "work")
+    }
+
+    /// A second window sitting on a different session of the same host gets the ordinary disconnected
+    /// placeholder. Offering it "Recreate 'work'" would put a button in front of someone for a
+    /// session that was never theirs.
+    func testAWindowOnAnotherSessionIsNotOfferedTheRecreation() {
+        var hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "work", windows: [window("@1")]),
+            TmuxSession(id: "$2", name: "spare", windows: [window("@2")]),
+        ])]
+        let state = WindowState()
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$2"
+        state.reconcile(with: hosts)
+
+        hosts[0].sessions = []
+        hosts[0].activeSessionId = nil
+        hosts[0].connectionState = .disconnected
+        hosts[0].endedSessionName = "work"
+
+        XCTAssertNil(state.recreatableSessionName(in: hosts[0]))
+    }
+
+    /// tmux numbers and names sessions per server, so `work` on two machines is two different pieces
+    /// of work — the remembered host has to be part of the match.
+    func testTheOfferDoesNotCrossHosts() {
+        let local = host(sessions: [TmuxSession(id: "$1", name: "work", windows: [window("@1")])])
+        let state = WindowState()
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+        state.reconcile(with: [local])
+
+        var other = remoteHost(id: "build-box", sessions: [])
+        other.connectionState = .disconnected
+        other.endedSessionName = "work"
+
+        XCTAssertNil(state.recreatableSessionName(in: other))
+    }
+
+    /// A dropped link is not an ended session. The field is what tells them apart, and without it the
+    /// placeholder must stay the plain one — this is the direction that matters, because an offer to
+    /// recreate a session that is merely unreachable would make an empty one beside the user's.
+    func testADroppedLinkOffersNothingToRecreate() {
+        var hosts = [host(sessions: [TmuxSession(id: "$1", name: "work", windows: [window("@1")])])]
+        let state = WindowState()
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+        state.reconcile(with: hosts)
+
+        hosts[0].connectionState = .disconnected
+
+        XCTAssertNil(state.recreatableSessionName(in: hosts[0]))
+    }
+
+    /// The offer belongs to the disconnected placeholder and nowhere else: while the host is
+    /// reconnecting or connected there is either something in flight or something on screen.
+    func testTheOfferIsOnlyMadeWhileDisconnected() {
+        var hosts = [host(sessions: [TmuxSession(id: "$1", name: "work", windows: [window("@1")])])]
+        let state = WindowState()
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+        state.reconcile(with: hosts)
+
+        hosts[0].sessions = []
+        hosts[0].endedSessionName = "work"
+        hosts[0].connectionState = .connecting
+        XCTAssertNil(state.recreatableSessionName(in: hosts[0]))
+
+        hosts[0].connectionState = .reconnecting(attempt: 2, nextRetryInSeconds: 4)
+        XCTAssertNil(state.recreatableSessionName(in: hosts[0]))
     }
 
     private func keyEvent(_ character: String, _ flags: NSEvent.ModifierFlags) -> NSEvent {

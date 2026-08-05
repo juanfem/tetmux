@@ -16,6 +16,7 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             terminal.tabItem { Label("Terminal", systemImage: "terminal") }
+            notifications.tabItem { Label("Notifications", systemImage: "bell") }
             KeymapSettingsView(model: model).tabItem { Label("Keys", systemImage: "keyboard") }
         }
         .frame(width: 460)
@@ -73,6 +74,69 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// F4.31 — which events are worth interrupting the user for.
+    ///
+    /// Two toggles rather than a per-host or per-window matrix: the *scope* of activity notifications
+    /// is already expressed by which windows are watched, which is a per-window decision made where
+    /// the window is (its context menu), not in a list here that would have to be kept in step with a
+    /// tree that changes every minute.
+    private var notifications: some View {
+        Form {
+            Section {
+                Toggle("Bell", isOn: $model.notifications.bells)
+                Toggle("Activity in watched windows", isOn: $model.notifications.activity)
+            } header: {
+                Text("Notify me about")
+            } footer: {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Only while tetmux is in the background — a window you are looking at needs no banner.")
+                    Text(
+                        "Watch a window from its tab or its row in the tree. Activity is output "
+                        + "arriving in a window nobody is reading, which is what a long job that "
+                        + "prints and never rings looks like."
+                    )
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+
+            if !model.watchedWindows.isEmpty {
+                Section("Watched windows") {
+                    ForEach(watchedRows, id: \.id) { row in
+                        LabeledContent(row.label) {
+                            Button("Stop Watching") {
+                                model.toggleWatch(hostId: row.hostId, windowId: row.windowId)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// The watched windows, named the way the tree names them.
+    ///
+    /// A watch outlives the window it names — quitting tetmux does not stop tmux, and a window can be
+    /// closed from anywhere — so a row whose window is no longer in the topology is shown by its id
+    /// rather than dropped. Hiding it would leave the user with a list that disagrees with the count
+    /// and no way to clear an entry they can see the effect of.
+    private var watchedRows: [(id: String, hostId: String, windowId: String, label: String)] {
+        model.watchedWindows
+            .sorted { ($0.hostId, $0.windowId) < ($1.hostId, $1.windowId) }
+            .map { watch in
+                let host = model.hosts.first { $0.id == watch.hostId }
+                let window = host?.window(watch.windowId)
+                let name = window?.displayLabel ?? watch.windowId
+                return (
+                    id: "\(watch.hostId)\u{1}\(watch.windowId)",
+                    hostId: watch.hostId,
+                    windowId: watch.windowId,
+                    label: "\(host?.config.name ?? watch.hostId) — \(name)"
+                )
+            }
     }
 
     /// Monospaced faces only. A proportional font in a terminal is not a preference, it is a bug, and

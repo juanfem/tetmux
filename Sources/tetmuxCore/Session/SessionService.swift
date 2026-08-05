@@ -79,6 +79,13 @@ public actor SessionService {
     private let pauseAfterSeconds = 3
     /// Commands that may wait for the attach handshake before the oldest are dropped.
     private static let maxOutboxCommands = 256
+    /// …and how long one may wait there before it is dropped whatever the queue depth is.
+    ///
+    /// The size cap alone bounds the *volume* and says nothing about the age, so a host that came
+    /// back after ten minutes of outage still replayed whatever had survived — keystrokes typed at a
+    /// shell that has long since moved on, delivered in one burst. Ten seconds is roughly the span
+    /// over which what someone typed is still what they meant to type.
+    private static let maxOutboxAge = Duration.seconds(10)
     /// How long a channel may take to get from spawned to handshaken before it is given up on.
     ///
     /// Generous, because it covers a real ssh login: a `ProxyCommand`, a slow DNS lookup, a large
@@ -91,7 +98,18 @@ public actor SessionService {
     /// Answers to prompts per channel, whatever they were classified as.
     private static let maxPromptAnswers = 3
 
-    public init() {}
+    /// What "now" means for anything that ages out.
+    ///
+    /// `ContinuousClock`, never `Date`: this code lives on the sleep/wake boundary, which is the one
+    /// place a wall clock jumps — and a queued keystroke whose age went negative or hours positive
+    /// because the laptop was closed is exactly the cargo the age limit exists to drop. Injectable
+    /// only so a test can advance it: waiting ten real seconds to assert a ten-second rule is a test
+    /// nobody runs.
+    private let now: @Sendable () -> ContinuousClock.Instant
+
+    public init(now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
+        self.now = now
+    }
 
     // MARK: - Connection bookkeeping
 
@@ -309,6 +327,10 @@ public actor SessionService {
         let text: String
         let kind: Kind
         var lines: [Data] = []
+        /// When this was handed to `send`. Only read while it is sitting in the pre-handshake outbox,
+        /// where age is a reason to throw it away; a command that has been written is answered
+        /// whenever tmux gets to it.
+        var queuedAt: ContinuousClock.Instant?
 
         enum Kind {
             /// A block we did not originate (the attach handshake) or whose result we ignore.
@@ -1535,6 +1557,12 @@ public actor SessionService {
 
             if connection.isPrimary {
                 withHost(hostId) { $0.activeSessionId = sessionId }
+                // F4.15 — landing on a session is what spends the "session gone" offer, and this is
+                // the event that means it. Deliberately *not* the handshake: attaching to a server
+                // that has nothing left is a **completed** handshake answering `no sessions` and
+                // exiting, so clearing it there wiped the name on the one path that needs it — the
+                // single `attachAny` the recovery makes after a session ends.
+                withHost(hostId) { $0.endedSessionName = nil }
                 // Where a reconnect has to land. `switch-client` arrives here too, so this tracks the
                 // session the client is really on rather than the one it originally attached to.
                 reconnectTarget[hostId] = name
@@ -1806,8 +1834,19 @@ public actor SessionService {
             reconnectAttempts[hostId] = 0
         }
 
-        // Flush anything the UI queued while we were still connecting.
-        let queued = connection.outbox
+        // Flush anything the UI queued while we were still connecting — except what has gone stale.
+        //
+        // The size cap bounds how *much* waits here and says nothing about how long. A host that
+        // comes back after an outage replays the survivors in one burst, and the dangerous cargo is
+        // keystrokes: they were typed at a shell that has moved on, or at a prompt that is no longer
+        // the prompt, and a burst of them is executed rather than read. Age alone disqualifies, so
+        // there is nothing to gain by telling the kinds apart.
+        let deadline = now() - Self.maxOutboxAge
+        let queued = connection.outbox.filter { ($0.queuedAt ?? deadline) >= deadline }
+        let stale = connection.outbox.count - queued.count
+        if stale > 0 {
+            log("[\(hostId)] dropped \(stale) command(s) that waited more than \(Self.maxOutboxAge) for the handshake")
+        }
         connection.outbox.removeAll()
 
         send("display-message -p '#{version}'", kind: .version, hostId: hostId, connection: connection)
@@ -2260,7 +2299,7 @@ public actor SessionService {
             // handshake lands. Unbounded, a host that took minutes to come back injected minutes of
             // keystrokes into the pane at once, which is both a surprise and a hazard. Keeping the
             // newest is the right end to keep: it is what the user typed most recently.
-            connection.outbox.append(command)
+            connection.outbox.append(PendingCommand(text: text, kind: kind, queuedAt: now()))
             if connection.outbox.count > Self.maxOutboxCommands {
                 let dropped = connection.outbox.count - Self.maxOutboxCommands
                 connection.outbox.removeFirst(dropped)
@@ -3231,8 +3270,17 @@ public actor SessionService {
         // user had just closed, with a fresh window in it (F4.9's spirit, violated by the recovery
         // path rather than by any close command).
         if serverEnded {
-            // The name is dead. Keeping it would resurrect it on the next explicit connect too.
-            reconnectTarget.removeValue(forKey: hostId)
+            // The name is dead. Keeping it would resurrect it on the next explicit connect too — but
+            // it is also the only record of what the user was in, and F4.15's second half is exactly
+            // "offer recreation by name on explicit user action". So it moves from the field that
+            // *acts* on it to the field that merely *says* it, and the button is what acts.
+            //
+            // Only when there *is* one: this handler runs a second time when the `attachAny` below
+            // comes back empty, and by then the target has already been taken. Writing nil then would
+            // erase the name on the exact path that needs it most.
+            if let endedName = reconnectTarget.removeValue(forKey: hostId) {
+                withHost(hostId) { $0.endedSessionName = endedName }
+            }
 
             guard attachedToSession else {
                 // Nothing to attach to. What that *means* depends on who asked: a click on a host is
@@ -3445,6 +3493,14 @@ public actor SessionService {
     ///
     /// F4.15 is untouched: it forbids *automatic* reconnection from creating, and its own text carves
     /// out "recreation by name on explicit user action". This is that action.
+    ///
+    /// It also clears the circuit breaker (F4.14) and any pending backoff, which is the other half of
+    /// what the old `reconnectNow` was for: the automatic attempts and a deliberate click mean
+    /// different things. The breaker exists to stop us hammering a host nobody asked about, and a
+    /// click is someone saying the host is reachable again — without the reset, a host that had spent
+    /// its eight attempts would refuse to come back for the rest of the session. The scheduled attempt
+    /// has to be cancelled rather than merely outrun, or it fires later on top of the connection this
+    /// call is about to make.
     public func openHost(hostId: String) async {
         cancelScheduledReconnect(hostId: hostId)
         reconnectAttempts[hostId] = 0
@@ -3452,7 +3508,28 @@ public actor SessionService {
         // is no longer a reason to skip straight to `attachAny` — and `attachAny` is what this uses
         // in any case.
         recoveryLostItsSession.remove(hostId)
+        // The user answered the offer, whichever button they pressed. Leaving the name set would keep
+        // "Session 'work' ended" on screen behind a connection that is being made right now.
+        withHost(hostId) { $0.endedSessionName = nil }
         try? await connectHost(hostId: hostId, mode: .attachAny, createIfEmpty: true)
+    }
+
+    /// F4.15's second half — recreate, by name, the session that ended.
+    ///
+    /// The one place creating a session from a *remembered* name is right, and it is right because the
+    /// name is on screen with a button beside it: the user is reading "Session 'work' ended" and
+    /// asking for `work` back. What F4.15 forbids is the automatic path doing this behind their back,
+    /// where a server that restarted while the link was down would have an empty session manufactured
+    /// under the remembered name and presented as their work.
+    public func recreateEndedSession(hostId: String) async {
+        guard let name = hosts[hostId]?.endedSessionName else { return }
+        cancelScheduledReconnect(hostId: hostId)
+        reconnectAttempts[hostId] = 0
+        recoveryLostItsSession.remove(hostId)
+        withHost(hostId) { $0.endedSessionName = nil }
+        try? await connectHost(
+            hostId: hostId, targetSession: name, mode: .createOrAttach(sessionName: name)
+        )
     }
 
     /// tmux's own words for "there is nothing here to attach to", as opposed to a host that could not
@@ -3463,24 +3540,6 @@ public actor SessionService {
             || lowered.contains("no sessions")
             || lowered.contains("error connecting to")
             || lowered.contains("can't find session")
-    }
-
-    /// An explicit "reconnect now" from the user.
-    ///
-    /// Clears the circuit breaker (F4.14) as well as any pending backoff, because the automatic
-    /// attempts and a deliberate click mean different things: the breaker exists to stop us
-    /// hammering a host nobody asked about, and a click is someone saying the host is reachable
-    /// again. Without the reset, a host that had already spent its eight attempts would refuse to
-    /// come back for the rest of the session.
-    public func reconnectNow(hostId: String) async {
-        // The comment above has always said "as well as any pending backoff", and until the retry was
-        // held somewhere it could not actually do it: the scheduled attempt stayed in flight and fired
-        // later on top of the connection this call is about to make.
-        cancelScheduledReconnect(hostId: hostId)
-        reconnectAttempts[hostId] = 0
-        // Still a recovery, not a fresh connect: the user is asserting the host is reachable, not
-        // asking for a new session to be made if theirs has gone (F4.15).
-        try? await connectHost(hostId: hostId, isRecovery: true)
     }
 
     /// Called on wake and on network path changes (F4.18). Probes rather than waiting for a

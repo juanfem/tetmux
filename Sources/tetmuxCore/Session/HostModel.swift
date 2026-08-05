@@ -749,6 +749,19 @@ public struct HostState: Identifiable, Equatable, Sendable {
     /// the same fact as `TmuxSession.isAttached`, which is a count with nobody's name on it, nor as
     /// `liveSessionIds`, which is only ever about us.
     public var clients: [TmuxClient] = []
+    /// F4.15's second half — the name of the session that *ended*, as opposed to a link that dropped.
+    ///
+    /// Deliberately its own field rather than a `ConnectionState` case, for the same reason
+    /// `authenticationPrompt` is not one: every switch over the state would grow an arm that means
+    /// nothing to it. Without this, a session ending presents as a bare `.disconnected` — visually
+    /// identical to "you were never connected" — and the Connect beside it lands on whatever session
+    /// the server used most recently, which is not the one the user was in.
+    ///
+    /// Set where the `%exit` handler distinguishes an announced end from a dropped link, and cleared
+    /// on any successful attach and on any explicit connect. It is the one place recreation *by
+    /// remembered name* is legitimate: the user is reading the name and pressing the button beside it.
+    public var endedSessionName: String?
+
     /// §4.6 — set when control mode is not what this host is being driven with. Non-nil is the one
     /// signal every surface asks: there is no session tree behind a passthrough host, so a view that
     /// went on drawing one would be drawing a tree of nothing.

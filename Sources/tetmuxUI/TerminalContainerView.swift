@@ -31,6 +31,9 @@ public struct TerminalContainerView: View {
     /// host's config rather than read from the theme: it is a statement about one machine's
     /// trustworthiness, and the theme is application-wide.
     let allowsRemoteClipboardWrite: Bool
+    /// R3.7 — the macOS window's live-resize gate. Held rather than read: sizing requests made while
+    /// the user is dragging an edge are deferred to the size they let go of (see `LiveResizeGate`).
+    let liveResize: LiveResizeGate
 
     /// Divider thickness between splits, in points.
     private let dividerWidth: CGFloat = 1
@@ -66,8 +69,10 @@ public struct TerminalContainerView: View {
         focusedPaneId: Binding<String?>,
         owner: UUID,
         drivesClientSize: Bool = true,
-        allowsRemoteClipboardWrite: Bool = false
+        allowsRemoteClipboardWrite: Bool = false,
+        liveResize: LiveResizeGate
     ) {
+        self.liveResize = liveResize
         self.hostId = hostId
         self.window = window
         self.theme = theme
@@ -100,6 +105,9 @@ public struct TerminalContainerView: View {
         .onChange(of: backingScaleFactor) { _, _ in requestSizes() }
         .onDisappear {
             let (hostId, windowId, owner) = (self.hostId, window.id, self.owner)
+            // A request held for a container that has gone away would be sent when the drag ends,
+            // resizing a tmux window on behalf of a view that no longer exists.
+            liveResize.cancel(key: windowId)
             Task { await service.releaseWindowSize(hostId: hostId, windowId: windowId, owner: owner) }
         }
     }
@@ -408,6 +416,10 @@ public struct TerminalContainerView: View {
     /// Two requests, because they answer different questions: `resize-window` sizes *this* tmux window,
     /// which is what makes a torn-off macOS window independent, and `refresh-client -C` sizes the
     /// client, which is all a tmux older than 2.9 understands.
+    ///
+    /// R3.7's other half is the gate: during a live resize the ask is held instead of sent, and the
+    /// drag ends with one request at the size the user let go of. The size is computed *now* and
+    /// captured, so what is held is a finished question rather than a promise to measure later.
     private func requestSizes() {
         let cell = theme.cellSize(backingScaleFactor: backingScaleFactor)
         guard cell.width > 0, cell.height > 0 else { return }
@@ -418,12 +430,15 @@ public struct TerminalContainerView: View {
 
         let (hostId, windowId, owner, drivesClientSize) =
             (self.hostId, window.id, self.owner, self.drivesClientSize)
-        Task {
-            await service.requestWindowSize(
-                hostId: hostId, windowId: windowId, cols: cols, rows: rows, owner: owner
-            )
-            if drivesClientSize {
-                await service.requestClientSize(hostId: hostId, cols: cols, rows: rows)
+        let service = self.service
+        liveResize.submit(key: windowId) {
+            Task {
+                await service.requestWindowSize(
+                    hostId: hostId, windowId: windowId, cols: cols, rows: rows, owner: owner
+                )
+                if drivesClientSize {
+                    await service.requestClientSize(hostId: hostId, cols: cols, rows: rows)
+                }
             }
         }
     }

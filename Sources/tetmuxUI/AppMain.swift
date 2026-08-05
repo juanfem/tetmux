@@ -368,7 +368,10 @@ struct RootView: View {
             state.reconcile(with: model.hosts)
             if controlActiveState == .key { model.focus(state) }
         }
-        .onDisappear { model.unregisterWindow(state.id) }
+        .onDisappear {
+            model.unregisterWindow(state.id)
+            state.liveResize.stopObserving()
+        }
         // Every window publishes what it is showing when it takes focus, main windows included. There
         // is no privileged window for menu commands to fall back to any more, because with several
         // main windows open there is no longer a "the" main window.
@@ -521,7 +524,12 @@ struct RootView: View {
                 )
             }
         } else if let host {
-            HostPlaceholderView(host: host) { model.reconnect(host.id) }
+            HostPlaceholderView(
+                host: host,
+                endedSessionName: state.recreatableSessionName(in: host),
+                onConnect: { model.reconnect(host.id) },
+                onRecreate: { model.recreateEndedSession(host.id) }
+            )
         } else {
             EmptyStateView { model.presentNewHost(in: state) }
         }
@@ -549,7 +557,9 @@ struct RootView: View {
             drivesClientSize: model.activeWindowState?.id == state.id
                 && state.selectedWindowId == window.id,
             // T5.6 — the host's own opt-in, denied unless someone said otherwise for this host.
-            allowsRemoteClipboardWrite: host.config.allowRemoteClipboardWrite
+            allowsRemoteClipboardWrite: host.config.allowRemoteClipboardWrite,
+            // R3.7 — this macOS window's, so a drag on another window's edge silences nothing here.
+            liveResize: state.liveResize
         )
     }
 }
@@ -901,6 +911,21 @@ struct WindowSessionMenus: View {
 
     var body: some View {
         let others = hostId.map { model.otherSessions(hostId: $0, excluding: sessionId) } ?? []
+        // F4.31 — per window, because that is the only scope at which activity means anything: every
+        // window would be constant noise, and the one running the long job is the whole point. Here
+        // rather than in either menu separately, so the tab and the tree cannot drift apart about
+        // what a window can be asked to do.
+        if let hostId {
+            Divider()
+            Toggle(
+                "Notify on Activity",
+                isOn: Binding(
+                    get: { model.isWatching(hostId: hostId, windowId: windowId) },
+                    set: { _ in model.toggleWatch(hostId: hostId, windowId: windowId) }
+                )
+            )
+            .help("Post a notification when this window prints while tetmux is in the background.")
+        }
         if let hostId, !others.isEmpty {
             Divider()
             Menu("Move to Session") {
@@ -1088,7 +1113,11 @@ struct CommandFailureBanner: View {
 
 struct HostPlaceholderView: View {
     let host: HostState
+    /// F4.15's second half — the session this window was in, if it *ended* rather than went out of
+    /// reach. `nil` is the ordinary disconnected case, which is a different sentence and one button.
+    let endedSessionName: String?
     let onConnect: () -> Void
+    let onRecreate: () -> Void
 
     var body: some View {
         VStack(spacing: 14) {
@@ -1118,7 +1147,32 @@ struct HostPlaceholderView: View {
             case .connected:
                 Text("Connected — no sessions yet.").foregroundStyle(.secondary)
             case .disconnected:
-                Button("Connect", action: onConnect).buttonStyle(.borderedProminent)
+                // "The session you were in ended" and "you are not connected to this host" are the
+                // same `ConnectionState` and completely different news. Said plainly, with the name,
+                // because the name is the only thing left of it — and because the button beside it
+                // is the one place recreating a session *by remembered name* is what the user asked
+                // for rather than something done behind their back (F4.15).
+                if let endedSessionName {
+                    Text("Session “\(endedSessionName)” ended.")
+                        .foregroundStyle(.secondary)
+                    Text("Its windows and everything running in them are gone. Recreating makes a new, empty session under the same name.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        // `lineLimit`, never `fixedSize`: a `NavigationSplitView` detail column
+                        // measures its content at an unspecified width, which a fixed-size text
+                        // answers by wrapping at one character per line — and the whole window ends
+                        // up taller than itself with both columns pushed off the top.
+                        .lineLimit(4)
+                        .frame(maxWidth: 420)
+                    HStack(spacing: 10) {
+                        Button("Recreate “\(endedSessionName)”", action: onRecreate)
+                            .buttonStyle(.borderedProminent)
+                        Button("Connect", action: onConnect)
+                    }
+                } else {
+                    Button("Connect", action: onConnect).buttonStyle(.borderedProminent)
+                }
             }
         }
         .padding(32)

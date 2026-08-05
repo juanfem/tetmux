@@ -4,7 +4,7 @@
 R3.6 asks for the codec to be developed against recorded fixtures from tmux 3.0, 3.2a, 3.3a, 3.4
 and 3.5 rather than by manual testing. This is the recorder. It drives a real `tmux -CC` under a
 pty — the only way to see what the protocol layer actually receives, since a pipe changes tmux's
-behaviour — and writes the raw bytes to Tests/tetmuxTests/Fixtures.
+behaviour — and writes the raw bytes to Tests/tetmuxCoreTests/Fixtures.
 
     Scripts/build-tmux-matrix.sh          # once, to get the binaries
     Scripts/capture-fixtures.py           # then this
@@ -44,7 +44,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BIN = ROOT / ".tmux-matrix" / "bin"
-OUT = ROOT / "Tests" / "tetmuxTests" / "Fixtures"
+OUT = ROOT / "Tests" / "tetmuxCoreTests" / "Fixtures"
 
 VERSIONS = ["3.0", "3.2a", "3.3a", "3.4", "3.5"]
 

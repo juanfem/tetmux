@@ -842,6 +842,62 @@ final class SessionIntegrationTests: XCTestCase {
         }
     }
 
+    /// F4.15's second half: a session that ends leaves its *name* behind, and asking for it back by
+    /// name is a thing the user can do.
+    ///
+    /// The distinction this pins is the one the machinery half already made and the model could not
+    /// express: `.disconnected` after a session ends and `.disconnected` after a link drops are the
+    /// same state and different news. The name is the whole of the difference — recreation from it is
+    /// legitimate here precisely because the user is reading it on screen and pressing the button
+    /// beside it, which is the case F4.15's own text carves out.
+    func testAnEndedSessionLeavesItsNameBehindAndCanBeRecreated() async throws {
+        try await withPrivateTmuxServer {
+            let service = SessionService()
+            await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+            try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+            let attached = sessionName
+            _ = try await waitForHost(service) { $0.activeSession?.name == attached }
+
+            runTmux(["send-keys", "-t", sessionName, "exit", "Enter"])
+
+            // Wait for the state to *settle*, not merely for the field to appear. A session ending
+            // is followed by one attempt at whatever the server has left, so there is a `.connecting`
+            // in the middle — and the name is already set by then. Recreating during it would be
+            // refused by `connectHost`'s idempotence guard, which is the same race a user cannot hit
+            // because the offer is only drawn once the placeholder says disconnected.
+            let disconnected = try await waitFor(seconds: 20) {
+                await service.getHost("local")?.connectionState == .disconnected
+            }
+            XCTAssertTrue(disconnected, "the host never settled after its session ended")
+
+            let ended = await service.getHost("local")
+            let gone = try XCTUnwrap(ended)
+            // A timeout must fail rather than skip: an absent field is exactly this bug.
+            XCTAssertEqual(
+                gone.endedSessionName, attached,
+                "the ended session's name was not recorded, so nothing can offer it back"
+            )
+            XCTAssertTrue(gone.sessions.isEmpty)
+
+            await service.recreateEndedSession(hostId: "local")
+
+            let back = try await waitFor(seconds: 20) {
+                await service.getHost("local")?.activeSession?.name == attached
+            }
+            XCTAssertTrue(back, "recreating by name did not land on a session of that name")
+            // …and the offer is spent: it must not still be on screen over a live session.
+            let recreated = await service.getHost("local")
+            XCTAssertNil(
+                recreated?.endedSessionName,
+                "a session that is back must not still be announced as ended"
+            )
+            XCTAssertEqual(tmuxSessionNames(), [attached])
+
+            await service.disconnectHost(hostId: "local")
+        }
+    }
+
     // MARK: - Paste
 
     /// Clipboard text is routinely multi-line, and control-mode commands are newline-framed: under
@@ -2373,6 +2429,87 @@ final class SessionIntegrationTests: XCTestCase {
         XCTAssertEqual(connected.activeSession?.name, sessionName)
 
         await service.disconnectHost(hostId: "pw")
+    }
+
+    /// A clock a test can move, for the rules that are about elapsed time.
+    ///
+    /// `ContinuousClock` based, like the code it stands in for: the outbox's age limit exists
+    /// precisely for the sleep/wake boundary, and a `Date`-based stand-in would not be testing the
+    /// same arithmetic. Waiting ten real seconds to assert a ten-second rule is a test nobody runs.
+    private final class MovableClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private let base = ContinuousClock.now
+        private var offset = Duration.zero
+
+        var now: ContinuousClock.Instant {
+            lock.lock()
+            defer { lock.unlock() }
+            return base + offset
+        }
+
+        func advance(by amount: Duration) {
+            lock.lock()
+            offset += amount
+            lock.unlock()
+        }
+    }
+
+    /// The pre-handshake outbox is bounded by *age* as well as by size.
+    ///
+    /// The size cap says how much may wait and nothing about how long, so a host that came back after
+    /// an outage replayed whatever survived — keystrokes typed at a shell that had long moved on,
+    /// delivered in one burst and executed rather than read. The password prompt is the seam: the
+    /// channel is spawned and ssh is blocked on `read`, which is exactly "connected enough to queue
+    /// against, not yet handshaken", and answering it is what makes the flush happen on cue.
+    func testCommandsThatWaitedTooLongForTheHandshakeAreDropped() async throws {
+        let script = try writeFakePasswordSshScript(accepting: "s3cret")
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        let clock = MovableClock()
+        let service = SessionService(now: { clock.now })
+        let sink = LogSink()
+        await service.setDiagnosticLogger { message in
+            Task { await sink.append(message) }
+        }
+        await service.addHost(HostConfig(
+            id: "stale", name: "fake-host", isLocal: false,
+            customCommand: "/bin/sh \(script.path)",
+            usesPassword: true
+        ))
+        try await service.connectHost(hostId: "stale", targetSession: sessionName)
+        _ = try await waitForHost(service, id: "stale", timeout: 10) { $0.authenticationPrompt != nil }
+
+        // Typed into a surface that still has focus while its host is coming back.
+        await service.newWindow(hostId: "stale")
+        await service.newWindow(hostId: "stale")
+
+        // The outage. Long enough that nothing queued before it is still what anyone meant.
+        clock.advance(by: .seconds(120))
+
+        await service.newWindow(hostId: "stale")
+        await service.answerAuthenticationPrompt(hostId: "stale", secret: "s3cret")
+
+        let connected = try await waitForHost(service, id: "stale", timeout: 15) { host in
+            host.connectionState == .connected && host.activeSession?.activeWindow?.layoutTree != nil
+        }
+        XCTAssertEqual(connected.activeSession?.name, sessionName)
+
+        let dropped = try await waitFor(seconds: 10) { await sink.contains("dropped 2 command(s) that waited") }
+        let log = await sink.text
+        XCTAssertTrue(dropped, "the stale commands were replayed:\n\(log)")
+
+        // The decisive half: the fresh one still arrived. An age limit that dropped everything would
+        // pass the assertion above and silently lose the command the user just issued.
+        let windows = try await waitFor(seconds: 10) {
+            await service.getHost("stale")?.activeSession?.windows.count == 2
+        }
+        let after = await service.getHost("stale")
+        XCTAssertTrue(
+            windows,
+            "expected the session's original window plus one, got \(after?.activeSession?.windows.count ?? -1)"
+        )
+
+        await service.disconnectHost(hostId: "stale")
     }
 
     /// F4.14 — a rejected password is not retried, and the reason the user sees is what the far end

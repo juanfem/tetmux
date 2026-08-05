@@ -102,14 +102,32 @@ public final class WindowState: Identifiable {
     /// without it.
     public var sidebarVisibility: NavigationSplitViewVisibility = .automatic
 
+    /// The last session this window actually had on screen, by host and by *name*.
+    ///
+    /// Kept because a session that ends takes its id, its windows and its row in the tree with it, and
+    /// by the time anyone can be told about it `selectedSessionId` refers to nothing. The name is what
+    /// survives — it is also the only thing worth offering to recreate — and the host has to travel
+    /// with it, since tmux numbers and names sessions per server and `work` on two machines is two
+    /// different pieces of work.
+    public private(set) var lastShownHostId: String?
+    /// Companion to `lastShownHostId`. See there.
+    public private(set) var lastShownSessionName: String?
+
     /// This window's `NSWindow`, captured by `WindowAccessor`.
     ///
     /// SwiftUI has no way to bring a *particular* window of a `WindowGroup` forward — `openWindow(id:)`
     /// makes a new one — so items 5 and 9 need the AppKit handle. Weak: the window owns itself, and a
     /// closed one must not be held open by this reference.
     @ObservationIgnored public weak var nsWindow: NSWindow? {
-        didSet { applyRestoredFrame() }
+        didSet {
+            applyRestoredFrame()
+            if let nsWindow { liveResize.observe(nsWindow) } else { liveResize.stopObserving() }
+        }
     }
+
+    /// R3.7 — this window's panes stop asking tmux for sizes while its edge is being dragged. Per
+    /// window, because another window's panes are not the ones moving.
+    @ObservationIgnored public let liveResize = LiveResizeGate()
 
     /// What this window was showing when the app last quit, until the topology can satisfy it.
     ///
@@ -221,6 +239,25 @@ public final class WindowState: Identifiable {
         hostId == selectedHostId && sessionId == selectedSessionId
     }
 
+    /// F4.15's second half — the name this window should be offered a **Recreate** button for, if any.
+    ///
+    /// A session ending and a link dropping both leave `.disconnected` behind, and they are not the
+    /// same thing to the person looking at it: one is "your work is out of reach", the other is "your
+    /// work is gone, and here is what it was called". `endedSessionName` is the host's answer to which
+    /// happened; this is the window's answer to whether that session was *its* session, because a
+    /// second window sitting on a different session of the same host must not be offered the recreation
+    /// of somebody else's.
+    ///
+    /// A method rather than an expression in the view, because both halves of it are silently wrong
+    /// in opposite directions: too loose and every window on the host offers to recreate one session,
+    /// too strict and the offer never appears at all.
+    public func recreatableSessionName(in host: HostState) -> String? {
+        guard case .disconnected = host.connectionState else { return nil }
+        guard let name = host.endedSessionName else { return nil }
+        guard host.id == lastShownHostId, name == lastShownSessionName else { return nil }
+        return name
+    }
+
     /// What this window is showing, in the form every command takes.
     public func scope(in hosts: [HostState]) -> AppModel.Scope {
         let window = selectedWindow(in: hosts)
@@ -254,6 +291,10 @@ public final class WindowState: Identifiable {
             focusedPaneId = nil
             return
         }
+        // Recorded here and nowhere else: this is the one point that has both a host and a session
+        // that really exist, which is what makes the remembered pair a fact rather than an intention.
+        lastShownHostId = host.id
+        lastShownSessionName = session.name
         if selectedWindowId == nil || !session.windows.contains(where: { $0.id == selectedWindowId }) {
             selectedWindowId = session.activeWindow?.id
         }

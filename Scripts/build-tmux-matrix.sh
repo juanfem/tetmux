@@ -17,7 +17,7 @@
 #   Scripts/build-tmux-matrix.sh 3.0 3.5      # or just some
 #
 # Binaries land in .tmux-matrix/bin/<version>/tmux and are gitignored: they are a means, not an
-# artifact. The artifact is Tests/tetmuxTests/Fixtures, which Scripts/capture-fixtures.py writes.
+# artifact. The artifact is Tests/tetmuxCoreTests/Fixtures, which Scripts/capture-fixtures.py writes.
 #
 # Each one is installed under the plain name `tmux`, in a directory of its own, rather than as
 # `tmux-3.5`. tmux names a window after the command running in it, so argv[0] ends up *inside the

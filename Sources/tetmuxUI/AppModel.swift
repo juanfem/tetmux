@@ -24,6 +24,27 @@ public final class AppModel {
             theme.save()
         }
     }
+    /// F4.31 — which events earn a Notification Center banner. Persisted like the theme, and for the
+    /// same reason: it is an application preference, not a document.
+    public var notifications = NotificationPolicy.load() {
+        didSet {
+            guard notifications != oldValue else { return }
+            notifications.save()
+            // The bell is raised from a pane surface, which has no model to ask. See `BellNotifier`.
+            BellNotifier.shared.policy = notifications
+        }
+    }
+
+    /// F4.31 — the windows the user asked to be told about.
+    ///
+    /// Activity is opt-in per window because it is not a signal anybody sends: it is "output arrived
+    /// in a window nobody is looking at", which for most windows is what a shell prompt redrawing
+    /// looks like. Reported for every window it would be constant and worthless; reported for the one
+    /// window running a long remote job it is the whole feature.
+    ///
+    /// Written through `toggleWatch`, which persists.
+    public private(set) var watchedWindows: Set<WatchedWindow> = []
+
     /// F4.19/F4.22 — the one policy every surface consults, now loaded from `settings.json` rather
     /// than fixed at compile time.
     ///
@@ -312,7 +333,10 @@ public final class AppModel {
         // Before the window leaves the registry, while it can still be asked what it was showing.
         // Closing one window of several is a deliberate change to the workspace and the file has to
         // hear about it; the guard in `workspaceEntries` covers the case where it was the last one.
-        let remaining = openWindows.filter { $0.id != id }.map { $0.workspaceEntry(in: hosts) }
+        let remaining = Workspace(
+            windows: openWindows.filter { $0.id != id }.map { $0.workspaceEntry(in: hosts) },
+            watchedWindows: watchedWindows.sorted { ($0.hostId, $0.windowId) < ($1.hostId, $1.windowId) }
+        )
         windowOrder.removeAll { $0 == id }
         focusOrder.removeAll { $0 == id }
         windowsById.removeValue(forKey: id)
@@ -320,7 +344,7 @@ public final class AppModel {
         // The session that window was showing may now be on no screen at all, and its client is one
         // nobody needs.
         syncDisplayedSessions()
-        if !remaining.isEmpty {
+        if !remaining.windows.isEmpty {
             workspaceSaveTask?.cancel()
             Task { [workspace] in await workspace.save(remaining) }
         }
@@ -390,7 +414,12 @@ public final class AppModel {
 
         // Read before the hosts, so the first window — which is already on screen by the time this
         // runs — can take its entry on the next snapshot rather than after the second one.
-        restoreQueue = await workspace.load()
+        // A `didSet` does not fire for a property's initial value, so the mirror is set once here.
+        BellNotifier.shared.policy = notifications
+
+        let saved = await workspace.load()
+        restoreQueue = saved.windows
+        watchedWindows = Set(saved.watchedWindows)
         // The window that ran `bootstrap` appeared before the file had been read, so its `onAppear`
         // found an empty queue and claimed nothing. Give it the first entry here and start the chain
         // that opens the rest. If it somehow has not registered yet, this does nothing and its own
@@ -428,6 +457,9 @@ public final class AppModel {
     /// Selection reconciliation lives on `WindowState` now, one copy per window; each window runs it
     /// itself when `hosts` changes.
     private func apply(_ snapshot: [HostState]) {
+        // Before `hosts` is replaced: the transition is the point, and the previous value is the only
+        // record of the other half of it.
+        reportActivity(from: hosts, to: snapshot)
         hosts = snapshot
         respondToAuthenticationPrompts(in: snapshot)
         resolveReveals()
@@ -444,6 +476,87 @@ public final class AppModel {
         // therefore a chance for a displayed session to become attachable.
         syncDisplayedSessions()
         scheduleWorkspaceSave()
+    }
+
+    // MARK: - Notifications (F4.31)
+
+    /// One window that has just started printing, and what to call it.
+    public struct ActivityAlert: Equatable, Sendable {
+        public let hostId: String
+        public let windowId: String
+        /// `displayLabel`, which is the name if the user chose one and what is running otherwise —
+        /// the same string the tab and the tree show, so the banner names the window they can see.
+        public let label: String
+    }
+
+    /// Which watched windows went from quiet to active between two snapshots.
+    ///
+    /// Static and pure because it is the part that is silently wrong when it is wrong. `hasActivity`
+    /// stays true until the window is looked at, so reporting on the *value* rather than on the
+    /// *transition* would re-fire on every topology snapshot for as long as the window stays unread —
+    /// a job that prints once would notify for the rest of the afternoon. A window that has only just
+    /// appeared has no previous value, and is deliberately not reported: attaching to a server with a
+    /// watched window already active is not the same event as it becoming active.
+    static func newlyActive(
+        from previous: [HostState], to current: [HostState], watching watched: Set<WatchedWindow>
+    ) -> [ActivityAlert] {
+        guard !watched.isEmpty else { return [] }
+        var wasActive: [WatchedWindow: Bool] = [:]
+        for host in previous {
+            for session in host.sessions {
+                for window in session.windows {
+                    // A window linked into several sessions appears more than once and is one window;
+                    // active anywhere is active.
+                    let key = WatchedWindow(hostId: host.id, windowId: window.id)
+                    wasActive[key] = (wasActive[key] ?? false) || window.hasActivity
+                }
+            }
+        }
+
+        var alerts: [ActivityAlert] = []
+        var reported: Set<WatchedWindow> = []
+        for host in current {
+            for session in host.sessions {
+                for window in session.windows where window.hasActivity {
+                    let key = WatchedWindow(hostId: host.id, windowId: window.id)
+                    guard watched.contains(key), !reported.contains(key) else { continue }
+                    guard let previouslyActive = wasActive[key], !previouslyActive else { continue }
+                    reported.insert(key)
+                    alerts.append(ActivityAlert(
+                        hostId: host.id, windowId: window.id, label: window.displayLabel
+                    ))
+                }
+            }
+        }
+        return alerts
+    }
+
+    private func reportActivity(from previous: [HostState], to current: [HostState]) {
+        guard notifications.activity else { return }
+        // Only when the user is elsewhere. A window they are looking at needs no banner, and the
+        // activity flag clears itself as soon as tmux sees it read.
+        guard !NSApp.isActive else { return }
+        for alert in Self.newlyActive(from: previous, to: current, watching: watchedWindows) {
+            BellNotifier.shared.post(
+                title: "Activity in \(alert.label)",
+                body: "A window you are watching started printing."
+            )
+        }
+    }
+
+    /// F4.31 — start or stop being told about a window's activity.
+    public func toggleWatch(hostId: String, windowId: String) {
+        let watch = WatchedWindow(hostId: hostId, windowId: windowId)
+        if watchedWindows.contains(watch) {
+            watchedWindows.remove(watch)
+        } else {
+            watchedWindows.insert(watch)
+        }
+        scheduleWorkspaceSave()
+    }
+
+    public func isWatching(hostId: String, windowId: String) -> Bool {
+        watchedWindows.contains(WatchedWindow(hostId: hostId, windowId: windowId))
     }
 
     // MARK: - Workspace (§4.3 — view state, never session contents)
@@ -478,8 +591,8 @@ public final class AppModel {
         workspaceSaveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled, let self else { return }
-            let entries = self.workspaceEntries()
-            await self.workspace.save(entries)
+            let snapshot = self.workspaceSnapshot()
+            await self.workspace.save(snapshot)
         }
     }
 
@@ -492,11 +605,26 @@ public final class AppModel {
         openWindows.map { $0.workspaceEntry(in: hosts) }
     }
 
+    /// The whole file: the windows and the watches, which belong to no window.
+    ///
+    /// Sorted, because a `Set` has no order and an unordered encoding would rewrite the file with a
+    /// different byte sequence on every save — noise in something documented as readable.
+    func workspaceSnapshot() -> Workspace {
+        Workspace(
+            windows: workspaceEntries(),
+            watchedWindows: watchedWindows.sorted {
+                ($0.hostId, $0.windowId) < ($1.hostId, $1.windowId)
+            }
+        )
+    }
+
     /// The synchronous save for ⌘Q. See `WorkspaceStore.saveNow`.
     public func saveWorkspaceNow() {
-        let entries = workspaceEntries()
-        guard !entries.isEmpty else { return }
-        WorkspaceStore.saveNow(entries)
+        let snapshot = workspaceSnapshot()
+        // The windows are the reason to write; watches alone are not, or quitting with everything
+        // closed would replace a real workspace with an empty one carrying a watch list.
+        guard !snapshot.windows.isEmpty else { return }
+        WorkspaceStore.saveNow(snapshot)
     }
 
     // MARK: - Authentication
@@ -585,6 +713,11 @@ public final class AppModel {
     /// automatic attempts must still come back on a click.
     public func reconnect(_ hostId: String) {
         Task { await service.openHost(hostId: hostId) }
+    }
+
+    /// F4.15's second half — the user asking, by name, for the session that ended.
+    public func recreateEndedSession(_ hostId: String) {
+        Task { await service.recreateEndedSession(hostId: hostId) }
     }
 
     public func disconnect(_ hostId: String) {

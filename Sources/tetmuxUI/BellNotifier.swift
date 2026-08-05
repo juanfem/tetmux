@@ -17,6 +17,13 @@ final class BellNotifier {
     /// How long after a bell further bells are folded into the same notification.
     private static let coalescingWindow: Duration = .seconds(10)
 
+    /// F4.31's preference, mirrored here rather than asked for at the call site.
+    ///
+    /// A pane surface has no `AppModel` to consult — it is handed a theme, a size and a service, and
+    /// threading one more `Bool` through the container, the tree and every pane to answer a question
+    /// asked in one place would be plumbing with no other use. `AppModel` keeps this in step.
+    var policy = NotificationPolicy.default
+
     private var authorization: Authorization = .unknown
     private var lastPostedAt: ContinuousClock.Instant?
     private var suppressedSinceLastPost = 0
@@ -34,12 +41,24 @@ final class BellNotifier {
     private var notificationsAreAvailable: Bool { Bundle.main.bundleIdentifier != nil }
 
     func post(paneId: String) {
+        guard policy.bells else { return }
+        post(
+            title: "Bell in \(paneId)",
+            body: "A pane rang while tetmux was in the background."
+        )
+    }
+
+    /// The general form. F4.31's activity notifications share the coalescing window with the bell
+    /// deliberately: a window that starts printing usually rings too, and a machine producing one is
+    /// producing the other — two alert streams with separate budgets is twice the Notification Center
+    /// this exists to keep small.
+    func post(title: String, body: String) {
         guard notificationsAreAvailable else { return }
         switch authorization {
         case .denied, .requesting:
             return
         case .unknown:
-            requestAuthorization(thenPostFor: paneId)
+            requestAuthorization(thenPost: title, body)
             return
         case .granted:
             break
@@ -51,10 +70,10 @@ final class BellNotifier {
         }
 
         let content = UNMutableNotificationContent()
-        content.title = "Bell in \(paneId)"
+        content.title = title
         content.body = suppressedSinceLastPost > 0
             ? "and \(suppressedSinceLastPost) more since the last alert"
-            : "A pane rang while tetmux was in the background."
+            : body
         content.sound = nil  // `NSSound.beep()` has already happened; two sounds is one too many.
 
         lastPostedAt = .now
@@ -66,14 +85,14 @@ final class BellNotifier {
 
     /// Asks once, on the first bell rather than at launch: permission is far more explicable when
     /// something has just happened that would have used it.
-    private func requestAuthorization(thenPostFor paneId: String) {
+    private func requestAuthorization(thenPost title: String, _ body: String) {
         authorization = .requesting
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { [weak self] granted, _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.authorization = granted ? .granted : .denied
-                // The bell that prompted the request still deserves its alert, if the user said yes.
-                if granted { self.post(paneId: paneId) }
+                // The event that prompted the request still deserves its alert, if the user said yes.
+                if granted { self.post(title: title, body: body) }
             }
         }
     }

@@ -74,6 +74,32 @@ public struct WorkspaceWindow: Codable, Equatable, Sendable {
     }
 }
 
+/// Everything `workspace.json` holds: the windows, and the watches that belong to no window.
+///
+/// The file used to *be* the array of windows. It grew an envelope because F4.31's watched windows
+/// are view state by the same definition — nothing in tmux records that somebody wants to be told
+/// when `@7` prints something — but they are not a property of any one macOS window, so there was no
+/// entry to put them in. The legacy shape is still read (see `WorkspaceStore.load`): a workspace is
+/// cheap to rebuild but not free, and silently discarding one on the upgrade would be a worse
+/// introduction to the feature than not having it.
+public struct Workspace: Codable, Equatable, Sendable {
+    public var windows: [WorkspaceWindow]
+    public var watchedWindows: [WatchedWindow]
+
+    public init(windows: [WorkspaceWindow] = [], watchedWindows: [WatchedWindow] = []) {
+        self.windows = windows
+        self.watchedWindows = watchedWindows
+    }
+
+    /// Field by field, for the same reason `WorkspaceWindow` decodes that way: one missing key must
+    /// not discard the rest.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        windows = try container.decodeIfPresent([WorkspaceWindow].self, forKey: .windows) ?? []
+        watchedWindows = try container.decodeIfPresent([WatchedWindow].self, forKey: .watchedWindows) ?? []
+    }
+}
+
 /// `workspace.json` beside `hosts.json` (§2.3).
 ///
 /// Deliberately not `@SceneStorage`. That restores a scene's *own* value into the same scene, and
@@ -94,16 +120,32 @@ public actor WorkspaceStore {
         self.storeURL = base.appendingPathComponent("workspace.json")
     }
 
-    public func load() -> [WorkspaceWindow] {
-        guard let data = try? Data(contentsOf: storeURL), !data.isEmpty else { return [] }
-        return (try? JSONDecoder().decode([WorkspaceWindow].self, from: data)) ?? []
+    public func load() -> Workspace {
+        guard let data = try? Data(contentsOf: storeURL), !data.isEmpty else { return Workspace() }
+        return Self.decode(data)
     }
 
-    public func save(_ windows: [WorkspaceWindow]) {
+    /// The envelope first, then the bare array the file used to be. Tried in that order because the
+    /// envelope is what is written from now on and the array is the one-way upgrade — a file in the
+    /// old shape is read once and rewritten in the new one by the next save.
+    nonisolated static func decode(_ data: Data) -> Workspace {
+        let decoder = JSONDecoder()
+        if let workspace = try? decoder.decode(Workspace.self, from: data) { return workspace }
+        if let windows = try? decoder.decode([WorkspaceWindow].self, from: data) {
+            return Workspace(windows: windows)
+        }
+        return Workspace()
+    }
+
+    public func save(_ workspace: Workspace) {
+        guard let data = Self.encode(workspace) else { return }
+        try? data.write(to: storeURL, options: .atomic)
+    }
+
+    nonisolated static func encode(_ workspace: Workspace) -> Data? {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(windows) else { return }
-        try? data.write(to: storeURL, options: .atomic)
+        return try? encoder.encode(workspace)
     }
 
     /// The synchronous form, for `applicationShouldTerminate`.
@@ -112,11 +154,9 @@ public actor WorkspaceStore {
     /// time to await an actor: the debounced save may not have fired since the last window moved, and
     /// the process is about to go. Writing the file is a few hundred bytes to Application Support, so
     /// doing it on the main thread costs less than arranging not to.
-    public nonisolated static func saveNow(_ windows: [WorkspaceWindow], directory: URL? = nil) {
+    public nonisolated static func saveNow(_ workspace: Workspace, directory: URL? = nil) {
         let base = directory ?? HostConfigStore.applicationSupportDirectory()
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(windows) else { return }
+        guard let data = encode(workspace) else { return }
         try? data.write(to: base.appendingPathComponent("workspace.json"), options: .atomic)
     }
 }

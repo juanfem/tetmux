@@ -61,16 +61,22 @@ jobs:
 
   # §2.4: the portability hedge is only a hedge if something exercises it. It had already stopped
   # being true — `PtyTransport` called `Darwin.write` outside any `#if`, and `forkpty` needs libutil
-  # on glibc — and nothing caught it, because every job here ran on macOS. Builds `tetmuxCore` alone:
-  # `tetmuxUI` is AppKit and SwiftTerm by design, and the test target links it.
+  # on glibc — and nothing caught it, because every job here ran on macOS.
+  #
+  # Building is not enough on its own: §8 says the fixture replay runs on both platforms, and a
+  # library that compiles can still parse differently. `tetmuxCoreTests` exists so that it can —
+  # the suite used to be one target linking `tetmuxUI`, which is AppKit and SwiftTerm by design and
+  # so cannot be *built* here at all. A failure on a glibc-only difference is the entire point.
   portability:
-    name: Build tetmuxCore on Linux
+    name: Test tetmuxCore on Linux
     runs-on: ubuntu-latest
     container: swift:6.0
     steps:
       - uses: actions/checkout@v7
       - name: Build the portable core
         run: swift build --target tetmuxCore
+      - name: Replay the fixtures on glibc
+        run: swift test --filter tetmuxCoreTests
 
   package:
     name: Package .dmg
