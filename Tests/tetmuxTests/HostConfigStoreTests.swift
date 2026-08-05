@@ -234,4 +234,74 @@ final class HostConfigStoreTests: XCTestCase {
                 .contains { $0.hasPrefix("hosts.json.corrupt-") }
         )
     }
+
+    // MARK: - F4.2, `ssh -G`
+
+    /// Captured verbatim from OpenSSH on this machine, for a stanza with everything set. The point of
+    /// a real capture rather than a plausible one is the `identityfile` run below: nothing about the
+    /// format suggests a key may repeat, and getting that wrong is silent.
+    func testEffectiveConfigIsParsedFromRealSshOutput() {
+        let output = """
+        host devbox
+        user deploy
+        hostname 10.0.0.7
+        port 2222
+        identityfile ~/.ssh/id_deploy
+        proxyjump bastion.example.com
+        """
+        let config = HostConfigStore.parseEffectiveConfig(output)
+        XCTAssertEqual(config["user"], "deploy")
+        XCTAssertEqual(config["hostname"], "10.0.0.7")
+        XCTAssertEqual(config["port"], "2222")
+        XCTAssertEqual(config["proxyjump"], "bastion.example.com")
+    }
+
+    /// `ssh -G` prints one `identityfile` line per candidate key, and with no `IdentityFile` set that
+    /// is every default it would try. A last-wins map reported the last of those — `id_ed25519_sk` on
+    /// this machine — as though someone had chosen it. First wins instead, which is also ssh's own
+    /// precedence for the scalar options that make up the rest of the output.
+    func testARepeatedKeyKeepsItsFirstValue() {
+        let output = """
+        user me
+        hostname localhost
+        port 22
+        identitiesonly no
+        identityfile ~/.ssh/id_rsa
+        identityfile ~/.ssh/id_ecdsa
+        identityfile ~/.ssh/id_ecdsa_sk
+        identityfile ~/.ssh/id_ed25519
+        identityfile ~/.ssh/id_ed25519_sk
+        """
+        XCTAssertEqual(HostConfigStore.parseEffectiveConfig(output)["identityfile"], "~/.ssh/id_rsa")
+    }
+
+    /// Values containing spaces are one value, not a key and a fragment: `ProxyCommand` is the case
+    /// that matters, and truncating it would show the user a command that is not the one ssh runs.
+    func testAValueKeepsItsSpaces() {
+        let config = HostConfigStore.parseEffectiveConfig("proxycommand /usr/bin/nc -X 5 -x host:1080 %h %p")
+        XCTAssertEqual(config["proxycommand"], "/usr/bin/nc -X 5 -x host:1080 %h %p")
+    }
+
+    /// The empty map is what a caller falls back from, so it has to be reachable: ssh writes nothing
+    /// to stdout when it cannot make sense of a name, and its complaint goes to stderr, which this
+    /// never reads. A line with no value is not a setting either.
+    func testNothingUsableYieldsAnEmptyMap() {
+        XCTAssertTrue(HostConfigStore.parseEffectiveConfig("").isEmpty)
+        XCTAssertTrue(HostConfigStore.parseEffectiveConfig("\n\n  \n").isEmpty)
+        XCTAssertTrue(HostConfigStore.parseEffectiveConfig("compression").isEmpty)
+    }
+
+    /// The real subprocess, against a name ssh always understands. Asserts only that the three fields
+    /// the editor reads come back — everything else is this machine's `~/.ssh/config` and not
+    /// something a test may have an opinion about.
+    func testSshResolvesLocalhost() async throws {
+        try XCTSkipUnless(
+            FileManager.default.isExecutableFile(atPath: "/usr/bin/ssh"),
+            "no ssh to ask"
+        )
+        let config = await HostConfigStore.resolveEffectiveConfig(for: "localhost")
+        XCTAssertEqual(config["hostname"], "localhost")
+        XCTAssertEqual(config["port"], "22")
+        XCTAssertNotNil(config["user"])
+    }
 }

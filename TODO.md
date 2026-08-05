@@ -4,7 +4,7 @@ From the audit of 2026-08-04. Ordered by what actually breaks for a user, not by
 Each item names the evidence, because the ones that matter here are all silent failures — nothing
 in this list announces itself, which is why they survived this long.
 
-**34 done, 4 partial, 9 open.**
+**34 done, 5 partial, 8 open.**
 
 References on **done** items are as they were when the audit ran, so they point into the commit
 before each fix rather than into current `main` — they are kept because the evidence is the useful
@@ -22,8 +22,9 @@ What is left falls into three groups, and they are not equally blocked:
   tab reordering and `move-window`, window/session state restoration, listing a host's sessions
   without attaching (F4.4), and the §8 test infrastructure — a containerised sshd matrix, chaos
   tests, a full geometry suite, a rendering corpus.
-- **Small and unblocked.** `ssh -G` resolution, `differentiateWithoutColor` on the two indicators
-  that speak in hue alone, and a UI for `newSession`'s start directory.
+- **Small and unblocked.** `differentiateWithoutColor` on the two indicators that speak in hue
+  alone, a UI for `newSession`'s start directory, and the three still-unwired declarations —
+  per-host OSC 52, an editable keymap, and ⌘⌥V's literal escape.
 
 ## Protocol correctness
 
@@ -315,7 +316,7 @@ What is left falls into three groups, and they are not equally blocked:
   fixtures turned out to carry hand-edited checksums that no tmux ever emitted; the real ones,
   zoomed `window_visible_layout` included, all verify.*
 
-- [ ] **Declared and never wired**, all four confirmed still unreferenced outside `Tests/`:
+- [~] **Declared and never wired**, all four confirmed still unreferenced outside `Tests/`:
   the OSC 52 opt-in is a global `TerminalTheme` field with no persistence key, no settings control
   and no `HostConfig` field, so it can never become true and its own doc comment's "unless the user
   opts in per host" is fiction (T5.6); `KeymapPolicy.rebind` and `shortcut(for:)` have no production
@@ -324,6 +325,12 @@ What is left falls into three groups, and they are not equally blocked:
   passed (F4.21); `HostConfigStore.resolveEffectiveConfig` (`ssh -G`) is dead code (F4.2).
   `Sources/tetmuxUI/TerminalSurface.swift:19`, `Sources/tetmuxUI/KeymapPolicy.swift:107`, `:122-143`,
   `Sources/tetmuxCore/Session/HostConfigStore.swift:226`
+  *One of the four is wired: `ssh -G` now fills the host editor's User and Port placeholders and says
+  what an alias resolves to, so a field left blank shows what ssh will actually use rather than
+  "optional". Display only, deliberately — the connection is still made with the *name* so ssh
+  applies its own `Match` blocks. Wiring it turned up a bug in the dead code itself: the map was
+  last-wins, and `identityfile` repeats once per candidate key, so it reported whichever default came
+  last as though someone had chosen it. The other three are untouched.*
 
 - [ ] **F4.4** never lists a host's sessions without attaching — `list-sessions` only goes down an
   already-attached channel, so the only way to see what is on a host is `connectHost`, which

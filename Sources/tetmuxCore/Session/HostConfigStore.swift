@@ -223,6 +223,20 @@ public actor HostConfigStore {
 
     /// F4.2 — `ssh -G` yields the fully resolved effective configuration for a host, including
     /// everything `Include`, `Match`, and canonicalisation contributed.
+    ///
+    /// Display only. Nothing built from this is passed back to `ssh`: the connection is made with the
+    /// *name*, so ssh applies its own file itself and every `Match` block, `ProxyJump` and identity
+    /// resolves as it would from a shell. Resolving here and passing the pieces explicitly would be
+    /// re-deciding what ssh has already decided, and would get it wrong the moment a `Match` depended
+    /// on something this process cannot see.
+    ///
+    /// A repeated key keeps its **first** value, which is ssh's own precedence for the scalar options.
+    /// Some keys — `identityfile` above all, which lists every default when none was set — are
+    /// genuinely multi-valued and simply cannot be read out of this map; the last-wins map this
+    /// replaced reported the last of those defaults as though it were a choice someone had made.
+    ///
+    /// Returns an empty map for anything ssh cannot make sense of, so every caller needs a fallback
+    /// rather than a branch.
     public static func resolveEffectiveConfig(for hostName: String) async -> [String: String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -241,11 +255,21 @@ public actor HostConfigStore {
         process.waitUntilExit()
 
         guard let output = String(data: data, encoding: .utf8) else { return [:] }
+        return parseEffectiveConfig(output)
+    }
+
+    /// Split from the subprocess so the parsing rule can be asserted against captured `ssh -G`
+    /// output rather than against whatever `~/.ssh/config` the test machine happens to have.
+    static func parseEffectiveConfig(_ output: String) -> [String: String] {
         var config: [String: String] = [:]
         for line in output.components(separatedBy: .newlines) {
             let parts = line.split(separator: " ", maxSplits: 1)
             guard parts.count == 2 else { continue }
-            config[String(parts[0]).lowercased()] = String(parts[1])
+            let key = String(parts[0]).lowercased()
+            // First wins, which is ssh's own precedence — and which keeps `identityfile`'s list of
+            // defaults from ending with whichever key happened to be printed last.
+            guard config[key] == nil else { continue }
+            config[key] = String(parts[1])
         }
         return config
     }

@@ -16,6 +16,9 @@ struct HostEditorView: View {
     @State private var portText: String
     @State private var password: String = ""
     @State private var savePassword: Bool
+    /// `ssh -G`'s answer for whatever is currently in the Host field (F4.2). Empty until it arrives,
+    /// and empty for a name ssh cannot make sense of, so every read of it has a fallback.
+    @State private var resolved: [String: String] = [:]
 
     init(
         draft: AppModel.HostDraft,
@@ -87,15 +90,68 @@ struct HostEditorView: View {
                 }
                 GridRow {
                     Text("User").gridColumnAlignment(.trailing)
-                    TextField("optional", text: Binding($host.user, replacingNilWith: "")).frame(width: 300)
+                    // The placeholder is what ssh will use if this is left blank, not a generic
+                    // "optional" — see `resolveEffectiveConfig`.
+                    TextField(
+                        resolved["user"] ?? "optional",
+                        text: Binding($host.user, replacingNilWith: "")
+                    )
+                    .frame(width: 300)
                 }
                 GridRow {
                     Text("Port").gridColumnAlignment(.trailing)
-                    TextField("22", text: $portText).frame(width: 90)
+                    TextField(resolved["port"] ?? "22", text: $portText).frame(width: 90)
                 }
             }
             .textFieldStyle(.roundedBorder)
+
+            if let summary = resolvedSummary {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        // F4.2 — the effective config, from ssh rather than from a reimplementation of its file
+        // format. Keyed on the name, so `.task` cancels and re-runs as the field is edited; the sleep
+        // is the debounce, and it is the whole reason a keystroke does not cost a subprocess.
+        .task(id: host.name) {
+            let name = host.name.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else {
+                resolved = [:]
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            let config = await HostConfigStore.resolveEffectiveConfig(for: name)
+            guard !Task.isCancelled else { return }
+            resolved = config
+        }
+    }
+
+    /// What the alias turns out to mean, when that is not simply the name typed above.
+    ///
+    /// The point of the whole editor's "the name is passed straight to ssh" promise is that an alias
+    /// carries a real destination, a user, a port and possibly a jump host — none of which was
+    /// visible anywhere in the app, so the only way to find out what `Host devbox` resolved to was to
+    /// open `~/.ssh/config` and read it, `Include` and `Match` blocks and all. This is `ssh -G`'s
+    /// answer, which is the same one the connection will get.
+    private var resolvedSummary: String? {
+        guard !resolved.isEmpty else { return nil }
+        let typed = host.name.trimmingCharacters(in: .whitespaces).lowercased()
+        var parts: [String] = []
+        if let hostname = resolved["hostname"], hostname.lowercased() != typed {
+            parts.append("connects to \(hostname)")
+        }
+        if let proxy = resolved["proxyjump"], proxy != "none" {
+            parts.append("via \(proxy)")
+        } else if let command = resolved["proxycommand"], command != "none" {
+            parts.append("through a ProxyCommand")
+        }
+        // Deliberately no identity: `ssh -G` lists every default key when none was configured, so
+        // naming one would present a default as a decision.
+        guard !parts.isEmpty else { return nil }
+        return "ssh resolves this to: " + parts.joined(separator: ", ") + "."
     }
 
     // MARK: - Authentication

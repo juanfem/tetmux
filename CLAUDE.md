@@ -86,12 +86,12 @@ Where things are, since the invariants below name symbols without saying which f
 |---|---|
 | `Core/ControlCodec.swift` | Bytes → `[ControlEvent]`. Pure value type, no I/O. |
 | `Core/LayoutParser.swift` | tmux layout strings → `LayoutNode` tree. |
-| `Core/PtyTransport.swift` | `forkpty` + reader thread. The only process spawner. |
+| `Core/PtyTransport.swift` | `forkpty` + reader thread. The only spawner of anything a channel runs on. |
 | `Core/SshPromptDetector.swift` | Classifies a pre-handshake prompt ssh is sitting on. |
 | `Session/SessionService.swift` | The actor. Channels, correlation, topology, flow control. |
 | `Session/HostModel.swift` | `HostState`, `TmuxSession`, `TmuxWindow`, `TmuxVersion`. |
 | `Session/TmuxCommand.swift` | Every command string and format, with its quoting rules. |
-| `Session/HostConfigStore.swift` | `hosts.json` + `~/.ssh/config` discovery. |
+| `Session/HostConfigStore.swift` | `hosts.json`, `~/.ssh/config` discovery, `ssh -G` resolution. |
 | `AppMain.swift` | Scenes, menus, tab strip, window chrome. |
 | `AppModel.swift` | App-wide model; the decisions that need no channel. |
 | `WindowState.swift` | Everything that belongs to one macOS window. |
@@ -486,6 +486,17 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   answer — so the platform boundary stays put. Calls run on a detached task: `SecItemCopyMatching` can
   put a dialog on screen (an unsigned dev build is asked every rebuild, because the ACL is tied to the
   code signature), which would beachball the main thread or stall every host behind the actor.
+- **`ssh -G` is for showing, never for connecting (F4.2).** `resolveEffectiveConfig` answers what an
+  alias means — hostname, user, port, jump — and the host editor uses it for its placeholders, so a
+  blank User field says `deploy` rather than "optional" and the user can see what leaving it blank
+  will do. What it must not do is feed those values back to `ssh`: the connection is made with the
+  *name*, so ssh applies its own file and every `Match` block resolves against the real invocation.
+  Resolving here and passing the pieces explicitly would be re-deciding what ssh has already decided.
+  The map keeps a repeated key's **first** value, ssh's own precedence for scalar options — and some
+  keys are genuinely multi-valued and cannot be read out of it at all: `identityfile` lists every
+  default when none was set, so a last-wins map named whichever default came last as though it were a
+  choice. It runs debounced from `.task(id:)`, because a subprocess per keystroke is what the naive
+  version costs.
 - **The ssh escape hatch is split, not shell-quoted.** A host can carry extra `ssh` options typed as
   they would be on a command line, plus `-X` behind a checkbox. `TmuxCommand.splitArguments` splits
   them the way a shell would — quotes group, backslash escapes — and then they go straight to `execve`:
