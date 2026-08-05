@@ -139,9 +139,55 @@ public struct TetmuxApp: App {
                     .keyboardShortcut(.nextWindow, in: keymap)
                 Button(ApplicationShortcut.previousWindow.title) { model.selectAdjacentWindow(offset: -1) }
                     .keyboardShortcut(.previousWindow, in: keymap)
+                Divider()
+                copyMode
             }
             .disabled(model.activeHostIsPassthrough)
         }
+    }
+
+    /// tmux's copy mode, as a small documented vocabulary rather than an emulation of its key table.
+    ///
+    /// Everything here is `send-keys -X`, which names the *action* — so it means the same thing
+    /// whether the user's `mode-keys` is emacs or vi, which a key name would not. The pane itself is
+    /// unaffected: a key typed into a pane in copy mode still goes to tmux and is still looked up in
+    /// whichever table the user configured (verified on 3.7b — `Up` moves the copy cursor), so this
+    /// adds a way in and a way to reach the Mac's pasteboard without taking anything away.
+    @ViewBuilder
+    private var copyMode: some View {
+        let keymap = model.keymap
+        // One item for entering and leaving. Which one applies is never in doubt once the pane is in
+        // front of you, and two items would leave one of them permanently greyed out.
+        Button(model.focusedPaneIsInCopyMode ? "Leave Copy Mode" : ApplicationShortcut.copyMode.title) {
+            model.toggleCopyMode()
+        }
+        .keyboardShortcut(.copyMode, in: keymap)
+        // Outside the submenu and deliberately never disabled: the service enters copy mode itself,
+        // which is what makes searching tmux's history one action from an ordinary shell prompt
+        // rather than a thing that does nothing until you have entered the mode first.
+        Button(ApplicationShortcut.copyModeSearch.title) { model.requestCopyModeSearchFromMenu() }
+            .keyboardShortcut(.copyModeSearch, in: keymap)
+        Menu("Copy Mode") {
+            Button(ApplicationShortcut.copyModeStartSelection.title) {
+                model.copyModeAction(.beginSelection)
+            }
+            .keyboardShortcut(.copyModeStartSelection, in: keymap)
+            Button(ApplicationShortcut.copyModeCopy.title) { model.copySelection() }
+                .keyboardShortcut(.copyModeCopy, in: keymap)
+            Button("Clear Selection") { model.copyModeAction(.clearSelection) }
+            Divider()
+            Button("Page Up") { model.copyModeAction(.pageUp) }
+            Button("Page Down") { model.copyModeAction(.pageDown) }
+            Button("Top of History") { model.copyModeAction(.historyTop) }
+            Button("Bottom of History") { model.copyModeAction(.historyBottom) }
+            Divider()
+            Button("Find Next") { model.copyModeAction(.searchAgain) }
+            Button("Find Previous") { model.copyModeAction(.searchReverse) }
+        }
+        // Every item in here acts *inside* the mode, and `SessionService` refuses one sent to a pane
+        // that is not in a mode — so outside it they would each be a click that silently did nothing.
+        // Search is deliberately not in here, for exactly that reason.
+        .disabled(!model.focusedPaneIsInCopyMode)
     }
 }
 
@@ -440,6 +486,12 @@ struct RootView: View {
                 pending: pending,
                 onCommit: { model.commit(pending, to: $0); state.pendingRename = nil },
                 onCancel: { state.pendingRename = nil }
+            )
+        }
+        .sheet(item: $state.pendingCopyModeSearch) { pending in
+            CopyModeSearchSheet(
+                onCommit: { model.commit(pending, needle: $0); state.pendingCopyModeSearch = nil },
+                onCancel: { state.pendingCopyModeSearch = nil }
             )
         }
         // Item 3 — killing a session ends everything in it, so it always asks.

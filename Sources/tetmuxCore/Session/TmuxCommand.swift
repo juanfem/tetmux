@@ -103,8 +103,11 @@ public enum TmuxCommand {
         // the unzoomed grid and stays that way.
         "#{session_id}|#{window_id}|#{window_active}|#{window_activity_flag}|#{automatic-rename}"
         + "|#{window_layout}|#{window_visible_layout}|#{window_flags}|#{window_name}"
+    /// `pane_mode` is last but one, ahead of the path, which takes the rest: a path may contain `|`
+    /// and a mode name cannot.
     public static let panesFormat =
-        "#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_current_command}|#{pane_current_path}"
+        "#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_current_command}"
+        + "|#{pane_mode}|#{pane_current_path}"
     /// F4.17 — enough to tell one of tetmux's own clients from the user's terminal, and to name a
     /// client precisely enough to detach it.
     ///
@@ -161,6 +164,72 @@ public enum TmuxCommand {
     public static func subscribePaneCommand() -> String {
         "refresh-client -B \(paneCommandSubscription):%*:\"#{pane_current_command}\""
     }
+
+    // MARK: - Copy mode
+
+    /// The copy-mode commands tetmux drives, and deliberately only these.
+    ///
+    /// tmux's copy-mode table has upwards of eighty entries. This is not an emulation of it: a
+    /// documented handful, each with a menu item and a name a person can read, is the whole design.
+    /// Everything else stays reachable the way it always was — the pane is still a terminal, and a
+    /// key it sends is still routed through tmux's own table (verified on 3.7b: with a pane in copy
+    /// mode, `send-keys -t %p Up` moves the copy cursor rather than reaching the shell).
+    ///
+    /// `send-keys -X` rather than a key name, because `-X` names the *action*. A key name asks tmux
+    /// to look the key up in whichever table the pane's mode happens to be using, so `Up` means
+    /// "cursor-up" under both the emacs and vi tables but almost nothing else agrees — and a
+    /// vi-configured user pressing the app's Copy item would get whatever `y` is bound to in emacs
+    /// mode. `-X` is the same command whatever the user's `mode-keys` is set to.
+    public enum CopyModeAction: String, CaseIterable, Sendable {
+        case beginSelection = "begin-selection"
+        case clearSelection = "clear-selection"
+        case copySelectionAndCancel = "copy-selection-and-cancel"
+        case cancel = "cancel"
+        case cursorUp = "cursor-up"
+        case cursorDown = "cursor-down"
+        case cursorLeft = "cursor-left"
+        case cursorRight = "cursor-right"
+        case pageUp = "page-up"
+        case pageDown = "page-down"
+        case historyTop = "history-top"
+        case historyBottom = "history-bottom"
+        /// The two that take a needle. `backward` searches *up* the history, which is the direction
+        /// anything already on screen was printed from.
+        case searchBackward = "search-backward"
+        case searchForward = "search-forward"
+        case searchAgain = "search-again"
+        case searchReverse = "search-reverse"
+    }
+
+    /// `copy-mode -t %pane`. Entering is idempotent; tmux answers `%pane-mode-changed` either way.
+    public static func enterCopyMode(paneId: String) -> String {
+        "copy-mode -t \(paneId)"
+    }
+
+    /// One action, addressed to one pane.
+    ///
+    /// Sent only when the pane is known to be in a mode. tmux answers `not in a mode` with an
+    /// `%error` otherwise (verified on 3.7b), and these are user commands, so an unguarded one would
+    /// put a banner in front of somebody for a menu item that was merely stale.
+    public static func copyModeAction(_ action: CopyModeAction, paneId: String) -> String {
+        "send-keys -t \(paneId) -X \(action.rawValue)"
+    }
+
+    /// A search, which is the one action that carries an argument.
+    ///
+    /// The needle is user text reaching a remote shell's tmux, so it takes the same treatment every
+    /// other user value does: single-line first — control-mode commands are newline-framed, and a
+    /// pasted line break would end the command and hand tmux the remainder to run — then quoted.
+    public static func copyModeSearch(_ action: CopyModeAction, paneId: String, needle: String) -> String {
+        "send-keys -t \(paneId) -X \(action.rawValue) \(quote(singleLine(needle)))"
+    }
+
+    /// Reads the most recent paste buffer back, which is the half tmux cannot do for us.
+    ///
+    /// tmux's copy puts the selection in a *server-side* buffer; the Mac's pasteboard knows nothing
+    /// about it. Nothing else bridges the two — OSC 52 is the pane's own channel and is denied by
+    /// default (T5.6) — so the buffer is fetched and put on the pasteboard here.
+    public static let showBuffer = "show-buffer"
 
     // MARK: - Flow control (P6.5)
 

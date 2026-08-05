@@ -8,34 +8,14 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**8 features, 1 blocked, 2 parked.** The six small items this file opened with were closed on
-2026-08-05; what they turned into is recorded in `CLAUDE.md`, not here.
+**7 features, 1 blocked, 2 parked.** The six small items this file opened with, and copy mode, were
+closed on 2026-08-05; what they turned into is recorded in `CLAUDE.md`, not here.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
 ---
 
 ## Features, sized like features
-
-- [ ] **Copy mode.** Keys reach the pane via `send-keys -H`, so tmux's key table is never
-  consulted and `C-b` lands in the shell as a literal control character;
-  `grep -rni copy-mode Sources/ Tests/` is empty. Search and zoom have app-level substitutes
-  (⌘F, ⇧⌘Z) and pane navigation has ⌥⌘[/⌥⌘] — but tmux's own copy mode (keyboard selection, its
-  search, its buffers) has no replacement, and SwiftTerm's local selection cannot reach text that
-  has scrolled out of the local scrollback but is still in tmux's history.
-  *Do, in order:* (1) surface the mode — handle `%pane-mode-changed` into a per-pane
-  `inCopyMode` flag on `TmuxPane` and show it (status bar and a pane badge), which also fixes
-  "another client entered copy mode and the pane looks frozen" with no way to learn why.
-  (2) Enter/leave: a menu item + rebindable chord sending `copy-mode -t %pane`, and `q` handling
-  left entirely to tmux. (3) Drive it with `send-keys -X <command>` (`begin-selection`,
-  `cursor-*`, `page-up`, `search-backward`, `copy-selection-and-cancel`) behind menu items with
-  chords, all through `KeymapPolicy` per F4.22 — do not translate raw keystrokes into `-X`
-  commands wholesale; the point is a small, documented vocabulary, not an emulation of tmux's
-  key table. (4) On copy, read the buffer back with `show-buffer` (a user command, so failures
-  surface per §7) and put it on the local pasteboard — that is the half tmux cannot do.
-  *Test:* integration — enter copy mode, select, copy, assert the buffer's content round-trips;
-  and `%pane-mode-changed` from a second client flips the flag.
-  `Sources/tetmuxCore/Session/SessionService.swift:2589`, `Sources/tetmuxUI/KeymapPolicy.swift:10`
 
 - [ ] **Pin F4.23 (mouse modes) and F4.24 (IME) with tests.** Both are delegated wholesale to
   SwiftTerm and asserted nowhere — the exact position the plain-text URL matcher sat in before a

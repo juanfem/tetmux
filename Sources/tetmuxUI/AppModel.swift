@@ -173,6 +173,19 @@ public final class AppModel {
     }
 
     /// F4.11 — rename applies to either level of the tree, and both go through the same sheet.
+    /// A copy-mode search waiting for its needle.
+    ///
+    /// Carries the pane rather than reading it back when the sheet commits: the focused pane can move
+    /// while a sheet is up — clicking another pane, a `select-pane` from elsewhere — and a search that
+    /// landed in whichever pane happened to be focused at the end would be a different search from the
+    /// one the user asked for.
+    public struct PendingCopyModeSearch: Identifiable, Equatable {
+        public var id: String { "\(hostId)/\(paneId)" }
+        public let hostId: String
+        /// `%id`
+        public let paneId: String
+    }
+
     public struct PendingRename: Identifiable, Equatable {
         public enum Subject: Equatable {
             /// `$id`
@@ -1150,6 +1163,79 @@ public final class AppModel {
         let scope = activeScope
         guard let hostId = scope.hostId, let paneId = scope.paneId else { return }
         Task { await service.killPane(hostId: hostId, paneId: paneId) }
+    }
+
+    // MARK: - Copy mode
+
+    /// The pane the copy-mode commands act on: the focused one, or the window's own if nothing has
+    /// been clicked into yet.
+    private var copyModeTarget: (hostId: String, pane: TmuxPane)? {
+        let scope = activeScope
+        guard let hostId = scope.hostId, let host = hosts.first(where: { $0.id == hostId }) else { return nil }
+        guard let paneId = scope.paneId ?? window(in: scope)?.preferredPaneId else { return nil }
+        guard let pane = host.pane(paneId) else { return nil }
+        return (hostId, pane)
+    }
+
+    /// Whether the focused pane is in tmux's copy mode, which is what every copy-mode menu item is
+    /// enabled by — and what the one toggle item reads to decide which way it goes.
+    public var focusedPaneIsInCopyMode: Bool {
+        copyModeTarget?.pane.isInCopyMode ?? false
+    }
+
+    /// One item for entering and leaving, because which one applies is never in doubt once you can
+    /// see the pane, and two items would leave one of them permanently greyed out.
+    public func toggleCopyMode() {
+        guard let (hostId, pane) = copyModeTarget else { return }
+        if pane.isInMode {
+            Task { await service.copyModeAction(.cancel, hostId: hostId, paneId: pane.id) }
+        } else {
+            Task { await service.enterCopyMode(hostId: hostId, paneId: pane.id) }
+        }
+    }
+
+    public func copyModeAction(_ action: TmuxCommand.CopyModeAction) {
+        guard let (hostId, pane) = copyModeTarget else { return }
+        Task { await service.copyModeAction(action, hostId: hostId, paneId: pane.id) }
+    }
+
+    /// Copy, and the only part of copy mode that ends somewhere tmux cannot reach.
+    ///
+    /// The service returns the text because `tetmuxCore` has no AppKit (§2.4); putting it on the
+    /// pasteboard is this layer's job. A refusal comes back `nil` and the pasteboard is left alone —
+    /// replacing whatever the user had with an empty string because a selection was empty is a
+    /// silent loss of their clipboard.
+    public func copySelection() {
+        guard let (hostId, pane) = copyModeTarget else { return }
+        Task { [service] in
+            guard let text = await service.copySelection(hostId: hostId, paneId: pane.id) else { return }
+            guard !text.isEmpty else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+    }
+
+    /// Raises the search sheet, which is per window like every other sheet.
+    public func requestCopyModeSearch(in state: WindowState) {
+        guard let (hostId, pane) = copyModeTarget else { return }
+        state.pendingCopyModeSearch = PendingCopyModeSearch(hostId: hostId, paneId: pane.id)
+    }
+
+    public func requestCopyModeSearchFromMenu() {
+        guard let state = activeWindowState else { return }
+        requestCopyModeSearch(in: state)
+    }
+
+    /// The service enters copy mode if the pane is not in it, so this is one action from anywhere —
+    /// including from a pane that is showing a live shell.
+    public func commit(_ pending: PendingCopyModeSearch, needle: String) {
+        let trimmed = needle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task { [service] in
+            await service.copyModeSearch(
+                .searchBackward, hostId: pending.hostId, paneId: pending.paneId, needle: trimmed
+            )
+        }
     }
 
     // MARK: - Appearance

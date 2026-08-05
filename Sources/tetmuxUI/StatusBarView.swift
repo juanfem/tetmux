@@ -35,6 +35,21 @@ struct StatusBarView: View {
 
             Spacer(minLength: 8)
 
+            // A pane in a tmux mode is showing an overlay this application is not streamed and does
+            // not draw, so its contents are a `capture-pane` still frame and its keys mean whatever
+            // the mode's table says they mean. Unlabelled, that is indistinguishable from a pane that
+            // has stopped — which is the complaint copy mode has always produced from the other side,
+            // when somebody else's `prefix [` froze a pane here. Named rather than hinted at, because
+            // "copy-mode" is the word the user needs to know to type `q` and get out.
+            if let pane, pane.isInMode {
+                Text(pane.mode)
+                    .font(.caption2)
+                    .foregroundStyle(Color.accentColor)
+                    .help("This pane is in tmux's \(pane.mode). Keys go to the mode, not the shell.")
+                    .accessibilityLabel("Pane is in \(pane.mode)")
+                separator
+            }
+
             // A mode that changes what the next keystroke does has to be visible while it is on;
             // otherwise ⌥⌘V pressed by accident makes the *following* chord vanish with nothing to
             // explain it. Accented and worded rather than a dot: it says which key it is waiting for.

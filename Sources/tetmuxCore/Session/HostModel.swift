@@ -33,13 +33,33 @@ public struct TmuxPane: Identifiable, Equatable, Sendable {
     public var cols: Int
     public var rows: Int
 
+    /// What tmux mode this pane is in — `copy-mode`, `view-mode`, or empty for none.
+    ///
+    /// A mode is a per-client screen *overlay*, and control mode is never streamed one: the bytes for
+    /// what is now on the pane simply do not arrive. So a pane somebody put into copy mode from
+    /// another client, or with a `prefix [` that reached tmux, keeps painting what was there before
+    /// and then stops moving, with nothing to say why. That is the same picture as a dead channel.
+    ///
+    /// The mode's *name* rather than a `Bool`, because `%pane-mode-changed` says only that something
+    /// changed — not which mode, and not whether it was entered or left — so this is read from
+    /// `list-panes` and the string is what tmux gives. `view-mode` is what a pane showing command
+    /// output (`display-message`, `list-keys`) is in, and it is not copy mode; conflating them would
+    /// offer copy-mode commands to a pane that has none.
+    public var mode: String
+
+    /// tmux 3.7b: `#{pane_in_mode}` is 1 and `#{pane_mode}` is `copy-mode`.
+    public var isInCopyMode: Bool { mode == "copy-mode" }
+    /// Any mode at all, which is what "this pane is showing an overlay we cannot see" means.
+    public var isInMode: Bool { !mode.isEmpty }
+
     public init(
         id: String,
         command: String = "",
         currentPath: String = "",
         isActive: Bool = false,
         cols: Int = 80,
-        rows: Int = 24
+        rows: Int = 24,
+        mode: String = ""
     ) {
         self.id = id
         self.command = command
@@ -47,6 +67,7 @@ public struct TmuxPane: Identifiable, Equatable, Sendable {
         self.isActive = isActive
         self.cols = cols
         self.rows = rows
+        self.mode = mode
     }
 }
 
@@ -839,6 +860,18 @@ public struct HostState: Identifiable, Equatable, Sendable {
     public func window(_ windowId: String) -> TmuxWindow? {
         for session in sessions {
             if let window = session.windows.first(where: { $0.id == windowId }) { return window }
+        }
+        return nil
+    }
+
+    /// A pane anywhere on this host. Pane ids are unique per server, so the search is over the whole
+    /// host rather than one session — and a window linked into several sessions would otherwise be
+    /// found or missed depending on which session was asked.
+    public func pane(_ paneId: String) -> TmuxPane? {
+        for session in sessions {
+            for window in session.windows {
+                if let pane = window.panes.first(where: { $0.id == paneId }) { return pane }
+            }
         }
         return nil
     }

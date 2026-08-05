@@ -60,13 +60,14 @@ public enum CommandProbe {
             // left a `ControlMaster` behind is a writer that outlives the command — so the read can
             // block after the process we started is dead. Discovery asks for `ControlMaster=no`
             // precisely so that cannot happen; this is what makes the failure survivable if it does.
-            let deadline = DispatchWorkItem {
+            let work = DispatchWorkItem {
                 if process.isRunning { process.terminate() }
                 answer.resume(Result(status: -1, output: Data(), timedOut: true))
             }
             DispatchQueue.global(qos: .utility).asyncAfter(
-                deadline: .now() + Double(timeout.components.seconds), execute: deadline
+                deadline: .now() + Double(timeout.components.seconds), execute: work
             )
+            let deadline = Deadline(work)
 
             // A dedicated thread, for the same reason `PtyTransport`'s reader is one: this blocks,
             // and a blocking call in the cooperative pool occupies a slot that the actors — every
@@ -82,6 +83,21 @@ public enum CommandProbe {
             thread.stackSize = 512 * 1024
             thread.start()
         }
+    }
+
+    /// The timer half of the race, in a form that can cross into the reader thread's closure.
+    ///
+    /// `DispatchWorkItem` is not `Sendable` on either platform, and the two disagree about whether
+    /// that matters here: `swift-corelibs-foundation` declares `Thread(block:)` as taking a
+    /// `@Sendable` closure and Darwin's Foundation does not, so capturing the work item directly
+    /// compiled on macOS and failed to compile on glibc. That is exactly the class of divergence §2.4's
+    /// hedge exists to catch, and it went uncaught for as long as the Ubuntu job only built the
+    /// library. `cancel()` is documented thread-safe, which is what makes the box honest rather than
+    /// merely quiet.
+    private final class Deadline: @unchecked Sendable {
+        private let work: DispatchWorkItem
+        init(_ work: DispatchWorkItem) { self.work = work }
+        func cancel() { work.cancel() }
     }
 
     /// Resumes a continuation exactly once, from whichever of the reader and the deadline gets there

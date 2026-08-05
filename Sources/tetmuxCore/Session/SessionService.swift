@@ -304,6 +304,9 @@ public actor SessionService {
         /// irreversible — putting `window-size` back before hanging the channel up is the whole list.
         /// Everything else is fire-and-forget by design.
         var acknowledgements: [UUID: CheckedContinuation<Void, Never>] = [:]
+        /// The same, for the commands whose *answer* somebody is waiting on rather than only their
+        /// completion. `nil` is delivered for a refusal or a timeout. See `sendAndAwaitResult`.
+        var results: [UUID: CheckedContinuation<[Data]?, Never>] = [:]
 
         init(transport: PtyTransport, sessionTarget: String, role: Role = .primary) {
             self.transport = transport
@@ -363,6 +366,9 @@ public actor SessionService {
             /// Like `.ignore`, but somebody is waiting to hear that tmux ran it. A refusal counts:
             /// the point is that the command has been *dealt with*, not that it succeeded.
             case acknowledged(UUID)
+            /// Somebody is waiting for the block's *contents*, and a refusal is not an answer. The
+            /// label is a `userCommand`'s, so a failure is still reported as one (§7).
+            case awaitedResult(UUID, action: String)
         }
     }
 
@@ -1385,7 +1391,7 @@ public actor SessionService {
 
     private func handle(_ event: ControlEvent, hostId: String, connection: Connection) {
         switch event {
-        case .begin(_, let number, _):
+        case .begin(_, let number, let flags):
             log("[\(hostId)] %begin \(number)")
             if let last = connection.lastCommandNumber, number <= last {
                 // Server-wide numbers only ever go up. A repeat means we are reading something that
@@ -1394,14 +1400,19 @@ public actor SessionService {
             }
             connection.lastCommandNumber = number
             connection.currentNumber = number
-            if connection.pending.isEmpty {
-                // Expected exactly once — tmux's own block on attach, before the handshake completes.
-                // Any later occurrence means the FIFO has slipped and every subsequent response will
-                // be attributed to the wrong command, so it is worth a line in the log even though
-                // there is nothing to do about it here.
-                if connection.handshakeComplete {
-                    log("[\(hostId)] protocol desync: %begin \(number) with no command pending")
-                }
+            if !ControlCodec.blockAnswersOurCommand(flags: flags) {
+                // Not ours to answer: tmux's own block on attach, and every command a keystroke
+                // dispatches through a pane's mode table. Framed exactly like a response and matched
+                // by *order*, so taking one off the FIFO would hand the next real answer to the wrong
+                // command — permanently. Read rather than assumed, because the number cannot say and
+                // the flags can. See `ControlCodec.blockAnswersOurCommand`.
+                connection.current = PendingCommand(text: "", kind: .ignore)
+            } else if connection.pending.isEmpty {
+                // A block that says it answers one of ours, when we have nothing outstanding. The
+                // FIFO has slipped and every subsequent response will be attributed to the wrong
+                // command, so it is worth a line in the log even though there is nothing to do about
+                // it here.
+                log("[\(hostId)] protocol desync: %begin \(number) with no command pending")
                 connection.current = PendingCommand(text: "", kind: .ignore)
             } else {
                 connection.current = connection.pending.removeFirst()
@@ -1460,6 +1471,16 @@ public actor SessionService {
                 // A refusal is an answer. The waiter is holding a channel open until tmux has dealt
                 // with the command, and it has.
                 resumeAcknowledgement(id, connection: connection)
+            case .awaitedResult(let id, let action):
+                // A refusal is *not* an answer here — the caller wanted the contents — so it is both
+                // resumed with nothing and reported, because the user asked for this one.
+                resumeResult(id, with: nil, connection: connection)
+                withHost(hostId) { host in
+                    host.lastCommandFailure = CommandFailure(
+                        action: action,
+                        message: message.isEmpty ? "tmux rejected the command" : message
+                    )
+                }
             case nil:
                 // No command matched this block, so nothing above knows what failed — and tmux only
                 // ever sends `%error` because something did. Dropping the text left the one case
@@ -1636,6 +1657,10 @@ public actor SessionService {
             // and leaving it is the pane looking frozen with nothing wrong.
             log("[\(hostId)] pane mode changed on \(paneId); repainting")
             requestRepaintAfterLoss(hostId: hostId, paneId: paneId)
+            // …and the notification says only that *something* changed — not which mode, and not
+            // whether it was entered or left (verified on 3.7b: the same bare line for both). So the
+            // answer has to be asked for, and `list-panes` is where `#{pane_mode}` lives.
+            schedulePaneRefresh(hostId: hostId)
 
         case .configError(let text):
             // Reported here and nowhere else. Not `.ignore`-worthy: the user is looking at a tmux
@@ -1940,6 +1965,9 @@ public actor SessionService {
 
         case .acknowledged(let id):
             resumeAcknowledgement(id, connection: connection)
+
+        case .awaitedResult(let id, _):
+            resumeResult(id, with: command.lines, connection: connection)
         }
     }
 
@@ -2207,15 +2235,16 @@ public actor SessionService {
     private func applyPanes(_ lines: [String], hostId: String) {
         withHost(hostId) { host in
             for line in lines {
-                let fields = line.split(separator: "|", maxSplits: 6, omittingEmptySubsequences: false)
-                guard fields.count >= 7 else { continue }
+                let fields = line.split(separator: "|", maxSplits: 7, omittingEmptySubsequences: false)
+                guard fields.count >= 8 else { continue }
                 let windowId = String(fields[0])
                 let paneId = String(fields[1])
                 let isActive = fields[2] == "1"
                 let cols = Int(fields[3]) ?? 80
                 let rows = Int(fields[4]) ?? 24
                 let command = String(fields[5])
-                let path = String(fields[6])
+                let mode = String(fields[6])
+                let path = String(fields[7])
 
                 Self.mutateWindow(&host, windowId: windowId) { window in
                     if let index = window.panes.firstIndex(where: { $0.id == paneId }) {
@@ -2224,10 +2253,11 @@ public actor SessionService {
                         window.panes[index].rows = rows
                         window.panes[index].command = command
                         window.panes[index].currentPath = path
+                        window.panes[index].mode = mode
                     } else {
                         window.panes.append(TmuxPane(
                             id: paneId, command: command, currentPath: path,
-                            isActive: isActive, cols: cols, rows: rows
+                            isActive: isActive, cols: cols, rows: rows, mode: mode
                         ))
                     }
                     if isActive { window.activePaneId = paneId }
@@ -2320,6 +2350,7 @@ public actor SessionService {
             log("[\(hostId)] write failed for: \(text)")
             // Nothing will ever answer a command that was never written.
             if case .acknowledged(let id) = kind { resumeAcknowledgement(id, connection: connection) }
+            if case .awaitedResult(let id, _) = kind { resumeResult(id, with: nil, connection: connection) }
 
         case .partial(let bytesWritten):
             // A fragment with no newline is now in front of tmux's parser, and the next command
@@ -2371,6 +2402,42 @@ public actor SessionService {
     /// removal is what makes a second call harmless.
     private func resumeAcknowledgement(_ id: UUID, connection: Connection) {
         connection.acknowledgements.removeValue(forKey: id)?.resume()
+    }
+
+    /// Sends `text` and returns the block tmux answered with, or `nil` if it refused or never
+    /// answered.
+    ///
+    /// The same shape as `sendAndAwait` and for the same reasons — bounded, and resumed from every
+    /// path that could strand it — but it hands back the body rather than only the fact of an answer.
+    /// Exactly one caller so far, `show-buffer`, and that one needs it: the buffer's *contents* are
+    /// the whole point, and there is no notification that carries them.
+    ///
+    /// `nil` for a refusal rather than an empty array, because an empty buffer and a missing one are
+    /// different answers and a caller about to write the Mac's pasteboard must not confuse them.
+    /// The waiter's id is minted here and put into the kind here, deliberately: they are two halves
+    /// of one correlation, and a caller that built the kind itself could hand over one that names a
+    /// different waiter — which resolves as a command that never answers.
+    private func sendAndAwaitResult(
+        _ text: String,
+        action: String,
+        hostId: String,
+        connection: Connection,
+        timeout: Duration = .seconds(5)
+    ) async -> [Data]? {
+        let id = UUID()
+        return await withCheckedContinuation { (continuation: CheckedContinuation<[Data]?, Never>) in
+            connection.results[id] = continuation
+            send(text, kind: .awaitedResult(id, action: action), hostId: hostId, connection: connection)
+            Task { [weak connection] in
+                try? await Task.sleep(for: timeout)
+                guard let connection else { return }
+                self.resumeResult(id, with: nil, connection: connection)
+            }
+        }
+    }
+
+    private func resumeResult(_ id: UUID, with lines: [Data]?, connection: Connection) {
+        connection.results.removeValue(forKey: id)?.resume(returning: lines)
     }
 
     // MARK: - Pane output
@@ -3024,6 +3091,98 @@ public actor SessionService {
         send("select-pane -t \(paneId)", hostId: hostId)
     }
 
+    // MARK: - Copy mode
+
+    /// Puts a pane into tmux's copy mode.
+    ///
+    /// tmux's own scrollback, tmux's own search, and text that scrolled out of what SwiftTerm is
+    /// holding locally — none of which the emulator's selection can reach. `%pane-mode-changed`
+    /// follows, which is what makes the mode visible; the flag itself comes from the `list-panes`
+    /// that notification schedules.
+    public func enterCopyMode(hostId: String, paneId: String) {
+        send(TmuxCommand.enterCopyMode(paneId: paneId),
+             kind: .userCommand("Copy mode"), hostId: hostId)
+    }
+
+    /// One of the documented copy-mode actions, if the pane is in a mode to receive it.
+    ///
+    /// The guard is not defensive tidiness. tmux answers `not in a mode` with an `%error` (verified
+    /// on 3.7b), these are user commands, and §7 turns a refused user command into a banner — so an
+    /// unguarded action would put an error in front of somebody whose only mistake was that the pane
+    /// left copy mode before the menu item was clicked. That is a race anyone can lose: `q` in the
+    /// pane, or another client, ends the mode without asking us.
+    public func copyModeAction(_ action: TmuxCommand.CopyModeAction, hostId: String, paneId: String) {
+        guard isPaneInMode(hostId: hostId, paneId: paneId) else { return }
+        send(TmuxCommand.copyModeAction(action, paneId: paneId),
+             kind: .userCommand(Self.describe(action)), hostId: hostId)
+    }
+
+    /// A copy-mode search, entering copy mode first if the pane is not already in it.
+    ///
+    /// Searching tmux's history *means* being in copy mode, so this is one action rather than two:
+    /// asking the user to enter the mode first would make the search item silently do nothing until
+    /// they had. Entering here rather than at the call site also closes a race — the mode flag only
+    /// arrives after `%pane-mode-changed` has prompted a `list-panes`, so a caller that entered the
+    /// mode and then searched would be refused by the guard on any link slow enough to matter. Both
+    /// commands go down one channel in order, so tmux sees them in the order they are written.
+    public func copyModeSearch(
+        _ action: TmuxCommand.CopyModeAction, hostId: String, paneId: String, needle: String
+    ) {
+        let needle = TmuxCommand.singleLine(needle)
+        guard !needle.isEmpty else { return }
+        guard let connection = connections[hostId] else { return }
+        if !isPaneInMode(hostId: hostId, paneId: paneId) {
+            send(TmuxCommand.enterCopyMode(paneId: paneId),
+                 kind: .userCommand("Copy mode"), hostId: hostId, connection: connection)
+        }
+        send(TmuxCommand.copyModeSearch(action, paneId: paneId, needle: needle),
+             kind: .userCommand("Search"), hostId: hostId, connection: connection)
+    }
+
+    /// Copies the selection and hands the text back, for whoever can reach a pasteboard.
+    ///
+    /// This is the half tmux cannot do. `copy-selection-and-cancel` puts the selection in a buffer on
+    /// the *server*, which on a remote host is a machine the Mac's pasteboard has never heard of, and
+    /// nothing bridges the two: OSC 52 is the pane's own channel and is denied by default (T5.6). So
+    /// the buffer is read straight back with `show-buffer` and returned as a string.
+    ///
+    /// The bytes rather than the parsed lines, joined with `\n`: buffer contents are arbitrary text
+    /// and `commandResultLine`'s `line` is lossy by construction. `nil` means tmux refused — an empty
+    /// selection yields `no buffers` — and the caller must not confuse that with an empty string,
+    /// because one of them should leave the pasteboard alone.
+    ///
+    /// Returning it rather than setting the pasteboard here is §2.4: `tetmuxCore` has no AppKit.
+    public func copySelection(hostId: String, paneId: String) async -> String? {
+        guard let connection = connections[hostId] else { return nil }
+        guard isPaneInMode(hostId: hostId, paneId: paneId) else { return nil }
+        send(TmuxCommand.copyModeAction(.copySelectionAndCancel, paneId: paneId),
+             kind: .userCommand("Copy"), hostId: hostId, connection: connection)
+        let lines = await sendAndAwaitResult(
+            TmuxCommand.showBuffer, action: "Copy", hostId: hostId, connection: connection
+        )
+        guard let lines else { return nil }
+        return lines.map { String(decoding: $0, as: UTF8.self) }.joined(separator: "\n")
+    }
+
+    /// Whether tmux says this pane is showing a mode overlay right now.
+    private func isPaneInMode(hostId: String, paneId: String) -> Bool {
+        hosts[hostId]?.pane(paneId)?.isInMode ?? false
+    }
+
+    /// The label a refusal is reported under (§7), in the words the menu item uses.
+    private static func describe(_ action: TmuxCommand.CopyModeAction) -> String {
+        switch action {
+        case .beginSelection: return "Start selection"
+        case .clearSelection: return "Clear selection"
+        case .copySelectionAndCancel: return "Copy"
+        case .cancel: return "Leave copy mode"
+        case .cursorUp, .cursorDown, .cursorLeft, .cursorRight: return "Move cursor"
+        case .pageUp, .pageDown: return "Scroll"
+        case .historyTop, .historyBottom: return "Jump"
+        case .searchBackward, .searchForward, .searchAgain, .searchReverse: return "Search"
+        }
+    }
+
     public func selectWindow(hostId: String, windowId: String) {
         send("select-window -t \(windowId)", hostId: hostId)
     }
@@ -3450,6 +3609,8 @@ public actor SessionService {
         // timeout for an answer that cannot arrive.
         for (_, continuation) in connection.acknowledgements { continuation.resume() }
         connection.acknowledgements.removeAll()
+        for (_, continuation) in connection.results { continuation.resume(returning: nil) }
+        connection.results.removeAll()
         // A prompt belongs to the channel that asked; there is nothing left to answer.
         withHost(hostId) { $0.authenticationPrompt = nil }
         if connections[hostId]?.epoch == connection.epoch {

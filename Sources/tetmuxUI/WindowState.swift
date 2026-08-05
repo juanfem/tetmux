@@ -96,6 +96,8 @@ public final class WindowState: Identifiable {
     /// A session this window asked to kill, pending confirmation. Killing a session ends every
     /// process in every one of its windows, so unlike closing a tab it always asks.
     public var pendingKillSession: AppModel.PendingKillSession?
+    /// A copy-mode search this window asked for, pending its needle.
+    public var pendingCopyModeSearch: AppModel.PendingCopyModeSearch?
     public var isLauncherPresented = false
 
     /// Whether the host tree is showing. Item 12: a window opened onto a single session starts

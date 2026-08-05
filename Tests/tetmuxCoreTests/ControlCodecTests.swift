@@ -33,6 +33,61 @@ final class ControlCodecTests: XCTestCase {
         XCTAssertEqual(ControlCodec.unescapeOctal(Array(#"\9"#.utf8)), Array(#"\9"#.utf8))
     }
 
+    // MARK: - Whose block is this
+
+    /// Correlation is by order against a FIFO, which holds only while every block on the wire is one
+    /// of ours — and not every block is. tmux opens one on attach before we can write anything, and
+    /// one for every command a *keystroke* dispatches through a pane's mode table. Consuming those
+    /// misattributes every response afterwards, permanently.
+    func testABlockIsOursOnlyWhenItsFlagsSaySo() {
+        XCTAssertTrue(ControlCodec.blockAnswersOurCommand(flags: "1"))
+        XCTAssertFalse(ControlCodec.blockAnswersOurCommand(flags: "0"))
+    }
+
+    /// Bit 0, not equality: the field is a bitfield and tmux is entitled to add flags to it. A future
+    /// `3` must still read as ours, or a tmux upgrade would silently stop answering every command.
+    func testUnknownFlagBitsDoNotChangeWhoseBlockItIs() {
+        XCTAssertTrue(ControlCodec.blockAnswersOurCommand(flags: "3"))
+        XCTAssertTrue(ControlCodec.blockAnswersOurCommand(flags: "5"))
+        XCTAssertFalse(ControlCodec.blockAnswersOurCommand(flags: "2"))
+    }
+
+    /// Every version in the R3.6 matrix emits the field, so its absence means a tmux this was never
+    /// verified against — and there the old behaviour is the safer guess. Reading a missing field as
+    /// "not ours" would answer no command at all.
+    func testAMissingFlagsFieldIsReadAsOurs() {
+        XCTAssertTrue(ControlCodec.blockAnswersOurCommand(flags: ""))
+        XCTAssertTrue(ControlCodec.blockAnswersOurCommand(flags: "not-a-number"))
+
+        var codec = ControlCodec()
+        let events = codec.feed(Array("%begin 1785760385 13768\r\n%end 1785760385 13768\r\n".utf8))
+        guard case .begin(_, _, let flags) = events.first else { return XCTFail("expected .begin") }
+        XCTAssertEqual(flags, "", "an absent field must be distinguishable from a present '0'")
+        XCTAssertTrue(ControlCodec.blockAnswersOurCommand(flags: flags))
+    }
+
+    /// The stream a pane in copy mode really produces, captured from 3.7b under a pty: the response
+    /// to `send-keys` (ours, flags 1) followed by an unsolicited block (flags 0) for the `cursor-up`
+    /// the key was bound to. Three `Up`s produce three of them, and none of them answers anything we
+    /// sent.
+    func testKeysDispatchedByAPanesModeTableOpenBlocksThatAreNotOurs() {
+        let stream = "%begin 1785960005 309 1\r\n%end 1785960005 309 1\r\n"
+            + "%begin 1785960005 310 0\r\n%end 1785960005 310 0\r\n"
+            + "%begin 1785960005 311 0\r\n%end 1785960005 311 0\r\n"
+        var codec = ControlCodec()
+        let events = codec.feed(Array(stream.utf8))
+
+        var numbers: [Int] = []
+        var ours: [Bool] = []
+        for event in events {
+            guard case .begin(_, let number, let flags) = event else { continue }
+            numbers.append(number)
+            ours.append(ControlCodec.blockAnswersOurCommand(flags: flags))
+        }
+        XCTAssertEqual(numbers, [309, 310, 311])
+        XCTAssertEqual(ours, [true, false, false], "only the send-keys response answers a command we sent")
+    }
+
     // MARK: - Block framing (R3.2)
 
     func testCommandBlockFraming() {

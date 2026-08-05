@@ -28,6 +28,10 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
     case sendNextLiteral
     case renameWindow
     case renameSession
+    case copyMode
+    case copyModeStartSelection
+    case copyModeCopy
+    case copyModeSearch
 
     public var title: String {
         switch self {
@@ -58,6 +62,12 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
         case .sendNextLiteral: return "Send Next Chord Literally"
         case .renameWindow: return "Rename Window…"
         case .renameSession: return "Rename Session…"
+        // One item for both directions: what it does depends on where the pane already is, and two
+        // items would leave whichever one did not apply sitting there greyed out saying nothing.
+        case .copyMode: return "Enter Copy Mode"
+        case .copyModeStartSelection: return "Start Selection"
+        case .copyModeCopy: return "Copy Selection"
+        case .copyModeSearch: return "Search Backward…"
         }
     }
 }
@@ -184,6 +194,20 @@ public struct KeymapPolicy: Sendable {
         // us — the pane sees the prefix. These are the GUI equivalents and stay in Cmd space.
         .renameWindow: KeyBinding("r"),
         .renameSession: KeyBinding("r", [.command, .shift]),
+        // tmux's own `prefix [`, in Cmd space. Not ⌘C, which is Copy — and copy mode is the thing
+        // you enter *before* copying, so taking the Copy chord for it would be exactly backwards.
+        .copyMode: KeyBinding("[", [.command, .control]),
+        // tmux's own emacs copy table marks with `C-Space`, and that is the chord this wants — but a
+        // `KeyBinding` is a character, so it would render as `⌃⌘` followed by nothing in the menu and
+        // in the settings table, which is a shortcut nobody can read back. `S` for selection instead.
+        .copyModeStartSelection: KeyBinding("s", [.command, .control]),
+        // The one item that really is Copy: it ends with the selection on the Mac's pasteboard, which
+        // is what ⌘C means everywhere. Available only in copy mode, where SwiftTerm has no selection
+        // of its own for the ordinary ⌘C to act on.
+        .copyModeCopy: KeyBinding("c", [.command, .control]),
+        // ⌘F is SwiftTerm's local find bar, which searches what the emulator is holding. This is
+        // tmux's search, which reaches the history the emulator never received.
+        .copyModeSearch: KeyBinding("f", [.command, .control]),
     ])
 
     public init(bindings: [ApplicationShortcut: KeyBinding]) {

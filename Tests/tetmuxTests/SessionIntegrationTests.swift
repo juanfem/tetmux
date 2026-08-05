@@ -898,6 +898,147 @@ final class SessionIntegrationTests: XCTestCase {
         }
     }
 
+    // MARK: - Copy mode
+
+    /// The mode has to become *visible*, because control mode is never streamed one.
+    ///
+    /// A mode is a per-client screen overlay: the bytes for what is now on the pane never arrive, so
+    /// a pane somebody put into copy mode keeps showing what was there before and then stops moving.
+    /// That is the same picture as a dead channel, and it is the complaint copy mode has always
+    /// produced from the other side. `%pane-mode-changed` says only that *something* changed — not
+    /// which mode, and not whether it was entered or left — so the flag is read from `list-panes`.
+    func testEnteringAndLeavingCopyModeIsVisibleInTheModel() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+        XCTAssertFalse(try XCTUnwrap(host.pane(paneId)).isInMode, "a fresh pane is in no mode")
+
+        await service.enterCopyMode(hostId: "local", paneId: paneId)
+
+        let entered = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.pane(paneId)?.isInCopyMode == true
+        }
+        XCTAssertTrue(entered, "the pane entered copy mode and the model never said so")
+        let entering = await service.getHost("local")
+        let inMode = try XCTUnwrap(entering?.pane(paneId))
+        XCTAssertEqual(inMode.mode, "copy-mode")
+
+        await service.copyModeAction(.cancel, hostId: "local", paneId: paneId)
+
+        let left = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.pane(paneId)?.isInMode == false
+        }
+        XCTAssertTrue(left, "the pane left copy mode and the model still says it is in one")
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// The whole point: text that is in tmux's history and not in the emulator's, on the Mac's
+    /// pasteboard.
+    ///
+    /// tmux's copy puts the selection in a buffer on the *server*, which on a remote host is a
+    /// machine the pasteboard has never heard of — so `show-buffer` reads it back and the string is
+    /// what the UI puts on the pasteboard. Asserted through the returned value rather than through
+    /// `NSPasteboard`, which is the user's and is not a test fixture.
+    func testCopyingASelectionRoundTripsThroughTheBuffer() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        let marker = "tetmux-copy-\(UUID().uuidString.prefix(8))"
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "echo \(marker)\r")
+        try await Task.sleep(for: .milliseconds(600))
+
+        // Searching rather than counting lines to the marker: the copy cursor starts at the bottom of
+        // the screen, which for a fresh shell is blank rows, and a test that navigates by arithmetic
+        // measures the height of somebody's prompt. This also exercises the path that enters copy
+        // mode on the caller's behalf, which is what makes Search one action from a live shell.
+        await service.copyModeSearch(
+            .searchBackward, hostId: "local", paneId: paneId, needle: marker
+        )
+        let searching = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.pane(paneId)?.isInCopyMode == true
+        }
+        XCTAssertTrue(searching, "the search did not put the pane into copy mode")
+
+        // The match leaves the cursor at the start of it; one line down takes the rest of that line.
+        await service.copyModeAction(.beginSelection, hostId: "local", paneId: paneId)
+        await service.copyModeAction(.cursorDown, hostId: "local", paneId: paneId)
+
+        let copied: String? = await service.copySelection(hostId: "local", paneId: paneId)
+        let text = try XCTUnwrap(copied, "show-buffer answered nothing")
+        XCTAssertTrue(
+            text.contains(marker),
+            "the buffer did not carry the selected text; got \(text.debugDescription)"
+        )
+
+        // `copy-selection-and-cancel` is exactly that: the mode ends with the copy.
+        let left = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.pane(paneId)?.isInMode == false
+        }
+        XCTAssertTrue(left, "copy-selection-and-cancel left the pane in a mode")
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// The desync this feature uncovered, which needed no copy-mode *feature* to happen.
+    ///
+    /// A key that a pane's mode table binds makes tmux open a block of its own — framed exactly like
+    /// a command response and matched by *order*, so consuming it hands the next real answer to the
+    /// wrong command, for the life of the channel. `prefix [` typed into a pane is enough to trigger
+    /// it, and every version of tetmux before this one would have slipped.
+    ///
+    /// Asserted by *outcome* rather than by counting blocks: after a burst of mode-dispatched keys,
+    /// a command whose answer the model consumes must still be answered correctly.
+    func testKeysDispatchedInsideAModeDoNotMisalignTheCommandQueue() async throws {
+        let service = SessionService()
+        let sink = LogSink()
+        await service.setDiagnosticLogger { message in
+            Task { await sink.append(message) }
+        }
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        await service.enterCopyMode(hostId: "local", paneId: paneId)
+        _ = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.pane(paneId)?.isInCopyMode == true
+        }
+
+        // Typed into the pane, as a person would: each one is a key tmux looks up in the copy-mode
+        // table, and each dispatch opens an unsolicited block. ESC[A three times over.
+        for _ in 0..<3 {
+            await service.sendKeys(hostId: "local", paneId: paneId, bytes: [0x1b, 0x5b, 0x41])
+            try await Task.sleep(for: .milliseconds(150))
+        }
+
+        // Now something whose answer the model actually reads. Misaligned, this response lands on
+        // some other command and the rename never appears.
+        let renamed = "tetmux-after-copy-\(UUID().uuidString.prefix(6))"
+        let windowId = try XCTUnwrap(host.activeSession?.activeWindow?.id)
+        await service.renameWindow(hostId: "local", windowId: windowId, newName: renamed)
+
+        let landed = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.window(windowId)?.name == renamed
+        }
+        let log = await sink.text
+        XCTAssertTrue(landed, "a command after mode-dispatched keys was not answered:\n\(log)")
+        XCTAssertFalse(
+            log.contains("protocol desync"),
+            "unsolicited blocks were taken for command responses:\n\(log)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     // MARK: - Paste
 
     /// Clipboard text is routinely multi-line, and control-mode commands are newline-framed: under

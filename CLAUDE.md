@@ -121,6 +121,7 @@ Where things are, since the invariants below name symbols without saying which f
 | `LiveResizeGate.swift` | R3.7 — one macOS window's panes stop asking tmux while its edge is dragged. |
 | `NotificationPolicy.swift` | F4.31 — which events earn a banner, and `WatchedWindow`. |
 | `DestructiveActionModal.swift` | The F4.10 confirmation, which says *why* the close is a kill. |
+| `CopyModeSearchSheet.swift` | Searches tmux's history, which is not what ⌘F searches. |
 | `BellNotifier.swift` · `KeychainStore.swift` | F4.31 background bells; per-host passwords. |
 
 ### The central abstraction
@@ -162,6 +163,18 @@ number fails to increase, a `%begin` with nothing pending *after* the handshake,
 closing a block it did not open are each logged as a desync. Detecting is not recovering — there is
 still no recovery — so everything below that can cause a misalignment treats it as fatal rather than
 as an error to report.
+
+**…and not every block on the wire is one of ours.** Correlation by order holds only while every
+`%begin` answers something we sent, and two do not: tmux's own block on attach, and **one for every
+command a keystroke dispatches through a pane's mode table**. Verified on 3.7b — with a pane in copy
+mode, `send-keys -t %p Up` produces the response to `send-keys` (flags `1`) *and then* an unsolicited
+block (flags `0`) for the `cursor-up` the key was bound to; three `Up`s produce three of them. Taking
+one off the FIFO hands the next real answer to the wrong command for the life of the channel, and it
+needs no copy-mode feature to happen — a `prefix [` typed into a pane is enough, which is why panes
+in copy mode had a history of going strange. `ControlCodec.blockAnswersOurCommand` reads bit 0 of the
+flags field, not equality, because it is a bitfield tmux may add to; an *absent* field means a version
+this was never verified against (every one in the R3.6 matrix emits it) and is read as ours, since
+the alternative answers no command at all.
 
 **Framing outranks dispatch.** Inside a `%begin` block every line is response content, including one
 that starts with `%`, and only a `%end`/`%error` **carrying the matching number** may close it.
@@ -573,6 +586,27 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   `ControlMaster` answers nothing until it has been connected once. And **`browsableSessions` is the
   one place that decides which list a surface shows**, because the sidebar, the launcher and the menu
   bar all ask.
+- **Copy mode is a small documented vocabulary, not an emulation of tmux's key table.** Menu items
+  drive `send-keys -X <command>` — `-X` names the *action*, so it means the same thing whether the
+  user's `mode-keys` is emacs or vi, which a key name would not. The pane keeps working the way it
+  always did: a key typed into a pane in a mode still reaches tmux and is still looked up in the
+  user's own table (`Up` moves the copy cursor), so this adds a way in and a way out to the Mac's
+  pasteboard without taking anything away. Four things are load-bearing. **The mode has to be
+  visible** — control mode is never streamed a mode's overlay, so the pane is holding a
+  `capture-pane` still frame that looks exactly like a dead process; hence `TmuxPane.mode`, the
+  status-bar label and the per-pane badge, all naming the mode rather than hinting at it, because the
+  name is what tells somebody to press `q`. **`%pane-mode-changed` says only that something
+  changed** — not which mode, not whether it was entered or left — so it schedules a `list-panes`,
+  where `#{pane_mode}` lives (identical on 3.0 through 3.7b, so no version branch). **An action sent
+  to a pane that is not in a mode is an `%error`**, and these are user commands, so §7 would put a
+  banner in front of somebody whose pane merely left the mode before they clicked; every action is
+  guarded on the flag, and Search is the deliberate exception — it *enters* copy mode itself, which
+  is what makes searching tmux's history one action from a live shell and also closes the race where
+  the flag has not arrived yet. And **copy has to come back**: `copy-selection-and-cancel` fills a
+  buffer on the *server*, which on a remote host is a machine the pasteboard has never heard of, so
+  `show-buffer` reads it straight back and `tetmuxCore` returns the string for the UI to set —
+  §2.4 again. A refusal returns `nil` and the pasteboard is left alone, because replacing somebody's
+  clipboard with an empty string over an empty selection is a silent loss.
 - **Control mode only streams `%output` for the attached session.** Selecting another session must
   issue `switch-client`, or its panes render once from `capture-pane` and then sit frozen.
 - **Nothing repaints on its own.** Attaching to an existing session shows an empty terminal until
@@ -889,6 +923,13 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   notice if a SwiftTerm bump turned that off, hence `PaneLinkTests`. Both routes are held to one
   scheme allowlist — `http`, `https`, `mailto`, `ftp` — because pane contents are remote text and
   `NSWorkspace.open` launches whatever application claimed a scheme.
+- **There are two searches, over two different bodies of text.** ⌘F is SwiftTerm's find bar and
+  searches what the *emulator* is holding — the local scrollback, capped by the theme and reset by
+  every repaint. ⌃⌘F is tmux's, and reaches the history the emulator never received, which is the
+  whole reason copy mode exists. Two controls that look different, deliberately: a sheet rather than
+  a bar, and one shot rather than incremental, because each keystroke of an incremental field would
+  be a `search-backward` that moves the copy cursor — the history would walk backwards while somebody
+  typed.
 - **⌘F is SwiftTerm's find bar, reached through `performTextFinderAction`.** It works only because the
   Paste command replaces the `.pasteboard` menu group and *not* `.textEditing` — replacing the latter
   wholesale is what unplugged Find in the first place, since AppKit puts Find in that group.

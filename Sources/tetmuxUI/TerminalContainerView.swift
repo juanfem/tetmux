@@ -392,11 +392,37 @@ public struct TerminalContainerView: View {
                     .allowsHitTesting(false)
             }
         }
+        .overlay(alignment: .topTrailing) { modeBadge(paneId) }
         .contentShape(Rectangle())
         .onTapGesture { focus(paneId) }
         // Explicit identity. Without it the type-erased tree rebuilds every surface on each state
         // broadcast, discarding the terminal's contents each time.
         .id(paneId)
+    }
+
+    /// Says, on the pane itself, that tmux is showing an overlay here.
+    ///
+    /// The status bar names the *focused* pane's mode and that is not enough on its own: a split
+    /// window can have one pane in copy mode while another has focus, and the frozen one is the one
+    /// the user is puzzled by. Control mode is never streamed a mode's screen, so the pane is holding
+    /// a `capture-pane` still frame — it looks exactly like a pane whose process has died, which is
+    /// the wrong conclusion to leave anybody with.
+    ///
+    /// Worded, not a dot: the word is what tells someone they can press `q`.
+    @ViewBuilder
+    private func modeBadge(_ paneId: String) -> some View {
+        if let pane = window.panes.first(where: { $0.id == paneId }), pane.isInMode {
+            Text(pane.mode)
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundStyle(Color(nsColor: .textBackgroundColor))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.accentColor))
+                .padding(4)
+                .allowsHitTesting(false)
+                .help("This pane is in tmux's \(pane.mode). Keys go to the mode, not the shell.")
+                .accessibilityLabel("Pane \(paneId) is in \(pane.mode)")
+        }
     }
 
     private func focus(_ paneId: String) {

@@ -19,6 +19,29 @@ public struct ControlCodec: Sendable {
 
     public init() {}
 
+    /// Whether a `%begin`'s flags say the block answers a command **this** client sent.
+    ///
+    /// Correlation is by order against a FIFO of pending commands, which works only for as long as
+    /// every block on the wire is one of ours. Not every block is. tmux opens a block of its own on
+    /// attach, before we can write anything — that one has always been special-cased — and it opens
+    /// one for **every command a keystroke dispatches through a pane's mode table**. Verified on
+    /// 3.7b: with a pane in copy mode, `send-keys -t %0 Up` produces the response to `send-keys`
+    /// (flags `1`) *and then* a second, unsolicited block (flags `0`) for the `cursor-up` the key was
+    /// bound to. Three `Up`s produce three of them. Consuming those from the FIFO misattributes every
+    /// response afterwards for the life of the channel, and it needs no copy-mode feature to happen:
+    /// a `prefix [` typed into a pane, or another client entering the mode, is enough.
+    ///
+    /// Bit 0, not equality, because the field is a bitfield and tmux is entitled to add flags. An
+    /// **absent** field is read as ours: every version in the R3.6 matrix (3.0 through 3.5) and 3.7b
+    /// emits it, so its absence would mean a tmux this was never verified against, and the old
+    /// behaviour is the safer guess there — treating everything as unsolicited would answer no
+    /// command at all.
+    public static func blockAnswersOurCommand(flags: String) -> Bool {
+        guard !flags.isEmpty else { return true }
+        guard let value = Int(flags) else { return true }
+        return value & 1 == 1
+    }
+
     public mutating func feed(_ incoming: some Sequence<UInt8>) -> [ControlEvent] {
         buffer.append(contentsOf: incoming)
         var events: [ControlEvent] = []
@@ -119,12 +142,12 @@ public struct ControlCodec: Sendable {
             guard args.count >= 2, let ts = Int64(args[0]), let num = Int(args[1]) else { return nil }
             sawFirstBegin = true
             activeCommandNumber = num
-            return .begin(timestamp: ts, commandNumber: num, flags: args.count > 2 ? args[2] : "0")
+            return .begin(timestamp: ts, commandNumber: num, flags: args.count > 2 ? args[2] : "")
 
         case "%end", "%error":
             guard args.count >= 2, let ts = Int64(args[0]), let num = Int(args[1]) else { return nil }
             activeCommandNumber = nil
-            let flags = args.count > 2 ? args[2] : "0"
+            let flags = args.count > 2 ? args[2] : ""
             return verb == "%end"
                 ? .end(timestamp: ts, commandNumber: num, flags: flags)
                 : .error(timestamp: ts, commandNumber: num, flags: flags)
