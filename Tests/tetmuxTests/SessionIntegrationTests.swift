@@ -1085,6 +1085,67 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    // MARK: - Chaos (§8)
+
+    /// The tmux server is stopped dead, and the actor keeps answering.
+    ///
+    /// A `SIGSTOP`ped server is the shape of failure that a timeout exists for and that a naive
+    /// implementation turns into a hang: the channel is perfectly healthy — writes succeed, the pty
+    /// is open — and nothing ever answers. Everything in `SessionService` that waits is bounded for
+    /// this reason (`sendAndAwait` at 2 s), and the property worth asserting is not that a command
+    /// fails but that **the actor is still usable while it does**: one wedged command must not stop
+    /// every other host on the machine.
+    ///
+    /// Then `SIGCONT`, and it has to recover rather than merely survive.
+    func testAStoppedServerDoesNotWedgeTheActorAndRecoversOnResume() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        // This test's own server, not the machine's: `setUp` gave it a private `TMUX_TMPDIR`, so
+        // stopping it cannot touch anything the person running the suite is working in.
+        let serverPid = try XCTUnwrap(
+            tmuxQuery(["display-message", "-p", "#{pid}"]).flatMap { pid_t($0) },
+            "could not find the server to stop"
+        )
+        XCTAssertEqual(kill(serverPid, SIGSTOP), 0, "could not stop the tmux server")
+        // Resumed however this test leaves: a stopped server outlives the process that stopped it,
+        // and `tearDown`'s `kill-server` cannot reach one that is not scheduling.
+        defer { kill(serverPid, SIGCONT) }
+
+        // The actor is asked to do something that cannot be answered, and then asked something else.
+        // If a wedged command held the actor, the second call would never return and this test would
+        // hang rather than fail — which is why the bound is here as well as in the service.
+        await service.refreshClients(hostId: "local")
+        let stillAnswering = try await waitFor(seconds: 10) {
+            await service.getHost("local") != nil
+        }
+        XCTAssertTrue(stillAnswering, "the actor stopped answering while a command was outstanding")
+
+        // And a *second* host is unaffected, which is the real cost of a wedged actor.
+        await service.addHost(HostConfig(id: "bystander", name: "bystander", isLocal: true))
+        let bystander = await service.getHost("bystander")
+        XCTAssertNotNil(bystander, "one stalled server made the service unusable for every host")
+
+        XCTAssertEqual(kill(serverPid, SIGCONT), 0, "could not resume the tmux server")
+
+        // Recovery, not just survival: the pane takes input again and answers.
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
+        let resumed = collect(stream, until: "after-the-stop", seconds: 20)
+        try await Task.sleep(for: .milliseconds(500))
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "echo after-the-stop\r")
+        let text = await resumed.value
+        XCTAssertTrue(
+            text.contains("after-the-stop"),
+            "the pane never recovered after the server was resumed; got \(text.debugDescription)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     // MARK: - Geometry under load (§8)
 
     /// §8's resize storm: fifty rapid, contradictory size requests, and the model has to *converge*
