@@ -123,6 +123,7 @@ Where things are, since the invariants below name symbols without saying which f
 | `KeyEventMonitor.swift` | The one `NSEvent` monitor: ⌥⌘V's literal escape (F4.21). |
 | `WorkspaceStore.swift` · `SettingsStore.swift` | `workspace.json` and `settings.json`. |
 | `ContrastPolicy.swift` | Increase Contrast, resolved once for every site that honours it. |
+| `ColorScheme.swift` | Pane colour schemes: the 16 ANSI slots and the three named colours. |
 | `LiveResizeGate.swift` | R3.7 — one macOS window's panes stop asking tmux while its edge is dragged. |
 | `NotificationPolicy.swift` | F4.31 — which events earn a banner, and `WatchedWindow`. |
 | `DestructiveActionModal.swift` | The F4.10 confirmation, which says *why* the close is a kill. |
@@ -912,6 +913,23 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   previous value, so attaching to a server whose watched window is already active is deliberately not
   an event. `NotificationPolicy` is the on/off pair, in `UserDefaults` beside the theme; it is
   mirrored onto `BellNotifier.shared` because a pane surface has no `AppModel` to ask.
+- **A colour scheme is pane *content* only, and System is the absence of one.** §7 keeps the chrome
+  compositing from `controlAccentColor` and hierarchical styles so it follows the system appearance;
+  a tab bar that changed colour with the terminal scheme would be an application pretending to be a
+  terminal. Four things are load-bearing. The **System scheme carries no palette** — it calls
+  `configureNativeColors`, which reads `NSColor.textColor`/`.textBackgroundColor` and therefore
+  follows light and dark *while the app runs*; copying today's values into fixed ones would look
+  right until the user switched appearance. **`installColors` goes first**, because it resets the
+  view's 256-entry colour cache and setting the foreground and background before it would have them
+  thrown away — and it is guarded on an actual change (`Coordinator.appliedSchemeId`), since a
+  repaint of every pane on every `%layout-change` is what an unguarded version costs. **The pane
+  tree's background follows the scheme too**: an unfocused pane is dimmed with `opacity`, so whatever
+  is behind it is what it fades toward, and a dark scheme fading toward the system's white is a grey
+  wash nobody chose (`ContrastPolicy`'s exemption still applies on top — at increased contrast the
+  dimming stops entirely). And **§4.6's passthrough surface takes the scheme as well**, because it is
+  one tmux client painting itself and a fallback in different colours would look like somebody else's
+  application. The theme stores the scheme's *id*, not the scheme: an unknown id falls back to
+  System, which is what a downgrade or a hand-edited preference produces.
 - **The terminal's appearance is one `TerminalTheme` in `UserDefaults`, and changing it costs a round
   trip per pane.** The `Settings` scene sets font family, size, ligatures (T5.8) and scrollback; the
   theme lives on `AppModel` with a `didSet` that persists it, and reaches panes as a value passed down
@@ -1279,7 +1297,7 @@ rather than fixed.
   already has a place for, while a keymap is a document somebody may want to read, diff, or copy to
   another Mac — which is §2.3's whole argument for JSON.
 - `~/Library/Preferences` (`UserDefaults`) — `terminal.fontName`, `fontSize`, `ligatures`,
-  `scrollbackLines`, and F4.31's `notifications.bells` / `notifications.activity`. Preferences the
+  `scrollbackLines`, `colorScheme`, and F4.31's `notifications.bells` / `notifications.activity`. Preferences the
   system already has a place for; the *watches* those last two govern are view state and live in
   `workspace.json`.
 - `~/Library/Caches/tetmux/cm-%C` — ssh `ControlMaster` socket. Kept short on purpose: unix socket

@@ -90,7 +90,13 @@ public struct TerminalContainerView: View {
                 .onAppear { updateContainerSize(proxy.size) }
                 .onChange(of: proxy.size) { _, newValue in updateContainerSize(newValue) }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        // The scheme's background, not the system's. An unfocused pane is dimmed with `opacity`, so
+        // whatever is behind it is what it fades *toward* — and a dark scheme fading toward the
+        // system's white in light mode is a grey wash nobody chose. `ContrastPolicy`'s exemption
+        // still applies on top of this: at increased contrast the dimming stops entirely.
+        .background(Color(nsColor: theme.colorScheme.followsSystemAppearance
+            ? .textBackgroundColor
+            : theme.colorScheme.background.nsColor))
         // Taking focus takes over sizing, so the window in front is the one that fits.
         .onChange(of: controlActiveState) { _, state in
             guard state == .key else { return }

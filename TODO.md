@@ -8,7 +8,7 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**4 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
+**3 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
 integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on 2026-08-06; what
 they turned into is recorded in `CLAUDE.md`, not here.
 
@@ -53,18 +53,6 @@ References point into current `main`. Line numbers drift; the symbol names besid
   (3) P6.6/P6.7: a documented `Scripts/measure-idle.md` procedure (Instruments template, what to
   open, what number to record). Record results in the repo the way fixture provenance is
   recorded.
-
-- [ ] **Terminal theme and ANSI palette.** Settings cover font, size, ligatures, and scrollback;
-  panes follow the system appearance and nothing else. No colour scheme, no ANSI 16 palette —
-  the second-most-adjusted terminal preference after font size.
-  *Do:* extend `TerminalTheme` with foreground/background/cursor and the 16 ANSI slots, applied
-  through SwiftTerm's `installColors`/native-colour APIs on theme change (the propagation path —
-  theme on `AppModel`, value passed down, re-applied to live panes — already exists for
-  scrollback). Ship a small set of built-in schemes rather than 19 colour wells; keep storage in
-  `UserDefaults` with the rest of appearance. Honour the §7 rule: the *chrome* keeps compositing
-  from system colours; only pane content takes the scheme. Mind `ContrastPolicy`'s pane rules —
-  the unfocused-pane dimming exemption must survive a custom background.
-  `Sources/tetmuxUI/TerminalSurface.swift:19-64`, `Sources/tetmuxUI/SettingsView.swift`
 
 ## Blocked on credentials
 

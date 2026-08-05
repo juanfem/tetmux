@@ -22,11 +22,21 @@ public struct TerminalTheme: Equatable, Sendable {
     /// It was never set at all, which meant SwiftTerm's default of 500 lines — about one `ls -R`.
     public var scrollbackLines: Int
 
+    /// Which colour scheme a pane's *content* is drawn in (§7 keeps the chrome on system colours).
+    ///
+    /// The id rather than the scheme, so the theme stays a small comparable value and the palette
+    /// stays in one place. `TerminalColorScheme.named` resolves it, falling back to System for an id
+    /// that no longer exists — which is what a downgrade, or a hand-edited preference, produces.
+    public var colorSchemeId: String
+
+    public var colorScheme: TerminalColorScheme { TerminalColorScheme.named(colorSchemeId) }
+
     public static let `default` = TerminalTheme(
         fontName: "SF Mono",
         fontSize: 12,
         ligatures: false,
-        scrollbackLines: 10_000
+        scrollbackLines: 10_000,
+        colorSchemeId: TerminalColorScheme.system.id
     )
 
     /// The bounds the settings pane offers, and what ⌘+/⌘− clamp to.
@@ -41,6 +51,7 @@ public struct TerminalTheme: Equatable, Sendable {
         static let fontSize = "terminal.fontSize"
         static let ligatures = "terminal.ligatures"
         static let scrollback = "terminal.scrollbackLines"
+        static let colorScheme = "terminal.colorScheme"
     }
 
     public static func load(from defaults: UserDefaults = .standard) -> TerminalTheme {
@@ -54,6 +65,7 @@ public struct TerminalTheme: Equatable, Sendable {
         }
         let scrollback = defaults.integer(forKey: Key.scrollback)
         if scrollback > 0 { theme.scrollbackLines = scrollback }
+        if let scheme = defaults.string(forKey: Key.colorScheme) { theme.colorSchemeId = scheme }
         return theme
     }
 
@@ -62,6 +74,7 @@ public struct TerminalTheme: Equatable, Sendable {
         defaults.set(Double(fontSize), forKey: Key.fontSize)
         defaults.set(ligatures, forKey: Key.ligatures)
         defaults.set(scrollbackLines, forKey: Key.scrollback)
+        defaults.set(colorSchemeId, forKey: Key.colorScheme)
     }
 
     public func resolvedFont() -> NSFont {
@@ -132,7 +145,7 @@ struct TerminalPaneView: NSViewRepresentable {
         Self.hideReservedScroller(in: view)
         view.allowMouseReporting = true   // T5.3
         view.optionAsMetaKey = true
-        view.configureNativeColors()
+        Self.applyColors(theme.colorScheme, to: view)
 
         // The pane is the terminal, and VoiceOver had nothing at all to say about it — SwiftTerm's
         // own accessibility service is an empty stub, so every piece of chrome around the pane was
@@ -178,6 +191,28 @@ struct TerminalPaneView: NSViewRepresentable {
         }
     }
 
+    /// Paints one pane in a scheme, or hands it back to the system.
+    ///
+    /// The System scheme is not a palette of its own: `configureNativeColors` sets the view from
+    /// `NSColor.textColor` and `.textBackgroundColor`, which follow light and dark and change under
+    /// the app while it runs. A scheme that copied today's values into fixed ones would look right
+    /// until the user switched appearance.
+    ///
+    /// `installColors` before the foreground and background, because it resets the view's colour
+    /// cache — setting them first would have them thrown away.
+    static func applyColors(_ scheme: TerminalColorScheme, to view: TerminalView) {
+        guard !scheme.followsSystemAppearance else {
+            view.installColors(TerminalColorScheme.defaultAnsi.map(\.terminalColor))
+            view.configureNativeColors()
+            view.caretColor = NSColor.textColor
+            return
+        }
+        view.installColors(scheme.ansi.map(\.terminalColor))
+        view.nativeForegroundColor = scheme.foreground.nsColor
+        view.nativeBackgroundColor = scheme.background.nsColor
+        view.caretColor = scheme.cursor.nsColor
+    }
+
     func updateNSView(_ view: TerminalView, context: Context) {
         context.coordinator.parent = self
         // Cheap, and it keeps the gutter reclaimed if SwiftTerm ever rebuilds the scroller — the
@@ -191,6 +226,15 @@ struct TerminalPaneView: NSViewRepresentable {
         let terminalForOptions = view.getTerminal()
         if terminalForOptions.options.scrollback != theme.scrollbackLines {
             terminalForOptions.changeScrollback(theme.scrollbackLines)
+        }
+
+        // Re-applied on every update rather than only at creation, for the same reason scrollback is:
+        // a pane already on screen has to take the new scheme, and panes are never rebuilt (their
+        // `.id(paneId)` is what keeps their scrollback). Guarded on a change because `installColors`
+        // discards the view's 256-entry colour cache and repaints everything.
+        if context.coordinator.appliedSchemeId != theme.colorSchemeId {
+            context.coordinator.appliedSchemeId = theme.colorSchemeId
+            Self.applyColors(theme.colorScheme, to: view)
         }
 
         // Snap the emulator to the size tmux reported. If the view's own pixel-derived size drifts
@@ -220,6 +264,10 @@ struct TerminalPaneView: NSViewRepresentable {
         var parent: TerminalPaneView
         private weak var view: TerminalView?
         private var subscription: Task<Void, Never>?
+        /// The scheme this pane is currently painted in, so `updateNSView` can tell a real change
+        /// from the dozens of updates a state broadcast produces. Re-installing a palette on each
+        /// one would repaint every pane on every `%layout-change`.
+        var appliedSchemeId: String = TerminalColorScheme.system.id
 
         init(parent: TerminalPaneView) {
             self.parent = parent

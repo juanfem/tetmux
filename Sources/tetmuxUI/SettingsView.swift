@@ -59,6 +59,25 @@ struct SettingsView: View {
             }
 
             Section {
+                Picker("Colours", selection: $model.theme.colorSchemeId) {
+                    ForEach(TerminalColorScheme.all) { scheme in
+                        Text(scheme.name).tag(scheme.id)
+                    }
+                }
+                SchemePreview(scheme: model.theme.colorScheme)
+            } header: {
+                Text("Colours")
+            } footer: {
+                // §7's line, stated where somebody is about to wonder why the tab bar did not change.
+                Text(
+                    "Applies to what programs draw inside a pane. The window, tabs and tree keep "
+                    + "following the system appearance, and System does the same for panes."
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Picker("Scrollback", selection: $model.theme.scrollbackLines) {
                     ForEach(Self.scrollbackChoices, id: \.self) { lines in
                         Text("\(lines.formatted()) lines").tag(lines)
@@ -149,4 +168,53 @@ struct SettingsView: View {
         // Always offer the default, even on a system where it fails the check above.
         return Array(Set(names).union([TerminalTheme.default.fontName])).sorted()
     }()
+}
+
+/// The sixteen ANSI slots and the two that are not, drawn as they will look.
+///
+/// A scheme is a list of colours, and a list of colour *names* tells nobody anything — the whole
+/// question a person is asking is "what will my terminal look like". Two rows of eight, in the order
+/// programs address them, plus the foreground on the background so the pairing that matters most is
+/// the one shown largest.
+struct SchemePreview: View {
+    let scheme: TerminalColorScheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Aa  the quick brown fox")
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(Color(nsColor: foreground))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 5).fill(Color(nsColor: background)))
+
+            HStack(spacing: 3) {
+                ForEach(Array(swatches.enumerated()), id: \.offset) { _, colour in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(nsColor: colour))
+                        .frame(height: 12)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+        // One element: a row of eighteen unlabelled colours read aloud one at a time is noise, and
+        // the name is already on the picker beside it.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Preview of the \(scheme.name) colours")
+    }
+
+    /// System has no palette of its own — it *is* the current appearance — so the preview asks the
+    /// same colours the pane will, rather than showing a fixed light-mode copy of them.
+    private var foreground: NSColor {
+        scheme.followsSystemAppearance ? .textColor : scheme.foreground.nsColor
+    }
+
+    private var background: NSColor {
+        scheme.followsSystemAppearance ? .textBackgroundColor : scheme.background.nsColor
+    }
+
+    private var swatches: [NSColor] {
+        (scheme.followsSystemAppearance ? TerminalColorScheme.defaultAnsi : scheme.ansi).map(\.nsColor)
+    }
 }

@@ -146,7 +146,10 @@ struct PassthroughTerminalView: NSViewRepresentable {
         TerminalPaneView.hideReservedScroller(in: view)
         view.allowMouseReporting = true
         view.optionAsMetaKey = true
-        view.configureNativeColors()
+        // §4.6's surface takes the scheme too. It is one tmux client painting itself, so its colours
+        // are the user's terminal colours by exactly the same argument — a pane that changed scheme
+        // while the fallback did not would look like the fallback was somebody else's application.
+        TerminalPaneView.applyColors(theme.colorScheme, to: view)
 
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(NSAccessibility.Role.textArea)
