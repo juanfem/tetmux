@@ -35,6 +35,7 @@ public struct TerminalContainerView: View {
 
     @State private var containerSize: CGSize = .zero
     @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.colorSchemeContrast) private var contrast
 
     /// Pixel density of the screen the panes are on, for snapping the cell size to whole pixels the
     /// way SwiftTerm does. Wrong only on the first frame of a window dragged between displays of
@@ -294,19 +295,25 @@ public struct TerminalContainerView: View {
     /// sidebar avoids literal fills: the accent is the user's choice, and desaturating whatever they
     /// picked is right for a graphite or pink accent where a hardcoded blue is simply wrong. The dynamic
     /// provider re-resolves it per appearance, so dark mode gets the dark accent treated the same way.
-    private static let activePaneBorder = Color(nsColor: NSColor(name: nil) { appearance in
-        var resolved = NSColor.controlAccentColor
-        appearance.performAsCurrentDrawingAppearance {
-            guard let accent = NSColor.controlAccentColor.usingColorSpace(.sRGB) else { return }
-            resolved = NSColor(
-                hue: accent.hueComponent,
-                saturation: accent.saturationComponent * 0.30,
-                brightness: accent.brightnessComponent * 0.91,
-                alpha: 1
-            )
-        }
-        return resolved
-    })
+    ///
+    /// How much saturation comes out is `ContrastPolicy`'s call: at increased contrast the frame is
+    /// the *only* thing marking the focused pane, because the dimming of the others is gone.
+    private static func activePaneBorder(_ contrast: ColorSchemeContrast) -> Color {
+        let factor = ContrastPolicy.paneBorderSaturation(contrast)
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            var resolved = NSColor.controlAccentColor
+            appearance.performAsCurrentDrawingAppearance {
+                guard let accent = NSColor.controlAccentColor.usingColorSpace(.sRGB) else { return }
+                resolved = NSColor(
+                    hue: accent.hueComponent,
+                    saturation: accent.saturationComponent * factor,
+                    brightness: accent.brightnessComponent * 0.91,
+                    alpha: 1
+                )
+            }
+            return resolved
+        })
+    }
 
     private func pane(_ paneId: String, cols: Int, rows: Int) -> some View {
         let focused = focusedPaneId == paneId
@@ -325,8 +332,12 @@ public struct TerminalContainerView: View {
         )
         // Inactive panes step back so the focused one is findable without reading any of them. Kept
         // mild rather than dramatic: the other panes are usually still worth watching, which is the
-        // whole reason the window is split.
-        .opacity(split && !focused ? Self.inactivePaneOpacity : 1)
+        // whole reason the window is split. Not at all, at increased contrast — see `ContrastPolicy`.
+        .opacity(
+            split && !focused
+                ? ContrastPolicy.inactivePaneOpacity(contrast, standard: Self.inactivePaneOpacity)
+                : 1
+        )
         .overlay {
             // A frame on all four sides, not an edge between two panes.
             //
@@ -342,7 +353,10 @@ public struct TerminalContainerView: View {
             // screen.
             if split && focused {
                 RoundedRectangle(cornerRadius: 3)
-                    .strokeBorder(Self.activePaneBorder, lineWidth: 1)
+                    .strokeBorder(
+                        Self.activePaneBorder(contrast),
+                        lineWidth: ContrastPolicy.paneBorderWidth(contrast)
+                    )
                     .padding(1)
                     .allowsHitTesting(false)
             }

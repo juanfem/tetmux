@@ -34,6 +34,7 @@ struct LauncherOverlay: View {
     @FocusState private var isSearchFocused: Bool
     /// §7 — Reduce Motion. The list still scrolls to the selection; it just stops sliding there.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
 
     private var matches: [LauncherItem] {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
@@ -92,7 +93,7 @@ struct LauncherOverlay: View {
                 }
                 .frame(width: 560)
                 .background(RoundedRectangle(cornerRadius: 12).fill(.regularMaterial))
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.08)))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(ContrastPolicy.hairline(contrast)))
                 .shadow(radius: 24)
             }
             .onAppear {
@@ -125,10 +126,16 @@ struct LauncherOverlay: View {
             }
             Spacer()
         }
-        .opacity(item.isAvailable ? 1 : 0.55)
+        .opacity(item.isAvailable ? 1 : ContrastPolicy.recessedOpacity(contrast, standard: 0.55))
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.accentColor.opacity(0.22) : .clear))
+        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? ContrastPolicy.selectionFill(contrast) : .clear))
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(ContrastPolicy.selectionBorder(contrast), lineWidth: 1)
+            }
+        }
         .contentShape(Rectangle())
     }
 

@@ -27,6 +27,8 @@ struct SidebarView: View {
     /// exist on every host, so an unqualified key lights up the matching row on every other host too.
     @State private var hoveredRow: String?
 
+    @Environment(\.colorSchemeContrast) private var contrast
+
     /// Whether the pointer is over the footer's Add host row.
     @State private var addHostHovered = false
 
@@ -95,7 +97,7 @@ struct SidebarView: View {
         .buttonStyle(.plain)
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(addHostHovered ? Color.primary.opacity(0.07) : Color.clear)
+                .fill(addHostHovered ? ContrastPolicy.hoverFill(contrast) : Color.clear)
         )
         .padding(RowAction.edgeInset)
         .onHover { addHostHovered = $0 }
@@ -196,7 +198,7 @@ struct SidebarView: View {
         case .degraded: return .yellow
         case .failed: return .red
         case .connecting, .reconnecting: return .orange
-        case .disconnected: return .secondary.opacity(0.35)
+        case .disconnected: return .secondary.opacity(ContrastPolicy.recessedOpacity(contrast, standard: 0.35))
         }
     }
 
@@ -517,8 +519,15 @@ struct SidebarView: View {
         .padding(.vertical, 1)
         .background(
             RoundedRectangle(cornerRadius: 5)
-                .fill(isSelected ? Color.accentColor.opacity(0.20) : Color.clear)
+                .fill(isSelected ? ContrastPolicy.selectionFill(contrast) : Color.clear)
         )
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(ContrastPolicy.selectionBorder(contrast), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+        }
         .onHover { hovering(rowKey, $0) }
         .accessibilityLabel("Window \(label), \(window.paneCount) panes")
         .contextMenu {
@@ -598,7 +607,7 @@ private enum RowAction {
     /// row's accent tint it is that tint a comparable step darker, which is what the spec asks for
     /// there. A literal pair of hex fills would have to be chosen against a background this control
     /// cannot see, and would invert wrongly in dark mode besides.
-    static let hoverFill = Color.primary.opacity(0.10)
+    static func hoverFill(_ contrast: ColorSchemeContrast) -> Color { ContrastPolicy.hoverFill(contrast) }
 }
 
 /// The line weight and slot width shared by everything the sidebar *draws* rather than sets in a font.
@@ -638,6 +647,7 @@ private struct RowButton: View {
     /// a button from appearing abruptly under the pointer; with the preference on, appearing abruptly
     /// is what the user has asked for.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
 
     @State private var isHovered = false
 
@@ -648,7 +658,7 @@ private struct RowButton: View {
                 .frame(width: RowAction.size, height: RowAction.size)
                 .background(
                     RoundedRectangle(cornerRadius: RowAction.radius)
-                        .fill(isHovered ? RowAction.hoverFill : Color.clear)
+                        .fill(isHovered ? RowAction.hoverFill(contrast) : Color.clear)
                 )
                 .contentShape(RoundedRectangle(cornerRadius: RowAction.radius))
         }
@@ -763,6 +773,8 @@ private struct WindowPaneIcon: View {
     /// `nil` when the window has a single pane.
     let split: SplitDirection?
 
+    @Environment(\.colorSchemeContrast) private var contrast
+
     var body: some View {
         RoundedRectangle(cornerRadius: 2)
             .strokeBorder(lineWidth: TreeIcon.stroke)
@@ -780,7 +792,9 @@ private struct WindowPaneIcon: View {
                             // Weighted by eye at 13px rather than picked as a round number: at 0.22
                             // the fill was legible when magnified and very nearly absent at the size
                             // it is actually drawn, which is the failure this change exists to undo.
-                            .fill(.primary.opacity(0.32))
+                            // The fill *is* the split/not-split distinction, so Increase Contrast
+                            // takes it further still rather than leaving the two icons alike.
+                            .fill(.primary.opacity(contrast == .increased ? 0.60 : 0.32))
                             .frame(
                                 width: split == .leftRight ? geometry.size.width / 2 : geometry.size.width,
                                 height: split == .leftRight ? geometry.size.height : geometry.size.height / 2
@@ -815,6 +829,7 @@ private struct HeaderButton<Icon: View>: View {
     let action: () -> Void
     @ViewBuilder let icon: () -> Icon
 
+    @Environment(\.colorSchemeContrast) private var contrast
     @State private var isHovered = false
 
     var body: some View {
@@ -823,7 +838,7 @@ private struct HeaderButton<Icon: View>: View {
                 .frame(width: RowAction.size, height: RowAction.size)
                 .background(
                     RoundedRectangle(cornerRadius: RowAction.radius)
-                        .fill(isHovered ? Color.primary.opacity(0.09) : Color.clear)
+                        .fill(isHovered ? ContrastPolicy.hoverFill(contrast) : Color.clear)
                 )
                 .contentShape(RoundedRectangle(cornerRadius: RowAction.radius))
         }

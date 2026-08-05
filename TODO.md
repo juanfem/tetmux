@@ -4,7 +4,7 @@ From the audit of 2026-08-04. Ordered by what actually breaks for a user, not by
 Each item names the evidence, because the ones that matter here are all silent failures — nothing
 in this list announces itself, which is why they survived this long.
 
-**33 done, 5 partial, 9 open.**
+**34 done, 4 partial, 9 open.**
 
 References on **done** items are as they were when the audit ran, so they point into the commit
 before each fix rather than into current `main` — they are kept because the evidence is the useful
@@ -22,8 +22,8 @@ What is left falls into three groups, and they are not equally blocked:
   tab reordering and `move-window`, window/session state restoration, listing a host's sessions
   without attaching (F4.4), and the §8 test infrastructure — a containerised sshd matrix, chaos
   tests, a full geometry suite, a rendering corpus.
-- **Small and unblocked.** `ssh -G` resolution, Increase Contrast, and a UI for `newSession`'s start
-  directory.
+- **Small and unblocked.** `ssh -G` resolution, `differentiateWithoutColor` on the two indicators
+  that speak in hue alone, and a UI for `newSession`'s start directory.
 
 ## Protocol correctness
 
@@ -258,12 +258,18 @@ What is left falls into three groups, and they are not equally blocked:
   ⌘-click opened `https://example.com/from-a-pane` in the browser, the menu found the URL under the
   pointer, and a middle click delivered its clipboard to the prompt.*
 
-- [~] Reduce Motion and Increase Contrast are not honoured; animations are unconditional.
+- [x] Reduce Motion and Increase Contrast are not honoured; animations are unconditional.
   `Sources/tetmuxUI/LauncherOverlay.swift:36`, `:87`
-  *Reduce Motion is honoured now at all three animation sites — the launcher's scroll, the tab
-  strip's scroll-to-selection, and the sidebar's row-action reveal — each keeping the outcome and
-  dropping the movement. Increase Contrast is still unhandled: nothing reads
-  `accessibilityDisplayShouldIncreaseContrast` or `differentiateWithoutColor`.*
+  *Reduce Motion is honoured at all three animation sites — the launcher's scroll, the tab strip's
+  scroll-to-selection, and the sidebar's row-action reveal — each keeping the outcome and dropping
+  the movement. Increase Contrast is now `ContrastPolicy`, one place that every site asks rather than
+  a `contrast == .increased ? a : b` per call site: selection fills and hover washes get stronger,
+  selection gains a border, recessed text comes back toward legible without reaching 1, and an
+  unfocused pane stops being dimmed at all — dimming a pane is dimming terminal text, and the frame
+  around the focused one takes over the job at full saturation and double the width. The tests assert
+  direction rather than numbers, which is what stops a later site from taking the standard value in
+  both branches. `differentiateWithoutColor` is still unread: the sidebar's connection rail and the
+  status bar's RTT dot say their state in hue alone.*
 
 ## Requirements shipped as stubs
 

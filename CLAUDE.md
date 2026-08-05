@@ -100,6 +100,7 @@ Where things are, since the invariants below name symbols without saying which f
 | `SidebarView.swift` · `StatusBarView.swift` | Host/session/window tree (drawn glyphs); F4.28 footer. |
 | `LauncherOverlay.swift` | ⌘K fuzzy launcher over hosts, sessions and windows (F4.25/F4.26). |
 | `SettingsView.swift` · `KeymapPolicy.swift` | The `Settings` scene; shortcut table. |
+| `ContrastPolicy.swift` | Increase Contrast, resolved once for every site that honours it. |
 | `DestructiveActionModal.swift` | The F4.10 confirmation, which says *why* the close is a kill. |
 | `BellNotifier.swift` · `KeychainStore.swift` | F4.31 background bells; per-host passwords. |
 
@@ -704,7 +705,19 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   different Wi-Fi, which is exactly when a host that was unreachable becomes reachable again.
 - **Reduce Motion is honoured at all three animation sites** — the launcher's scroll, the tab strip's
   scroll-to-selection, and the sidebar's row-action reveal — each keeping the outcome and dropping the
-  movement. New animation belongs behind the same check. Increase Contrast is not handled yet.
+  movement. New animation belongs behind the same check.
+- **Increase Contrast is `ContrastPolicy`, and new sites ask it rather than deciding for themselves.**
+  Views read `@Environment(\.colorSchemeContrast)` and pass it in; the alternative is a
+  `contrast == .increased ? a : b` at a dozen sites with a dozen sets of numbers, drifting until a
+  selected row and a selected tab disagree about how selected they look. Every rule is the same kind
+  of rule — a signal carried by a faint wash becomes one carried by an obvious one — so nothing
+  changes shape, appears, or moves: the user asked to see the application, not for a different one.
+  The one that is not simple amplification is the pane: an unfocused pane stops being dimmed *at
+  all*, because dimming a pane is dimming terminal text, and the frame around the focused one takes
+  over the job at full accent saturation and double the width. The tests assert **direction**, not
+  numbers — the failure they exist to catch is a later site that takes the standard value in both
+  branches, which leaves the preference switched on and doing nothing. `differentiateWithoutColor` is
+  still unread; the sidebar's connection rail and the status bar's RTT dot speak in hue alone.
 
 ## Testing
 

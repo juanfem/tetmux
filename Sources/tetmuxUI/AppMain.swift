@@ -518,6 +518,7 @@ private struct WindowTab: View {
     let openWindow: OpenWindowAction
 
     @State private var isHovering = false
+    @Environment(\.colorSchemeContrast) private var contrast
     /// ⌥ skips the close confirmation here for the same reason it does in the tree — this is the same
     /// action on the same window, and a modifier that worked in one of the two places would read as a
     /// bug in the other.
@@ -608,8 +609,15 @@ private struct WindowTab: View {
         .padding(.vertical, 4)
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected ? Color.accentColor.opacity(0.22) : Color.clear)
+                .fill(isSelected ? ContrastPolicy.selectionFill(contrast) : Color.clear)
         )
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(ContrastPolicy.selectionBorder(contrast), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+        }
         .onHover { isHovering = $0 }
         .help(window.displayLabel)
         .accessibilityLabel("Window \(window.displayLabel), \(window.paneCount) panes")
@@ -641,6 +649,7 @@ private struct WindowTab: View {
 struct ConnectionBanner: View {
     let state: ConnectionState
     let onReconnect: () -> Void
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         if let message {
@@ -670,7 +679,7 @@ struct ConnectionBanner: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(Color.orange.opacity(0.14))
+                .background(ContrastPolicy.bannerFill(contrast, .orange))
                 Divider()
             }
             .accessibilityElement(children: .combine)
@@ -715,6 +724,7 @@ struct ConnectionBanner: View {
 struct NotAttachedBanner: View {
     let host: HostState
     let session: TmuxSession
+    @Environment(\.colorSchemeContrast) private var contrast
 
     /// `session_attached` counts every client of the server, including terminals elsewhere on the
     /// machine that have nothing to do with this app, so what *tetmux* is attached to is the only
@@ -737,7 +747,7 @@ struct NotAttachedBanner: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(Color.orange.opacity(0.14))
+                .background(ContrastPolicy.bannerFill(contrast, .orange))
                 Divider()
             }
             .accessibilityElement(children: .combine)
@@ -754,6 +764,7 @@ struct NotAttachedBanner: View {
 struct CommandFailureBanner: View {
     let failure: CommandFailure?
     let onDismiss: () -> Void
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         if let failure {
@@ -784,7 +795,7 @@ struct CommandFailureBanner: View {
                 .textSelection(.enabled)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(Color.red.opacity(0.12))
+                .background(ContrastPolicy.bannerFill(contrast, .red))
                 Divider()
             }
             .accessibilityElement(children: .combine)
