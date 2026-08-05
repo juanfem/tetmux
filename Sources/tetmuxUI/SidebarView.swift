@@ -918,37 +918,60 @@ private struct SessionStackIcon: View {
     }
 }
 
-/// A window that is in more than one session: the session glyph, halved.
+/// A window that is in more than one session: two interlocking links.
 ///
-/// Deliberately built from `SessionStackIcon`'s vocabulary rather than a chain or a link symbol. The
+/// This started as a smaller `SessionStackIcon` — two offset rectangles — on the reasoning that the
 /// tree already says "layered rectangles = a thing containing windows", so two of them beside a count
-/// reads as "this window is in that many of those" with nothing new to learn — where a chain link
-/// would be a fresh glyph meaning something the tree has no other word for. Drawn rather than an SF
-/// Symbol for the reason every glyph here is: `link` is stroked to its own weight and would sit
-/// heavier beside the pane icon at 13px than either of them is meant to.
+/// would read as "in that many of those" with nothing new to learn. That reasoning was wrong twice
+/// over. It put a near-copy of the session glyph two rows below the session glyph, at a similar size,
+/// so the similarity that was meant to carry the meaning mostly read as a stray icon. And it named
+/// the wrong thing: the badge's job is "this window is not an ordinary one, and closing it behaves
+/// differently", which is a statement about the *relationship*, not about the unit being counted. A
+/// chain says that and needs no learning; the count and the tooltip say how many and which.
 ///
-/// No clearance cut, unlike `SessionStackIcon`: at this size the two rules are already a rule apart,
-/// and the erase is what that icon needs to survive being drawn much larger on a tinted row.
+/// Drawn rather than SF Symbols' `link` for the reason in `TreeIcon.stroke`: the tree keeps one line
+/// weight from a row's leading glyph to its trailing action, and SF's strokes are tuned per symbol
+/// and come out heavier than anything drawn beside them.
 private struct LinkedSessionsIcon: View {
-    private static let rect = CGSize(width: 7, height: 5)
-    private static let offset: CGFloat = 2.5
+    /// One link. Two of them, offset along the diagonal so they overlap by about a third.
+    private static let link = CGSize(width: 8, height: 5)
+    private static let shift: CGFloat = 2.6
+    private static let box: CGFloat = 11
+    /// Clearance cut around the front link, so the rear one visibly passes *through* it.
+    ///
+    /// The same trick `SessionStackIcon` uses and for the same reason: drawn as two plain outlines
+    /// the overlap is both strokes on top of each other, which at this size is a dense crossing
+    /// rather than a chain — measured by magnifying a screenshot of the real row. Erasing to
+    /// transparent rather than filling with a background colour, because a sidebar row has no single
+    /// background: it is the material, or the hover wash, or the selection tint over either. The
+    /// eraser must be an explicitly *opaque* colour — `destinationOut` removes destination alpha in
+    /// proportion to the source's, so an eraser inheriting the translucent ambient style leaves a
+    /// half-erased smear instead of a gap.
+    private static let clearance: CGFloat = 1.0
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            outline
-            outline.offset(x: Self.offset, y: Self.offset)
+        ZStack {
+            outline.offset(x: -Self.shift)
+            Capsule()
+                .fill(Color.black)
+                .frame(
+                    width: Self.link.width + Self.clearance * 2,
+                    height: Self.link.height + Self.clearance * 2
+                )
+                .offset(x: Self.shift)
+                .blendMode(.destinationOut)
         }
-        .frame(
-            width: Self.rect.width + Self.offset,
-            height: Self.rect.height + Self.offset,
-            alignment: .topLeading
-        )
+        .compositingGroup()
+        .overlay { outline.offset(x: Self.shift) }
+        // The whole pair turned, rather than each link: rotating the stack keeps the two exactly
+        // collinear, which is what makes them read as one chain rather than as two tilted pills.
+        .rotationEffect(.degrees(-45))
+        .frame(width: Self.box, height: Self.box)
     }
 
     private var outline: some View {
-        RoundedRectangle(cornerRadius: 1)
-            .strokeBorder(lineWidth: TreeIcon.stroke)
-            .frame(width: Self.rect.width, height: Self.rect.height)
+        Capsule().strokeBorder(lineWidth: TreeIcon.stroke)
+            .frame(width: Self.link.width, height: Self.link.height)
     }
 }
 

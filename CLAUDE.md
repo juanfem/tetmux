@@ -327,6 +327,15 @@ pointer is on because that is what reveals a row's buttons; a right-click is alw
 pointer arriving. An unresolved key falls back to the host. New sidebar rows add a case to
 `RowSubject`, never a `.contextMenu` of their own.
 
+**A new glyph is not free just because the tree has a shape that could be reused.** The linked-window
+badge was first drawn as a smaller `SessionStackIcon`, reasoning that the tree already says "layered
+rectangles = a thing containing windows" so two of them beside a count would read as "in that many of
+those". It put a near-copy of the session glyph two rows below the session glyph at a similar size,
+and the similarity that was meant to carry the meaning read as a stray icon instead. It also named
+the wrong thing: the badge's job is "this window is not an ordinary one", which is a claim about the
+*relationship*, and the shape being reused names the unit. A chain link says the former with nothing
+to learn. Reuse the vocabulary when the meaning is the same, not when the shapes are convenient.
+
 **The sidebar's glyphs are drawn, not set in SF Symbols, and its gaps are cut rather than filled.**
 Two separate reasons, both of which look like fussiness until you try the obvious thing. SF Symbols
 strokes are tuned per symbol, so `xmark` beside `plus` is optically heavier at every point size and
@@ -469,7 +478,7 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   `AppModel.closeOutcome` is the single decision and both the action and the tooltips ask it, so a
   control cannot promise something the click will not do. That matters most with ⌥ held, which skips
   the confirmation that would otherwise be the first time anyone is told this close is a kill. The
-  marker is a badge — the session glyph, halved, with a count — on the tab and the tree, and the
+  marker is a badge — a drawn chain link and a count — on the tab and the tree, and the
   words are in `help` and the accessibility label, which names the other sessions rather than
   counting them ("also in beta" is checkable; "linked into 3 sessions" is a number to go and
   resolve). On a tab the words are the *whole* answer: the strip shows one session's windows, so
