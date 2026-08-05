@@ -316,6 +316,17 @@ life, and does it silently, because keystrokes still reach tmux and only the out
 inside `List` rows, and giving the `List` a `selection:` binding makes AppKit's selection gesture
 claim every click. Either mistake leaves the tree looking fine and completely unclickable.
 
+**A host and everything under it is one `List` row, so it gets one context menu.** The rail spans the
+group, which is what makes it cost no row of its own — but AppKit resolves a context menu at the
+*cell*, so several nested `.contextMenu`s inside one group collapse to one, and the survivor was the
+host's. Right-clicking a session or a window row showed Disconnect and Detach Other Clients, and
+Rename Session, Rename Window, Kill Session and Close Window were unreachable from the tree for as
+long as the group has been a single row — silently, because a menu did appear. The menu is therefore
+one modifier on `hostGroup` that dispatches on `hoveredRow`, which already knows which row the
+pointer is on because that is what reveals a row's buttons; a right-click is always preceded by the
+pointer arriving. An unresolved key falls back to the host. New sidebar rows add a case to
+`RowSubject`, never a `.contextMenu` of their own.
+
 **The sidebar's glyphs are drawn, not set in SF Symbols, and its gaps are cut rather than filled.**
 Two separate reasons, both of which look like fussiness until you try the obvious thing. SF Symbols
 strokes are tuned per symbol, so `xmark` beside `plus` is optically heavier at every point size and

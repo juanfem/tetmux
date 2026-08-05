@@ -190,6 +190,50 @@ struct SidebarView: View {
             }
         }
         .fixedSize(horizontal: false, vertical: true)
+        // One context menu for the whole group, dispatched to the row the pointer is on.
+        //
+        // Not one per row, which is what this was and what did not work: the host, its sessions and
+        // its windows are a *single* `List` row (see the note above), and AppKit resolves a context
+        // menu at the cell. Several nested `.contextMenu`s inside one cell collapse to one, and the
+        // one that survived was the host's — so right-clicking a session or a window row showed
+        // Disconnect and Detach Other Clients, and Rename Session, Rename Window and the rest were
+        // unreachable from the tree for as long as the group has been a single row.
+        //
+        // `hoveredRow` already tracks which row the pointer is on, because that is what reveals a
+        // row's buttons; a right-click is always preceded by the pointer arriving, so it is current
+        // by the time the menu is built. Anything it cannot resolve falls back to the host, which is
+        // both the enclosing thing and what used to happen unconditionally.
+        .contextMenu { menu(for: host) }
+    }
+
+    /// What the pointer is on, for the group-level menu above.
+    private enum RowSubject {
+        case host
+        case session(TmuxSession)
+        case window(TmuxSession, TmuxWindow)
+    }
+
+    private func hoveredSubject(in host: HostState) -> RowSubject {
+        guard let hoveredRow else { return .host }
+        for session in host.sessions {
+            if hoveredRow == key(host, session.id) { return .session(session) }
+            for window in session.windows where hoveredRow == key(host, window.id) {
+                return .window(session, window)
+            }
+        }
+        return .host
+    }
+
+    @ViewBuilder
+    private func menu(for host: HostState) -> some View {
+        switch hoveredSubject(in: host) {
+        case .host:
+            hostMenu(host)
+        case .session(let session):
+            sessionMenu(host: host, session: session)
+        case .window(let session, let window):
+            windowMenu(host: host, session: session, window: window)
+        }
     }
 
     /// The rail's hue, and the one colour-carried signal in the app that needs no
@@ -291,7 +335,11 @@ struct SidebarView: View {
             "Host \(host.config.name), \(host.connectionState.accessibilityDescription), "
                 + "\(host.sessions.count) sessions"
         )
-        .contextMenu {
+    }
+
+    @ViewBuilder
+    private func hostMenu(_ host: HostState) -> some View {
+        Group {
             // Expanding or collapsing one host's sessions used to be two of the four buttons crowded
             // onto the row's right edge. The row now carries only the two actions the spec assigns to
             // a host, so these keep a home here rather than disappearing.
@@ -437,7 +485,11 @@ struct SidebarView: View {
             "Session \(session.name), \(session.windows.count) windows, "
                 + (host.isLive(session.id) ? "attached" : "not attached")
         )
-        .contextMenu {
+    }
+
+    @ViewBuilder
+    private func sessionMenu(host: HostState, session: TmuxSession) -> some View {
+        Group {
             Button("Rename Session…") {
                 model.requestRenameSession(in: state, hostId: host.id, sessionId: session.id)
             }
@@ -547,7 +599,11 @@ struct SidebarView: View {
         }
         .onHover { hovering(rowKey, $0) }
         .accessibilityLabel("Window \(label), \(window.paneCount) panes")
-        .contextMenu {
+    }
+
+    @ViewBuilder
+    private func windowMenu(host: HostState, session: TmuxSession, window: TmuxWindow) -> some View {
+        Group {
             Button("Rename Window…") {
                 model.requestRenameWindow(in: state, hostId: host.id, windowId: window.id)
             }
