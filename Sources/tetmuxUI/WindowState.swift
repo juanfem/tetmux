@@ -16,8 +16,23 @@ public struct WindowSeed: Equatable, Sendable {
     public var sessionId: String?
     /// `@id`
     public var windowId: String?
+    /// What the new window's tree should do, which is not always "nothing".
+    ///
+    /// Three states rather than a `collapseSidebar` flag, because there are genuinely three answers.
+    /// A window opened *onto a session* hides the tree (item 12) — it has one thing to show and the
+    /// tree is in the way. A window opened to *navigate from* — the Dock's New Window — must show it,
+    /// and cannot rely on `.automatic` to decide, since that is AppKit's judgement and not an
+    /// instruction. And ⌘N asks for neither and leaves the window's own default alone.
+    public enum SidebarIntent: Equatable, Sendable {
+        case unchanged
+        case collapsed
+        case shown
+    }
+
+    public var sidebar: SidebarIntent
+
     /// Item 12 — a window opened onto one session does not need the tree in front of it.
-    public var collapseSidebar: Bool
+    public var collapseSidebar: Bool { sidebar == .collapsed }
 
     public init(
         hostId: String? = nil,
@@ -25,10 +40,22 @@ public struct WindowSeed: Equatable, Sendable {
         windowId: String? = nil,
         collapseSidebar: Bool = false
     ) {
+        self.init(
+            hostId: hostId, sessionId: sessionId, windowId: windowId,
+            sidebar: collapseSidebar ? .collapsed : .unchanged
+        )
+    }
+
+    public init(
+        hostId: String? = nil,
+        sessionId: String? = nil,
+        windowId: String? = nil,
+        sidebar: SidebarIntent
+    ) {
         self.hostId = hostId
         self.sessionId = sessionId
         self.windowId = windowId
-        self.collapseSidebar = collapseSidebar
+        self.sidebar = sidebar
     }
 }
 
@@ -96,7 +123,11 @@ public final class WindowState: Identifiable {
         if let hostId = seed.hostId { selectedHostId = hostId }
         if let sessionId = seed.sessionId { selectedSessionId = sessionId }
         if let windowId = seed.windowId { selectedWindowId = windowId }
-        if seed.collapseSidebar { sidebarVisibility = .detailOnly }
+        switch seed.sidebar {
+        case .unchanged: break
+        case .collapsed: sidebarVisibility = .detailOnly
+        case .shown: sidebarVisibility = .all
+        }
     }
 
     // MARK: - Derived selection

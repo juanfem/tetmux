@@ -1003,10 +1003,16 @@ public final class AppModel {
     /// resolves against the scene graph rather than the window it was read in.
     @ObservationIgnored public var openAppWindow: (() -> Void)?
 
-    /// A plain new window, for callers outside SwiftUI — the Dock menu is built by AppKit and has no
-    /// environment of its own to read `openWindow` from.
+    /// A new window to navigate from, for callers outside SwiftUI — the Dock menu is built by AppKit
+    /// and has no environment of its own to read `openWindow` from.
+    ///
+    /// Seeded to *show* the tree rather than left at `.automatic`. Reached from the Dock, which is
+    /// where someone goes when they have no window in front of them, so the window that appears has
+    /// to be one they can find their way around from — and `.automatic` is AppKit deciding, which is
+    /// not the same as asking. The selection is deliberately left to `reconcile`: the first host and
+    /// what it has active, which is the state the app starts in.
     public func openNewAppWindow() {
-        openAppWindow?()
+        openWindow(WindowSeed(sidebar: .shown))
     }
 
     /// Asks for a new window showing `seed`. The request is picked up by whichever window is on screen.

@@ -22,6 +22,17 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    /// The Dock menu tells the local host from the remote ones by `isLocal`, so the tests need a host
+    /// that is genuinely not local rather than one with a different id.
+    private func remoteHost(id: String, sessions: [TmuxSession]) -> HostState {
+        HostState(
+            config: HostConfig(id: id, name: id, isLocal: false),
+            connectionState: .connected,
+            sessions: sessions,
+            activeSessionId: sessions.first?.id
+        )
+    }
+
     // MARK: - Closing a window (F4.9)
 
     /// A window linked to several sessions can simply leave this one, so closing it asks nothing:
@@ -500,6 +511,72 @@ final class AppModelTests: XCTestCase {
         publish(model, [host(sessions: [grown])])
 
         XCTAssertEqual(state.selectedWindowId, "@2", "selected the active window instead of the new one")
+    }
+
+    // MARK: - The Dock menu
+    //
+    // The Dock is the app's only surface while it has no window and is not frontmost, and it used to
+    // offer New Window alone. A window opened that way reconciles to the first host's *active*
+    // session and window, which is very often the window already on screen — so the one item the Dock
+    // had mostly produced a second view of what the user was already looking at.
+
+    /// New Window is now a window to navigate *from*, which means the tree has to be showing.
+    ///
+    /// `.automatic` is not good enough and is what this replaces: it is AppKit deciding, and someone
+    /// reaching for the Dock icon has no window in front of them and needs one they can find their
+    /// way around from.
+    func testTheDocksNewWindowAsksForOneWithTheTreeShowing() {
+        let model = AppModel()
+        model.hosts = [twoSessionHost]
+        _ = openWindows(model, 1)
+
+        model.openNewAppWindow()
+
+        XCTAssertEqual(model.requestedWindow?.sidebar, .shown)
+        XCTAssertNil(model.requestedWindow?.sessionId, "the selection is reconcile's job, not the seed's")
+    }
+
+    /// The seed can say all three things, which a `collapseSidebar` flag could not: a window opened
+    /// onto one session hides the tree, the Dock's New Window shows it, and ⌘N asks for neither.
+    func testASeedCanShowHideOrLeaveTheTreeAlone() {
+        let state = WindowState()
+        state.sidebarVisibility = .automatic
+
+        state.apply(WindowSeed(sidebar: .unchanged))
+        XCTAssertEqual(state.sidebarVisibility, .automatic, "no instruction must not become one")
+
+        state.apply(WindowSeed(sidebar: .collapsed))
+        XCTAssertEqual(state.sidebarVisibility, .detailOnly)
+
+        state.apply(WindowSeed(sidebar: .shown))
+        XCTAssertEqual(state.sidebarVisibility, .all, "a window opened to navigate from must show the tree")
+    }
+
+    /// New Local Session and each New Remote Session row are the same action with a different host,
+    /// and both are `preferNewWindow`: the Dock is reached from outside the app, so there is no
+    /// current window the user meant to retarget — often no window at all.
+    func testADockSessionItemOpensItsOwnWindowForWhicheverHostItNames() {
+        let model = AppModel()
+        model.hosts = [host(sessions: []), remoteHost(id: "remote-1", sessions: [])]
+        let state = WindowState()
+        model.registerWindow(state)
+
+        model.createSessionWithDefaultName(hostId: "remote-1", revealIn: nil, preferNewWindow: true)
+
+        publish(model, [
+            host(sessions: []),
+            remoteHost(id: "remote-1", sessions: [
+                TmuxSession(id: "$3", name: "tetmux_1", windows: [window("@4", panes: ["%4"])], isAttached: true),
+            ]),
+        ])
+
+        XCTAssertEqual(model.requestedWindow?.hostId, "remote-1")
+        XCTAssertEqual(model.requestedWindow?.sessionId, "$3")
+        XCTAssertEqual(model.requestedWindow?.sidebar, .collapsed, "it has one thing to show")
+        XCTAssertNil(
+            state.selectedSessionId,
+            "the open window must not be retargeted — the Dock did not mean that window"
+        )
     }
 
     /// ⌥ on the menu bar's New Session means the session gets a window of its own. The window cannot

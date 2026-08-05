@@ -207,20 +207,85 @@ public final class TetmuxAppDelegate: NSObject, NSApplicationDelegate {
     /// Dock's own menu has nothing in it that brings a window back. Sessions are deliberately not
     /// listed here; that is the menu bar extra's job, and it can say what ⌥ would do, which a Dock
     /// menu cannot.
+    /// The Dock menu, which is the app's only surface while it has no windows and is not frontmost.
+    ///
+    /// Rebuilt on every click rather than kept: AppKit asks for it each time, and the host list is
+    /// live — a remote connected since the last look has to be in it.
+    ///
+    /// It used to offer New Window alone, and a window opened that way reconciles to the first host's
+    /// *active* session and window — which is very often the window already on screen, so the item
+    /// mostly produced a second view of what the user was already looking at. The two session items
+    /// are the fix: they are the reason to reach for the Dock icon at all, and neither can be a plain
+    /// "open a window" because control mode's `new-session` answers with no id — the window can only
+    /// be opened once the topology says what it should show, which is what `RevealRequest` is for.
     public func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
-        let item = NSMenuItem(
+
+        let newWindow = NSMenuItem(
             title: ApplicationShortcut.newAppWindow.title,
             action: #selector(openNewAppWindow),
             keyEquivalent: ""
         )
-        item.target = self
-        menu.addItem(item)
+        newWindow.target = self
+        menu.addItem(newWindow)
+
+        menu.addItem(.separator())
+
+        let hosts = model?.hosts ?? []
+
+        // No action rather than `isEnabled = false` when there is no local host to act on: the menu
+        // auto-enables, so a manually cleared flag is overwritten at display time while an item with
+        // no action is greyed out for us. (It cannot happen — `loadHosts` synthesises the local host
+        // — but an item whose action creates a session on `nil` is not the way to say so.)
+        let localId = hosts.first { $0.config.isLocal }?.id
+        let local = NSMenuItem(
+            title: "New Local Session",
+            action: localId == nil ? nil : #selector(newSessionOnHost(_:)),
+            keyEquivalent: ""
+        )
+        local.target = self
+        local.representedObject = localId
+        menu.addItem(local)
+
+        let remotes = hosts.filter { !$0.config.isLocal }
+        let remoteParent = NSMenuItem(title: "New Remote Session", action: nil, keyEquivalent: "")
+        let remoteMenu = NSMenu()
+        if remotes.isEmpty {
+            // A disabled row rather than an empty submenu, which reads as broken.
+            let empty = NSMenuItem(title: "No remote hosts", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            remoteMenu.addItem(empty)
+        } else {
+            for host in remotes {
+                let item = NSMenuItem(
+                    title: host.config.name,
+                    action: #selector(newSessionOnHost(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = host.id
+                remoteMenu.addItem(item)
+            }
+        }
+        remoteParent.submenu = remoteMenu
+        menu.addItem(remoteParent)
+
         return menu
     }
 
     @objc private func openNewAppWindow() {
         model?.openNewAppWindow()
+    }
+
+    /// One item for the local host and one per remote, distinguished by `representedObject`.
+    ///
+    /// A window of its own every time — `preferNewWindow` — because the Dock is reached from outside
+    /// the app, so there is no "current window" the user meant to retarget, and often no window at
+    /// all. A host that is not connected is connected first: `createSession` already branches to
+    /// `connectHost` for that, which is the same path the sidebar's `+` takes.
+    @objc private func newSessionOnHost(_ sender: NSMenuItem) {
+        guard let hostId = sender.representedObject as? String else { return }
+        model?.createSessionWithDefaultName(hostId: hostId, revealIn: nil, preferNewWindow: true)
     }
 }
 

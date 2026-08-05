@@ -410,7 +410,11 @@ at all); localhost auto-connecting at launch; the Dock menu's New Window item; a
 on a collapsed host.
 
 Since the audit, and not on its list: the reserved-scroller gutter that made every full-width program
-wrap a few columns early, and the README rewritten against what the code actually does.
+wrap a few columns early, the README rewritten against what the code actually does, and the Dock menu
+— which offered New Window alone, and a window opened that way reconciles to the first host's
+*active* session and window, so the only thing the Dock could do was make a second view of whatever
+was already on screen. It now has New Window (tree shown, to navigate from), New Local Session, and
+New Remote Session with one row per remote.
 
 Two more found while fixing other things, both in the same arithmetic and both worth naming because
 neither announces itself:

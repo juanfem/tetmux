@@ -669,6 +669,20 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   existing one forward instead of making a second, which is right for "show me this session" and wrong
   for ⌘N. And SwiftUI cannot bring a *particular* window forward at all, so `WindowAccessor` captures
   each window's `NSWindow` — that is the only way `showSession` can raise the right one.
+- **The Dock menu is three items, and two of them are the point.** It is the app's only surface while
+  it has no window and is not frontmost, and it used to offer New Window alone — which reconciles to
+  the first host's *active* session and window, i.e. very often the window already on screen, so the
+  one thing the Dock could do was make a second view of what you were already looking at. **New
+  Window** now seeds `sidebar: .shown`: someone reaching for the Dock has nothing in front of them
+  and needs a window to navigate *from*, and `.automatic` is AppKit deciding rather than an
+  instruction. **New Local Session** and **New Remote Session ▸ host** create a session and open a
+  window onto it with the tree collapsed. Neither can simply open a window — control mode's
+  `new-session` answers with no id, so the window can only be opened once the topology says what it
+  should show, which is exactly what `RevealRequest` exists for; they go through
+  `createSessionWithDefaultName(preferNewWindow:)` like the menu bar's ⌥. The menu is rebuilt on
+  every click because AppKit asks each time and the host list is live. An item with nothing to act on
+  gets `action: nil` rather than `isEnabled = false` — the menu auto-enables, so a cleared flag is
+  overwritten at display time while an item with no action is greyed out for us.
 - **With every window closed there is nobody to claim a request, so the model performs it itself.**
   `requestedWindow` is only ever observed from inside a window, and the app deliberately outlives its
   last one (`applicationShouldTerminateAfterLastWindowClosed` is `false`, because the menu bar extra
