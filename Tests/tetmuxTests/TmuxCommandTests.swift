@@ -470,7 +470,7 @@ final class TmuxWindowTests: XCTestCase {
         window.apply(layoutString: "bb11,80x24,0,0{40x24,0,0,20,39x24,41,0,21}")
         window.activePaneId = "%21"
 
-        window.apply(layoutString: "5967,80x24,0,0,20")
+        window.apply(layoutString: "d95f,80x24,0,0,20")
 
         XCTAssertEqual(window.panes.map(\.id), ["%20"])
         XCTAssertEqual(window.activePaneId, "%20", "focus must move off the pane that went away")
@@ -481,5 +481,60 @@ final class TmuxWindowTests: XCTestCase {
         window.apply(layoutString: "not a layout")
         XCTAssertNil(window.layoutTree)
         XCTAssertEqual(window.preferredPaneId, "%5", "the surface still has a pane to bind to")
+    }
+
+    /// R3.5, and the reason it can be switched on at the production callers: a layout whose checksum
+    /// does not match its body is not applied *at all* — the window keeps the last one that did, so
+    /// the worst case is a stale grid rather than the blank window a `nil` tree renders.
+    func testALayoutWhoseChecksumDoesNotMatchIsRejectedAndTheOldOneSurvives() {
+        var window = TmuxWindow(id: "@1", name: "zsh")
+        let good = "bb11,80x24,0,0{40x24,0,0,20,39x24,41,0,21}"
+        XCTAssertEqual(window.apply(layoutString: good), .applied)
+
+        // Same body as the single-pane layout above, with one hex digit of its prefix changed.
+        let outcome = window.apply(layoutString: "e95f,80x24,0,0,20")
+        guard case .rejected = outcome else {
+            return XCTFail("expected .rejected, got \(outcome)")
+        }
+        XCTAssertEqual(window.layoutString, good, "the string and the tree must not come apart")
+        XCTAssertEqual(window.panes.map(\.id), ["%20", "%21"])
+        XCTAssertEqual(window.layoutTree?.paneIds, ["%20", "%21"])
+    }
+
+    /// The two fields describe one window and arrive in one notification, so a visible layout that
+    /// fails to parse must take the whole update down with it. Applying the full layout alone would
+    /// set `isZoomed` with no visible tree, and `renderTree` would fall back to the unzoomed grid —
+    /// which is the wrapped-and-truncated failure the visible layout exists to prevent.
+    func testAnUnparseableVisibleLayoutRejectsTheWholeUpdate() {
+        var window = TmuxWindow(id: "@1", name: "zsh")
+        window.apply(layoutString: "bb11,80x24,0,0{40x24,0,0,20,39x24,41,0,21}")
+
+        let outcome = window.apply(
+            layoutString: "bb11,80x24,0,0{40x24,0,0,20,39x24,41,0,21}",
+            visibleLayout: "0000,80x24,0,0,20",
+            flags: "Z*"
+        )
+        guard case .rejected = outcome else {
+            return XCTFail("expected .rejected, got \(outcome)")
+        }
+        XCTAssertFalse(window.isZoomed, "zoom must not be recorded without the grid that goes with it")
+        XCTAssertEqual(window.renderTree?.paneIds, ["%20", "%21"])
+    }
+
+    /// Every checksum tmux itself emitted must pass, or switching verification on costs the user
+    /// their panes on the first notification. These are captured strings, zoomed one included.
+    func testRealTmuxLayoutsAllPassChecksumVerification() {
+        let captured = [
+            "5967,80x24,0,0,18",
+            "bb11,80x24,0,0{40x24,0,0,20,39x24,41,0,21}",
+            "273c,200x50,0,0{100x50,0,0,23,99x50,101,0[99x25,101,0,24,99x24,101,26,25]}",
+            "9d29,200x50,0,0[200x25,0,0,0,200x24,0,26{100x24,0,26,1,99x24,101,26[99x12,101,26,2,99x11,101,39,3]}]",
+            // `#{window_visible_layout}` for the one above, with pane 3 zoomed.
+            "aca0,200x50,0,0,3",
+        ]
+        for layout in captured {
+            var window = TmuxWindow(id: "@1", name: "zsh")
+            XCTAssertEqual(window.apply(layoutString: layout), .applied, layout)
+        }
     }
 }

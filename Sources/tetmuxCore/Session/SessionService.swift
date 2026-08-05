@@ -945,10 +945,16 @@ public actor SessionService {
             deliver(data, hostId: hostId, paneId: paneId, from: connection)
 
         case .layoutChange(let windowId, let layout, let visibleLayout, let flags):
+            var outcome = TmuxWindow.LayoutApplyResult.unchanged
             withHost(hostId) { host in
                 Self.mutateWindow(&host, windowId: windowId) {
-                    $0.apply(layoutString: layout, visibleLayout: visibleLayout, flags: flags)
+                    outcome = $0.apply(layoutString: layout, visibleLayout: visibleLayout, flags: flags)
                 }
+            }
+            // The window is still rendering the layout it had, so nothing on screen went blank — but
+            // it is now a grid tmux has moved on from, and no later notification repeats this one.
+            if case .rejected(let reason) = outcome {
+                log("[\(hostId)] rejected %layout-change for \(windowId): \(reason) — \(layout)")
             }
 
         case .windowAdd(let windowId):
@@ -1441,6 +1447,7 @@ public actor SessionService {
     }
 
     private func applyWindows(_ lines: [String], hostId: String) {
+        var rejected: [(windowId: String, reason: String, layout: String)] = []
         withHost(hostId) { host in
             var seenBySession: [String: Set<String>] = [:]
             for line in lines {
@@ -1466,15 +1473,24 @@ public actor SessionService {
                     host.sessions[sessionIndex].windows[windowIndex].isActive = isActive
                     host.sessions[sessionIndex].windows[windowIndex].hasActivity = hasActivity
                     host.sessions[sessionIndex].windows[windowIndex].hasExplicitName = hasExplicitName
-                    host.sessions[sessionIndex].windows[windowIndex].apply(
+                    let outcome = host.sessions[sessionIndex].windows[windowIndex].apply(
                         layoutString: layout, visibleLayout: visibleLayout, flags: flags
                     )
+                    if case .rejected(let reason) = outcome {
+                        rejected.append((windowId, reason, layout))
+                    }
                 } else {
                     var window = TmuxWindow(
                         id: windowId, name: name, isActive: isActive, hasActivity: hasActivity,
                         hasExplicitName: hasExplicitName
                     )
-                    window.apply(layoutString: layout, visibleLayout: visibleLayout, flags: flags)
+                    // A window seen for the first time has no previous layout to fall back on, so a
+                    // rejection here really does leave it with nothing to render — worth saying.
+                    if case .rejected(let reason) = window.apply(
+                        layoutString: layout, visibleLayout: visibleLayout, flags: flags
+                    ) {
+                        rejected.append((windowId, reason, layout))
+                    }
                     host.sessions[sessionIndex].windows.append(window)
                 }
                 if isActive {
@@ -1494,6 +1510,9 @@ public actor SessionService {
                     host.sessions[sessionIndex].activeWindowId = host.sessions[sessionIndex].windows.first?.id
                 }
             }
+        }
+        for entry in rejected {
+            log("[\(hostId)] rejected list-windows layout for \(entry.windowId): \(entry.reason) — \(entry.layout)")
         }
     }
 

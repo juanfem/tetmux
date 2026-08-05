@@ -82,8 +82,10 @@ public enum LayoutParser {
     /// Parses `bc62,80x24,0,0{40x24,0,0,1,39x24,41,0,2}` into a typed tree (R3.5).
     ///
     /// - Parameter verifyChecksum: when true, a body that does not match its `bc62,` prefix is
-    ///   rejected rather than parsed. Off by default so a checksum quirk in some tmux build can
-    ///   never cost the user their panes; the geometry test suite turns it on.
+    ///   rejected rather than parsed. Off by default because a bare body with no prefix is legal
+    ///   input here and several tests supply one; `TmuxWindow.apply`, which is the only production
+    ///   caller, turns it on. What makes that safe is that a rejected layout leaves the window
+    ///   holding the last one that parsed rather than nothing — see the note there.
     public static func parse(_ input: String, verifyChecksum: Bool = false) throws -> LayoutNode {
         var body = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { throw LayoutParseError.empty }

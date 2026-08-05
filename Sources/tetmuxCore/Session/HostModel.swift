@@ -148,40 +148,80 @@ public struct TmuxWindow: Identifiable, Equatable, Sendable {
         self.hasActivity = hasActivity
         self.hasExplicitName = hasExplicitName
         self.layoutString = layoutString
-        self.layoutTree = layoutString.isEmpty ? nil : try? LayoutParser.parse(layoutString)
+        self.layoutTree = layoutString.isEmpty ? nil : try? LayoutParser.parse(layoutString, verifyChecksum: true)
         self.visibleLayoutString = layoutString
         self.visibleLayoutTree = self.layoutTree
         self.panes = panes
         self.activePaneId = activePaneId ?? self.layoutTree?.paneIds.first
     }
 
+    /// What `apply` did with a layout tmux sent, so a caller with a logger can say when one was
+    /// thrown away — the model has no way to report it and a silently ignored layout is exactly the
+    /// kind of failure this codebase keeps finding.
+    public enum LayoutApplyResult: Equatable, Sendable {
+        case applied
+        /// Same layout, same visible layout, same zoom: nothing to do.
+        case unchanged
+        /// Neither the layout nor the pane list moved. `reason` is the parse failure.
+        case rejected(reason: String)
+    }
+
     /// Applies a layout string from `%layout-change` or `list-windows`, keeping the pane list and
     /// the active pane consistent with the tree tmux just told us about.
+    ///
+    /// Both fields are parsed with **checksum verification on** (R3.5), and an update that fails
+    /// either parse is rejected *whole*: the window keeps the last layout that did parse, string and
+    /// tree together, rather than being left holding a tree of `nil`. That is the only reason
+    /// switching validation on here is safe — `layoutTree == nil` renders an empty window, so a
+    /// checksum quirk in some tmux build would otherwise cost the user their panes on the first
+    /// `%layout-change`, which is what kept this off. Keeping the previous tree loses nothing that
+    /// was not already lost: it is a grid that was right a moment ago rather than no grid at all,
+    /// and the next layout tmux sends replaces it.
+    ///
+    /// Rejecting *both* fields on one bad parse matters while zoomed. They describe one window and
+    /// arrive in one notification; applying the full layout with no visible tree would set `isZoomed`
+    /// while `renderTree` fell back to the unzoomed grid, which is precisely the wrapped-and-
+    /// truncated failure `visibleLayoutString` exists to prevent.
     ///
     /// - Parameters:
     ///   - visibleLayout: `#{window_visible_layout}`, which differs only while a pane is zoomed.
     ///   - flags: `#{window_flags}`; `Z` is the zoom.
-    public mutating func apply(layoutString newLayout: String, visibleLayout: String? = nil, flags: String? = nil) {
+    @discardableResult
+    public mutating func apply(
+        layoutString newLayout: String,
+        visibleLayout: String? = nil,
+        flags: String? = nil
+    ) -> LayoutApplyResult {
         let newVisible = visibleLayout ?? newLayout
         let newZoomed = flags.map { $0.contains("Z") } ?? isZoomed
         let unchanged = newLayout == layoutString
             && newVisible == visibleLayoutString
             && newZoomed == isZoomed
             && layoutTree != nil
-        guard !unchanged else { return }
+        guard !unchanged else { return .unchanged }
+
+        let newTree: LayoutNode
+        let newVisibleTree: LayoutNode
+        do {
+            newTree = try LayoutParser.parse(newLayout, verifyChecksum: true)
+            // Only worth a second parse when it actually differs, which is only while zoomed.
+            newVisibleTree = newVisible == newLayout
+                ? newTree
+                : try LayoutParser.parse(newVisible, verifyChecksum: true)
+        } catch {
+            return .rejected(reason: "\(error)")
+        }
 
         layoutString = newLayout
-        layoutTree = try? LayoutParser.parse(newLayout)
+        layoutTree = newTree
         isZoomed = newZoomed
         visibleLayoutString = newVisible
-        // Only worth a second parse when it actually differs, which is only while zoomed.
-        visibleLayoutTree = newVisible == newLayout ? layoutTree : (try? LayoutParser.parse(newVisible))
+        visibleLayoutTree = newVisibleTree
 
         // Membership comes from the *full* layout even while zoomed: the other panes still exist, and
         // taking the visible tree here would drop them from `paneCount` and from `displayLabel`, so a
         // zoomed split window would relabel itself and claim to hold one pane.
-        guard let tree = layoutTree else { return }
-        let ids = tree.paneIds
+        let ids = newTree.paneIds
         panes.removeAll { !ids.contains($0.id) }
         for id in ids where !panes.contains(where: { $0.id == id }) {
             panes.append(TmuxPane(id: id))
@@ -190,7 +230,7 @@ public struct TmuxWindow: Identifiable, Equatable, Sendable {
         panes.sort { a, b in (ids.firstIndex(of: a.id) ?? 0) < (ids.firstIndex(of: b.id) ?? 0) }
         // Sizes, though, come from what is on screen — that is what tmux is emitting output for. A
         // hidden pane keeps whatever it last had; nothing is painting it.
-        let sizing = renderTree ?? tree
+        let sizing = renderTree ?? newTree
         for index in panes.indices {
             if let size = sizing.cellSize(ofPane: panes[index].id) {
                 panes[index].cols = size.cols
@@ -200,6 +240,7 @@ public struct TmuxWindow: Identifiable, Equatable, Sendable {
         if activePaneId == nil || !ids.contains(activePaneId!) {
             activePaneId = ids.first
         }
+        return .applied
     }
 }
 

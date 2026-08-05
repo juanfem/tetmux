@@ -12,6 +12,9 @@ tmux panes become app splits. tmux's own status bar, pane borders, and window li
 behaviour — requirement IDs (`R3.4`, `F4.17`, `T5.6`, `P6.3`) are cited throughout the source, and
 those citations are the fastest way to find the rationale for code that looks odd.
 
+`TODO.md` is the standing audit: what is known to be missing or stubbed, with the evidence that found
+it. Check it before concluding something is a new bug.
+
 ## Commands
 
 ```bash
@@ -26,17 +29,23 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter Ses
 
 Scripts/package-dmg.sh                 # .app bundle inside a .dmg, in dist/
 Scripts/package-dmg.sh --skip-build    # …from whatever is already in .build/release
+Scripts/package-dmg.sh --version 1.2.3 --output dist
 ```
 
-`.github/workflows/ci.yml` runs the same two things on every push: `swift test` with tmux installed
-(otherwise the integration suite silently skips itself and a green check means nothing), then the
-packaging script, whose result is mounted and launched before it is uploaded. A `v*` tag also
-publishes the image as a release.
+`.github/workflows/ci.yml` runs **three** jobs on every push. `swift test` on macOS with tmux
+installed — otherwise the integration suite silently skips itself and a green check means nothing, so
+the run fails if the skip fires. `swift build --target tetmuxCore` on Ubuntu, which is the only thing
+that exercises the §2.4 portability hedge; every job used to be macOS, and a core-only regression on
+glibc went uncaught. Then the packaging script, whose result is mounted and launched before it is
+uploaded. A `v*` tag also publishes the image as a release.
 
 The .dmg is **single-architecture** and says so in its filename. A universal binary needs SwiftPM's
 `--arch arm64 --arch x86_64`, which routes through xcbuild, which compiles SwiftTerm's Metal shaders
 and so needs a Metal toolchain component that is a separate multi-gigabyte download. The native path
 copies the `.metal` source into the resource bundle and never invokes the compiler.
+
+Signing is ad-hoc (`codesign --sign -`): no Developer ID, no notarisation, no updater. That is a known
+gap with an account behind it, not an oversight — see `TODO.md`.
 
 ### The diagnostic CLI
 
@@ -45,11 +54,11 @@ swift run tetmux --diagnose                    # local tmux
 swift run tetmux --diagnose server.example.org   # a saved host, by id or name
 ```
 
-Connects a real channel, prints the parsed event stream to stderr and the resulting topology to
-stdout, then subscribes to a pane and round-trips a keystroke. **Reach for this first when a host
-misbehaves** — it separates "the protocol layer is wrong" from "the views are wrong", which is
-otherwise slow to establish. It resolves against the saved host list, so it exercises the exact
-user, port, and custom command the UI would use.
+Connects a real channel, prints the parsed event stream to stderr and the resulting topology, version
+and RTT to stdout, then subscribes to a pane and round-trips a keystroke. **Reach for this first when
+a host misbehaves** — it separates "the protocol layer is wrong" from "the views are wrong", which is
+otherwise slow to establish. It resolves against the saved host list, so it exercises the exact user,
+port, and custom command the UI would use, and it can answer a password prompt from the Keychain.
 
 To ground a protocol question in reality, capture a live stream rather than reasoning about it:
 drive `tmux -CC` under a PTY (Python's `pty.fork` is the quickest way) and read the raw bytes.
@@ -63,11 +72,36 @@ Four layers. Everything below the UI is plain Swift with no AppKit dependency.
 tetmux      app entry point + --diagnose CLI
 tetmuxUI    SwiftUI/AppKit chrome; SwiftTerm pane surfaces; KeychainStore   (@MainActor)
 tetmuxCore  SessionService (actor) · ControlCodec · LayoutParser · PtyTransport · SshPromptDetector
+CUtil       systemLibrary shim, Linux only — `forkpty` lives in libutil on glibc
 ```
 
 **`tetmuxCore` must not import AppKit, SwiftUI, or SwiftTerm.** That is the §2.4 portability hedge,
 and its immediate payoff is that the interesting logic stays headlessly testable. `NetworkStateMonitor`
-lives in `tetmuxUI` precisely because it needs `NSWorkspace`.
+lives in `tetmuxUI` precisely because it needs `NSWorkspace`. `CUtil` and the Linux CI job are the
+other half of that hedge: a hedge that is never exercised has already stopped being a hedge.
+
+Where things are, since the invariants below name symbols without saying which file holds them:
+
+| File | What it is |
+|---|---|
+| `Core/ControlCodec.swift` | Bytes → `[ControlEvent]`. Pure value type, no I/O. |
+| `Core/LayoutParser.swift` | tmux layout strings → `LayoutNode` tree. |
+| `Core/PtyTransport.swift` | `forkpty` + reader thread. The only process spawner. |
+| `Core/SshPromptDetector.swift` | Classifies a pre-handshake prompt ssh is sitting on. |
+| `Session/SessionService.swift` | The actor. Channels, correlation, topology, flow control. |
+| `Session/HostModel.swift` | `HostState`, `TmuxSession`, `TmuxWindow`, `TmuxVersion`. |
+| `Session/TmuxCommand.swift` | Every command string and format, with its quoting rules. |
+| `Session/HostConfigStore.swift` | `hosts.json` + `~/.ssh/config` discovery. |
+| `AppMain.swift` | Scenes, menus, tab strip, window chrome. |
+| `AppModel.swift` | App-wide model; the decisions that need no channel. |
+| `WindowState.swift` | Everything that belongs to one macOS window. |
+| `TerminalContainerView.swift` | The pane-tree renderer and `PaneDivider`. |
+| `TerminalSurface.swift` | `TerminalView` wrapper, `TerminalTheme`, bell, OSC handling. |
+| `SidebarView.swift` · `StatusBarView.swift` | Host/session/window tree (drawn glyphs); F4.28 footer. |
+| `LauncherOverlay.swift` | ⌘K fuzzy launcher over hosts, sessions and windows (F4.25/F4.26). |
+| `SettingsView.swift` · `KeymapPolicy.swift` | The `Settings` scene; shortcut table. |
+| `DestructiveActionModal.swift` | The F4.10 confirmation, which says *why* the close is a kill. |
+| `BellNotifier.swift` · `KeychainStore.swift` | F4.31 background bells; per-host passwords. |
 
 ### The central abstraction
 
@@ -90,10 +124,35 @@ These are the ones that produce silent, hard-to-diagnose breakage. Each has a re
 and re-adding sigils per layer was a recurring source of lookups that silently matched nothing.
 
 **tmux command numbers are server-wide and start at an arbitrary value.** They are not 0-based and
-cannot be predicted. Responses *are* strictly ordered, so `SessionService` correlates them with a
-FIFO of pending commands. tmux also emits one `%begin`/`%end` block of its own on attach, before we
-can write anything; commands therefore queue in an outbox until that handshake completes. Writing
-earlier misaligns the queue by one for the life of the channel.
+cannot be predicted, so correlation is by *order*: responses are strictly ordered, and
+`SessionService` matches them against a FIFO of pending commands. tmux also emits one `%begin`/`%end`
+block of its own on attach, before we can write anything; commands therefore queue in an outbox until
+that handshake completes. Writing earlier misaligns the queue by one for the life of the channel.
+
+The number that cannot schedule the match can still detect a bad one, and does: a `%begin` whose
+number fails to increase, a `%begin` with nothing pending *after* the handshake, and a terminator
+closing a block it did not open are each logged as a desync. Detecting is not recovering — there is
+still no recovery — so everything below that can cause a misalignment treats it as fatal rather than
+as an error to report.
+
+**Framing outranks dispatch.** Inside a `%begin` block every line is response content, including one
+that starts with `%`, and only a `%end`/`%error` **carrying the matching number** may close it.
+Parsing `%`-prefixed lines as notifications first cost real data and admitted forgery: `capture-pane`
+replays scrollback as result lines, so a zsh or tcsh `%` prompt vanished from every repaint — and
+captured text containing `%exit` set `serverEnded`, after which a dropped link looked like an orderly
+session end and nothing reconnected. `%output` for a pane could be injected the same way.
+
+**A partial PTY write is a dead channel, not a failed command.** A fragment with no newline sits in
+front of tmux's parser and the next command concatenates onto it: one `%begin` block answering two
+commands, and the FIFO above is misaligned for good. So `PtyTransport` distinguishes `.partial` from
+`.nothingWritten`, `send` unqueues only for the latter, and `.partial` tears the channel down. This is
+exactly the path a large paste over a congested link takes.
+
+**The reader thread owns the master fd and is the only thing that closes it.** `terminate()` used to
+close it while the thread sat in a 1000 ms `poll` holding that number by value, so a fast reconnect
+handed back the same fd had its bytes consumed by the old, already-finished stream — a hole where the
+`%begin` should have been, or a handshake that never arrived and a host stuck at "Connecting…". The
+fd outliving `terminate` by up to one poll interval is the accepted cost.
 
 **State broadcasts are for topology changes only.** `SessionService.ingest` diffs `HostState` and
 broadcasts only when it actually changed. Broadcasting on `%output` rebuilds the SwiftUI tree for
@@ -103,6 +162,16 @@ every chunk of terminal output, tearing down the very terminal views the output 
 `%layout-change` returns. Nothing resizes a surface before tmux confirms. Pane surfaces are snapped to
 the cell size tmux reported; letting the emulator pick its own drifts by a cell and desynchronises the
 grid.
+
+**A pane's usable width is its frame width, which is why SwiftTerm's scroller is hidden.** The view
+reserves 17pt for a scroller and derives its own column count from `frame.width - reservedScrollerWidth`,
+overriding the `resize(cols:rows:)` it is handed — while `requestSizes` measures the container and
+subtracts nothing. tmux therefore sized panes to more columns than the emulator could draw and every
+full-width program wrapped early (at 12pt SF Mono: 96 columns requested, 93 drawn). It is *hidden*
+rather than subtracted in `requestSizes`, deliberately: every pane reserves its own gutter, so the
+correction depends on how many panes are across the widest row — a property of the layout, which is
+tmux's answer to the size we asked for. That is the same self-feeding measurement as the pane-derived
+cell size below. Hidden, the arithmetic has one owner again.
 
 **A tmux window's size has exactly one owner.** On tmux ≥ 2.9 each displayed window is sized
 individually — `set-option window-size manual` plus `resize-window -t @id -x -y` — which is what lets a
@@ -119,7 +188,19 @@ writing and terminating in the same breath is a race an idle machine wins and a 
 leaving `manual` on the user's session for the next plain `tmux attach` to find. It passed here six
 runs in a row and failed in CI on a commit that had passed there minutes earlier. `sendAndAwait` waits
 for tmux's own `%end` — with a timeout, because a channel can accept a write and never answer, and a
-disconnect that hangs is worse than an option left set.
+disconnect that hangs is worse than an option left set. `detach-client` is waited for against the same
+race, for the same reason.
+
+**A zoomed window renders the visible layout, and is a member of the full one.** tmux keeps
+`window_layout` as the layout the window would have *unzoomed*; `window_visible_layout` is what is on
+screen. Render the wrong one while a pane is zoomed and every surface is forced to its unzoomed cell
+size while tmux emits output sized to the whole window — wrapped, truncated, and unrecoverable without
+unzooming from elsewhere. So `TmuxWindow.renderTree` prefers the visible tree when `isZoomed`, and
+views must use it rather than `layoutTree` (pane cycling included). Membership and labels still come
+from the full layout, or a zoomed split window relabels itself as holding one pane. Nothing tracks
+zoom locally — tmux announces it in the `%layout-change` flags — but a window **already zoomed when
+tetmux attaches never sends a `%layout-change` at all**, which is why `windowsFormat` has to carry
+`#{window_visible_layout}` and `#{window_flags}` too.
 
 **A repaint for a second viewer must be addressed to it alone.** `capture-pane`'s payload starts with
 `ESC[H ESC[2J ESC[3J` — screen *and* scrollback. The same pane can be on screen in two macOS windows,
@@ -144,8 +225,10 @@ fires at all. **A dropped chunk must come back off the books**, because it will 
 never acknowledged; counting it inflates `outstanding` permanently and eventually wedges the pane
 paused with nothing left to drain. And **a pane tmux paused on its own** (`pause-after`, which also
 switches the server to `%extended-output`) **is ours to resume** — nothing else will, and a pane left
-paused never moves again. Anything lost is repaired by a repaint, never handed to the emulator as a
-hole in the byte stream. All of it needs tmux 3.2; below that the byte ceiling is the whole mechanism.
+paused never moves again. That one needs its own hold-down rather than the viewer's watermark:
+resuming it as soon as the local counter drains turns tmux's `pause-after` into a pause/resume cycle
+with a full repaint each time. Anything lost is repaired by a repaint, never handed to the emulator as
+a hole in the byte stream. All of it needs tmux 3.2; below that the byte ceiling is the whole mechanism.
 
 **The cell size comes from the font, never from a pane.** A pane can only report its own frame
 divided by its own cell count, and that measurement is circular: the frame comes from the layout, the
@@ -182,6 +265,15 @@ windows, which are the tabs this app is actually about.
 **Pane surfaces need explicit `.id(paneId)`.** The layout tree is rendered through `AnyView`, which
 erases structural identity, so without an explicit id SwiftUI rebuilds every `NSView` on each update
 and discards the terminal's contents.
+
+**Every tmux window of the session is built; unselected ones are hidden with `.opacity(0)`, never
+omitted with `if`.** Two separate failures, one visible and one not. Building only the selected window
+tore down its `TerminalView`s on each tab switch and with them the whole local scrollback — the return
+trip replays `capture-pane`, which begins `ESC[H ESC[2J ESC[3J` and is capped at the capture budget,
+so "scroll up to see what that build printed" worked right up until you looked at another tab. And a
+`ZStack` hands every child the same frame, so a background tab keeps measuring the size it would
+really have and keeps asking tmux for that grid; dropped from the tree it would resize its tmux window
+to nothing and reflow everything running in it.
 
 **Pane subscriptions outlive the channel.** `outputSubscribers` is a registry of what is on screen,
 not a property of the connection, so `teardown` must leave it alone — `completeHandshakeIfNeeded`
@@ -252,6 +344,10 @@ invalidates it — and a stale name is worse than a failed lookup, because the r
 `new-session -A -s <old name>` and creates an empty session under it. `syncReconnectTarget` is called
 from `%session-renamed` and after `list-sessions`.
 
+**A reconnect attaches; it never creates (F4.15).** `connectHost` defaults to `.createOrAttach`, and
+the backoff must not take that default — if the server restarted while the link was down, creating
+manufactures an empty session under the remembered name and presents it as the user's.
+
 **`%exit` is the only thing separating "the session ended" from "the link died".** A dropped ssh
 connection produces EOF and nothing else; tmux ending a client always announces it first. Verified on
 3.7b: `kill-session` on the attached session and the last pane exiting both emit `%sessions-changed`
@@ -279,10 +375,18 @@ as a pass, so anything asserting the absence of this bug uses `waitFor` plus an 
 `ControlCodec` is a pure value type: `mutating func feed(_:) -> [ControlEvent]`, no I/O, no async.
 Keep it that way — it is the only reason the protocol layer is testable against fixtures.
 
-- `%layout-change @w <layout> <visible-layout> <flags>` — **three** fields since tmux 2.5. Folding
-  them into one string makes the layout unparseable and the window renders nothing.
-- `%extended-output %p <age> : <data>` — the colon is a reserved field and must be skipped.
+- `%layout-change @w <layout> <visible-layout> <flags>` — **three** fields since tmux 2.5, and all
+  three are load-bearing. Folding them into one string makes the layout unparseable and the window
+  renders nothing; dropping the second and third instead parses fine and renders the wrong grid
+  whenever a pane is zoomed.
+- `%extended-output %p <age> : <data>` — the colon is a reserved field and must be skipped. A layout
+  with no colon field must fail the parse rather than yield empty data, or a build that varies the
+  field layout makes every pane go quietly dead.
+- `%subscription-changed <name> <session> <window> <index> <pane> : <value>` — same reserved colon.
+  The name must be checked: another control client can hold subscriptions of its own.
 - `%output` payloads are octal-escaped and arbitrary binary. Decode on bytes, never via `String`.
+- Lines are bounded at 16 MiB, after which the buffer resets. A control stream that never sends a
+  newline is otherwise unbounded memory growth.
 - **Command *arguments* are parsed by tmux's own lexer, and a shell cannot tell you how.** Passing argv
   from a shell parses no tmux quoting at all, so probe questions like this over a real channel. Verified
   on 3.7b, inside double quotes: `\n`/`\r`/`\t`/`\e` work, `$VAR` **expands**, `\$` and `\#` are literal,
@@ -293,6 +397,18 @@ Keep it that way — it is the only reason the protocol layer is testable agains
 - The stream opens with a DCS preamble (`ESC P 1000 p`) glued to the first `%begin`, and over ssh
   there may be banner text ahead of it. Anything before the first `%begin` is not protocol.
 - Unknown `%` notifications are logged and ignored, never fatal — tmux adds them between versions.
+- `LayoutParser` runs on bytes from the wire, so it must never trap: overflow is checked rather than
+  arithmetic-trapped, and recursion is depth-capped. `try?` catches neither.
+- **The layout checksum is verified (R3.5), and what makes that safe is that a rejection is
+  all-or-nothing.** `layoutTree == nil` renders an *empty window*, so validation that blanks the tree
+  on a mismatch would cost the user their panes on the first `%layout-change` — which is why it
+  defaulted to off for so long. `TmuxWindow.apply` instead parses both fields up front and either
+  commits both or keeps the previous layout, string and tree together: the worst case is a grid that
+  was right a moment ago, and the next notification replaces it. Both fields go down together on one
+  bad parse deliberately — they describe one window and arrive in one notification, and applying the
+  full layout alone would set `isZoomed` with no visible tree, which is the wrapped-and-truncated
+  failure `window_visible_layout` exists to prevent. `apply` returns a `LayoutApplyResult` because the
+  model has no logger and a silently discarded layout is the exact shape of bug this list is made of.
 
 ## Behaviour worth knowing before changing it
 
@@ -325,17 +441,29 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   happen and nothing said why. `PendingCommand.Kind.userCommand(_:)` labels the ones a person
   initiated, and only those become `HostState.lastCommandFailure` and a banner. Internal commands
   keep `.ignore`: a `resize-window` an old server refuses is ours to cope with, not a sentence to put
-  in front of somebody.
+  in front of somebody. An `%error` matching *no* pending command is still logged — the one case where
+  something has already gone wrong is the worst one to stay silent about.
+- **Everything that can hang has a bound, because the failure of an unbounded one is "Connecting…"
+  forever.** A 45 s handshake watchdog covers a blocking MOTD or a hung `ProxyCommand`; without it a
+  version probe that never answered also left `connection.version` nil, and `applyWindowSizePolicy`
+  returned at its first guard so every resize was silently dropped for the life of the channel. The
+  pre-handshake outbox caps at 256 commands and drops the *oldest* — the newest is what the user just
+  typed. `sendAndAwait` times out at 2 s, and every path that could strand a waiter (write failure,
+  `%error`, `teardown`) resumes it.
 - **The local host connects itself at launch; remote ones wait to be asked.** Not a general
   auto-connect policy. Local tmux is always reachable, needs no credentials and cannot prompt for
   anything, so the click was a step with no decision in it. A remote host connecting unbidden can
   raise a password sheet, and several of them at launch is worse than a click.
-- **OSC 52 clipboard writes are denied by default and reads are never permitted** (T5.6).
+- **OSC 52 clipboard writes are denied by default and reads are never permitted** (T5.6). The per-host
+  opt-in T5.6 describes does not exist yet: `allowRemoteClipboardWrite` has no field on `HostConfig`
+  and no UI, so writes are currently denied unconditionally.
 - Authentication failures are not retried; other disconnects back off 1 s → 60 s with jitter and a
   circuit breaker after 8 attempts (F4.14). An explicit reconnect — `reconnectNow`, behind the
   banner button, the sidebar row, and the placeholder's Retry — clears that breaker, because a click
   is the user asserting the host is reachable and a host that spent its attempts must still come
-  back.
+  back. A pending backoff is a *task*, and both `disconnectHost` and `reconnectNow` cancel it: a host
+  the user deliberately closed used to reconnect a minute later, possibly raising a password prompt,
+  because `.disconnected.isActive` is false and `connectHost`'s guard never saw it.
 - **A reconnect reattaches to `reconnectTarget`, not to the session it first connected with.** It is
   tracked from `%session-changed`, so it follows `switch-client`. Reattaching to the original target
   strands the user on a session that gets no `%output` — the frozen-panes failure above, one layer up.
@@ -343,7 +471,8 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   turn a dead link into EOF, and until then writes into the pty still succeed — which is why
   `probeAllConnections` cannot detect a stale-but-`.connected` host by writing to it. `ConnectionBanner`
   exists because automatic recovery is best-effort: the panes stay on screen holding real scrollback,
-  so the user needs to be told they are a snapshot and given a button.
+  so the user needs to be told they are a snapshot and given a button. A 10 s `display-message -p ''`
+  round trip is what the status bar's RTT dot reports (F4.29).
 - **ssh prompts on a pty nobody is looking at.** `SshPromptDetector` watches the pre-handshake stream
   for a prompt ssh is *sitting* on — the signal is a line ending in a colon with no newline after it, so
   a banner mentioning a password is correctly ignored. The prompt is published on
@@ -388,7 +517,10 @@ Keep it that way — it is the only reason the protocol layer is testable agains
 
   The primary is *moved* rather than duplicated when its own session leaves the screen: it has to be
   attached to something, and `switch-client` only strands panes when somebody is watching them, which
-  is precisely the case `reconcileChannels` checks before doing it.
+  is precisely the case `reconcileChannels` checks before doing it. Retiring a follower is a
+  check-then-act across an `await`, so it re-checks after the wait: tabbing away and back inside the
+  grace period otherwise tore down the client the reconcile had just decided to keep, and nothing was
+  scheduled to notice.
 - **A pane belongs to one channel, or it is painted twice.** A window can be linked into several
   sessions (F4.9's subject), and every attached client streams `%output` for every pane it can see —
   verified on 3.7b by attaching two control clients to two sessions sharing a window: both emit the
@@ -403,7 +535,41 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   the machine, so it cannot answer "are these panes live?". Liveness deliberately includes a follower
   that is still handshaking and a `switch-client` that has not landed (`Connection.pendingSessionId`):
   attaching is a round trip, and the strictly honest answer for its duration makes `NotAttachedBanner`
-  appear for a tenth of a second and withdraw, which reads as a glitch rather than as information.
+  appear for a tenth of a second and withdraw, which reads as a glitch rather than as information. A
+  *failed* `switch-client` must clear `pendingSessionId`, or a dead session reports live forever and
+  the banner never appears over a window that has stopped moving.
+- **Stale tetmux clients are detached on attach (F4.17), and the tag is `client_control_mode`.** The
+  SRD asks for a distinctive client name; tmux has none to give — `client_name` *is* the tty and there
+  is no command to set it (verified on 3.7b). So an orphan is "a control-mode client whose tty is not
+  one of ours", which means the handshake must learn its own `#{client_tty}` *before* the
+  `list-clients` response arrives — the two are issued in that order deliberately, and the FIFO is what
+  makes it work. The whole pass is skipped if any channel of the host has not yet answered its tty
+  query, because a handshaking follower is indistinguishable from an orphan. Ordinary `tmux attach`
+  terminals are never candidates. Known blast radius: two live tetmuxen against one server (a
+  `swift run` beside an installed build) detach each other, as would iTerm2's tmux integration.
+- **Pane commands are subscribed to on tmux ≥ 3.2 and polled below it.** `refresh-client -B
+  tetmuxPaneCommand:%*:"#{pane_current_command}"` is what reports a command started in a *background*
+  pane — nothing announces `pane_current_command` otherwise, it arrives only with a `list-panes`, and
+  the refreshes that trigger one fire on renames and pane switches. So `schedulePaneRefresh` on
+  `%window-renamed` and `%window-pane-changed` is the fallback path, not the mechanism. Subscriptions
+  are issued on the **primary only**: they are per client but the values are server-wide, so a follower
+  subscribing multiplies identical notifications.
+- **A tab's terminal views are never rebuilt, so a bell has to reach the app, not the view.** Panes
+  beep through `NSSound.beep()`, and when the app is not frontmost `BellNotifier` also posts a
+  `UserNotifications` banner (F4.31), coalesced to one per 10 s with an "and N more" body — `yes | ring`
+  would otherwise bury Notification Center. Authorisation is asked for on the first bell rather than at
+  launch, and a refusal is not retried. `UNUserNotificationCenter.current()` **traps** in a process with
+  no bundle identifier, which is exactly `swift run tetmux`, hence the availability guard.
+- **The terminal's appearance is one `TerminalTheme` in `UserDefaults`, and changing it costs a round
+  trip per pane.** The `Settings` scene sets font family, size, ligatures (T5.8) and scrollback; the
+  theme lives on `AppModel` with a `didSet` that persists it, and reaches panes as a value passed down
+  the view tree. Font changes are not free: the cell size derives from the font and the grid derives
+  from the cell size, so every pane on screen re-measures and re-asks tmux. Scrollback is applied to
+  live panes with `changeScrollback` rather than only at creation — SwiftTerm's default is 500 lines,
+  which is not a choice anyone made.
+- **⌘F is SwiftTerm's find bar, reached through `performTextFinderAction`.** It works only because the
+  Paste command replaces the `.pasteboard` menu group and *not* `.textEditing` — replacing the latter
+  wholesale is what unplugged Find in the first place, since AppKit puts Find in that group.
 - **There is one kind of window.** "Open in New Window" opens an ordinary window seeded to a session
   with the sidebar collapsed, not the separate `DetachedScene` type it used to — that had its own view,
   a reduced feature set, and a button to convert itself into a real window, three things to maintain
@@ -428,11 +594,13 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   mid-typing; closing that window promotes the next, because nothing able to show a prompt means a host
   stuck at "Connecting…" forever.
 - **⌘N is a macOS window and ⌘T is a tmux window.** ⌘N used to be the tmux one, which is what it means
-  in no other application (item 11). The tmux item is titled "New tmux Window" rather than "New Tab"
+  in no other application. The tmux item is titled "New tmux Window" rather than "New Tab"
   even though tmux windows are shown as tabs: AppKit manages menu items titled exactly "New Tab" and
   "Close Tab" itself under automatic window tabbing, and a custom item competing for those names is at
   its mercy. `NewAppWindowButton` exists because `openWindow` is an `@Environment` action and
-  `Commands` has no environment to read one from.
+  `Commands` has no environment to read one from. ⌥⌘W closes a pane and ⇧⌘W a tmux window, kept a
+  modifier apart from ⌘W's macOS window on purpose given the blast radii; ⌥⌘[ / ⌥⌘] move between panes
+  in the **rendered** tree, so zoom is respected.
 - **A window can be asked for but not opened, and not addressed either.** `AppModel.requestedWindow`
   records the request and any open window performs it — via `claimWindowRequest()`, because *every*
   window observes it and a plain nil check on the delivered value opens one window per window already
@@ -440,7 +608,7 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   the next window to appear: `WindowGroup(id:for:)` would key windows on that value and bring the
   existing one forward instead of making a second, which is right for "show me this session" and wrong
   for ⌘N. And SwiftUI cannot bring a *particular* window forward at all, so `WindowAccessor` captures
-  each window's `NSWindow` — that is the only way items 5 and 9 can raise the right one.
+  each window's `NSWindow` — that is the only way `showSession` can raise the right one.
 - **With every window closed there is nobody to claim a request, so the model performs it itself.**
   `requestedWindow` is only ever observed from inside a window, and the app deliberately outlives its
   last one (`applicationShouldTerminateAfterLastWindowClosed` is `false`, because the menu bar extra
@@ -453,6 +621,10 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   and the Dock menu (AppKit's, built outside any scene) reaches it through the app delegate. **New
   Session** with nothing open needs the same treatment one layer up: `createSession` queues a reveal
   that *opens* a window rather than none at all, or tmux gets a session nobody is ever shown.
+- **Staying resident means ⌘Q is the ordinary way out, and it must undo what a disconnect undoes.**
+  `window-size manual` is set on the user's sessions; the delegate used to implement only
+  `applicationShouldTerminateAfterLastWindowClosed`, so quitting left every session no longer following
+  its terminal for the next plain `tmux attach` to find.
 - **Showing a session prefers the window already showing it.** `showSession` tries, in order: the
   window already displaying that session (brought forward), then a new window if asked for one, then
   the offered fallback — the clicked window for a sidebar double-click, the last-used one for the menu
@@ -465,12 +637,6 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   name follows whichever pane is current: a split window's label changed as the user moved between
   panes, and two split windows read identically whenever their active panes matched. `displayLabel`
   lives on `TmuxWindow` so the sidebar and the tab cannot disagree about what a window is called.
-- **Nothing announces `pane_current_command`.** It only arrives with a `list-panes`, and topology
-  refreshes fire on structural changes — so pane-derived labels sat stale until something unrelated
-  happened to refresh them. `schedulePaneRefresh` runs on `%window-renamed` (an automatic rename *is*
-  tmux reporting that the foreground command changed) and on `%window-pane-changed` (a command started
-  in a pane that was not current renames nothing). A background pane changing command while nobody
-  switches or renames is still not reported; there is no notification for it.
 - **Creating something shows it, and that takes a round trip.** Control mode's `new-session` and
   `new-window` answer with no id, so the thing created is not selectable until the topology refresh
   brings it back. `AppModel` records the intent and satisfies it on the next snapshot — a session by
@@ -482,6 +648,10 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   travel the same way rather than opening one at the click: there is no id to seed a window with until
   tmux answers. So the reveal request carries the intent, opens the window when the session arrives,
   and is the one kind of reveal that does *not* need the asking window to still be there.
+- **Topology refreshes and pane refreshes are different commands and need different task slots.**
+  Sharing one meant a `%window-add` arriving just after a `%window-renamed` ran only `list-panes`, so a
+  window created elsewhere kept its placeholder name and wrong session until something unrelated
+  refreshed. Automatic renames fire constantly, so this was hit often.
 - **The menu bar extra says what ⌥ would do, by polling.** `MenuBarExtra` hands its content no event
   and SwiftUI has no `isAlternate`, so the items' icons are swapped by hand while ⌥ is down —
   otherwise the modifier is invisible until after the click that used it. It cannot be watched with an
@@ -507,6 +677,9 @@ Keep it that way — it is the only reason the protocol layer is testable agains
 - **Network *switches* never report `.unsatisfied`.** `NetworkStateMonitor` compares
   `path.availableInterfaces` as well as the satisfied flag; watching only the flag misses Wi-Fi to a
   different Wi-Fi, which is exactly when a host that was unreachable becomes reachable again.
+- **Reduce Motion is honoured at all three animation sites** — the launcher's scroll, the tab strip's
+  scroll-to-selection, and the sidebar's row-action reveal — each keeping the outcome and dropping the
+  movement. New animation belongs behind the same check. Increase Contrast is not handled yet.
 
 ## Testing
 
@@ -535,10 +708,24 @@ The password path is covered end to end without a password-accepting host: `writ
 stands in for ssh — it prompts on the pty, reads one line, and only then execs the tmux command it was
 handed, so the real detect → publish → answer → handshake sequence runs against local tmux.
 
+Everything is captured from one tmux version, so the version-conditional paths self-skip rather than
+run on the versions they exist for; `TerminalGeometryTests` covers the scroller gutter and the
+font-derived cell round trip but is not the geometry suite §8 asks for. Both gaps are in `TODO.md`
+rather than fixed.
+
 ## State on disk
 
-- `~/Library/Application Support/tetmux/hosts.json` — host list. Entries with `ssh-` ids are
-  rediscovered from `~/.ssh/config` each launch and deliberately not persisted.
+- `~/Library/Application Support/tetmux/hosts.json` — host list. A decode failure renames the file to
+  `hosts.json.corrupt-<timestamp>` and surfaces `loadFailure` rather than returning an empty list:
+  both halves used to be `try?`, so a mangled file silently became "no hosts" and the first edit wrote
+  one host over the rest. An empty file is explicitly not corruption.
+- Hosts discovered from `~/.ssh/config` keep their `ssh-` ids and are re-derived each launch, so an
+  unedited one is deliberately **not** persisted — a stale entry would outlive the stanza. An *edited*
+  one is persisted as the difference from what discovery produces, and only while its `Host` block
+  still exists. Before that, a forward or ssh option added to a discovered host worked all session and
+  vanished on relaunch, while the Keychain flag it wrote survived and the two then disagreed.
+- `~/Library/Preferences` (`UserDefaults`) — `terminal.fontName`, `fontSize`, `ligatures`,
+  `scrollbackLines`. Appearance only; nothing about hosts, windows or sessions is restored on relaunch.
 - `~/Library/Caches/tetmux/cm-%C` — ssh `ControlMaster` socket. Kept short on purpose: unix socket
   paths cap at 104 bytes and Application Support plus ssh's 40-char hash runs close to it.
 - Login Keychain — per-host passwords, opt-in, as `kSecClassInternetPassword` with protocol ssh keyed

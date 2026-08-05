@@ -18,8 +18,20 @@ import XCTest
 @MainActor
 final class TerminalGeometryTests: XCTestCase {
 
+    /// The scale factor the view under test will resolve for itself.
+    ///
+    /// It has to be *this* number and not a convenient constant, because the snap to whole pixels is
+    /// `ceil(w * scale) / scale` on both sides and a mismatch moves the cell width by a whole point:
+    /// at 12pt SF Mono the `W` advance is 7.2, which snaps to 7.5 at 2× and to 8.0 at 1×, and 720pt
+    /// of frame is then either 96 columns or 90. Hard-coding 2 here made the test fail on any runner
+    /// with no screen — SwiftTerm falls back through `window` to `NSScreen.main` to 1, and a headless
+    /// `xctest` has neither — while the defect it exists to catch was nowhere near it.
+    private var viewScaleFactor: CGFloat {
+        NSScreen.main?.backingScaleFactor ?? 1
+    }
+
     private func makeView(cols: Int, theme: TerminalTheme = .default) -> (TerminalView, CGSize, CGFloat) {
-        let cell = theme.cellSize(backingScaleFactor: 2)
+        let cell = theme.cellSize(backingScaleFactor: viewScaleFactor)
         let size = CGSize(width: CGFloat(cols) * cell.width, height: 24 * cell.height)
         // Built at a different size, then given the real one — the order SwiftUI uses, and the order
         // that matters, because SwiftTerm recomputes its grid when the frame changes.
@@ -65,7 +77,7 @@ final class TerminalGeometryTests: XCTestCase {
     /// asks for are exactly the columns its width divides into.
     func testColumnsAskedForFitTheContainerExactly() {
         let theme = TerminalTheme.default
-        let cell = theme.cellSize(backingScaleFactor: 2)
+        let cell = theme.cellSize(backingScaleFactor: viewScaleFactor)
         for cols in [40, 80, 96, 200] {
             let width = CGFloat(cols) * cell.width
             XCTAssertEqual(Int(width / cell.width), cols, "\(cols) columns did not survive the round trip")
