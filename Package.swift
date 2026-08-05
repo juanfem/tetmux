@@ -90,7 +90,12 @@ package.targets.append(contentsOf: [
         // (F4.9), prompt handling, keymap resolution — that needed no AppKit to exercise and was
         // simply unreachable from a test bundle that did not link it.
         dependencies: ["tetmuxCore", "tetmuxUI"],
-        path: "Tests/tetmuxTests"
+        path: "Tests/tetmuxTests",
+        // T5.7's rendering corpus: real bytes, one file per case. `.copy` for the same reason the
+        // protocol fixtures use it — the point is the exact bytes, and processing is free to
+        // transform them. It lives here rather than beside `Fixtures/` in `tetmuxCoreTests`
+        // because it needs `TerminalView`, which is AppKit.
+        resources: [.copy("Corpus")]
     ),
 ])
 #endif

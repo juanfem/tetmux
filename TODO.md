@@ -8,7 +8,7 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**3 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
+**2 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
 integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on 2026-08-06; what
 they turned into is recorded in `CLAUDE.md`, not here.
 
@@ -27,20 +27,6 @@ References point into current `main`. Line numbers drift; the symbol names besid
   channel rebuilds it. Sleep/wake stays manual — `pmset sleepnow` on a test box is not a CI
   citizen — but scriptable as a documented manual pass alongside the P6 harness.
   `Tests/tetmuxTests/SessionIntegrationTests.swift`
-
-- [ ] **Rendering acceptance corpus (T5.7, §8).** The only Unicode assertion in the tree is byte
-  delivery through the paste path; width and grapheme handling are delegated to SwiftTerm and
-  asserted nowhere, and under control mode a width bug corrupts geometry, not just appearance.
-  *Do:* a fixture-driven test at the emulator boundary, no live tmux needed: feed
-  `TerminalView`'s terminal a corpus (CJK, emoji ZWJ sequences, combining marks, box drawing —
-  one file per case, real bytes) and assert the resulting **grid**: cursor column after each
-  string, cells occupied, wide-char continuation cells. That pins the property control mode
-  cares about — agreement between the emulator's grid and the cell arithmetic — without
-  attempting pixel comparison. `vim`/`htop`/Powerline stay a documented manual pass; scripting a
-  full-screen TUI comparison is a project, not a test.
-  `Tests/tetmuxTests/` (new). The corpus needs a `resources:` declaration of its own on the
-  `tetmuxTests` target — `Fixtures/` moved to `tetmuxCoreTests` when the suite was split for the
-  Linux job, and this test needs `TerminalView`, so it cannot follow it there.
 
 - [ ] **The P6 measurement harness.** No latency, throughput, CPU, or memory instrumentation
   exists — the P6 references in the source are design rationale. Verification is local and
