@@ -6,6 +6,10 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  # For the tmux version matrix, which is too slow to run per push and too valuable to run never.
+  # Monday morning, so a week's drift is found before anyone builds on it.
+  schedule:
+    - cron: "17 6 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -77,6 +81,51 @@ jobs:
         run: swift build --target tetmuxCore
       - name: Replay the fixtures on glibc
         run: swift test --filter tetmuxCoreTests
+
+  # §8's other half: the integration suite against every tmux the SRD names, rather than against the
+  # one version a runner happens to install. The fixtures pin what each version *says*; this pins
+  # what tetmux *does* about it, which is where the version branches are — per-window sizing below
+  # 2.9, `swap-window` reorders below 3.2, pane commands polled below 3.2, no flow control before 3.2.
+  #
+  # Deliberately **not** on every push. Building five tmuxen from pinned tarballs is minutes of
+  # `./configure && make` per version, and the answer only changes when the code under those branches
+  # does. It runs weekly, and on demand — which is what a version matrix is actually for: a routine
+  # sweep, plus a button to press when you have touched a fallback.
+  #
+  # The cache is keyed on the version list and the build script, so the tarball fetch and the five
+  # builds are paid once. A miss costs the full build; a hit costs a download of the binaries.
+  matrix:
+    name: Integration suite across the tmux matrix
+    # Only the two triggers that mean "sweep now": the weekly cron, and a person pressing the button
+    # after touching a version-conditional path. Not pushes, and not pull requests — a PR that waits
+    # ten minutes on five tmux builds is a PR nobody runs CI on twice.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer
+          echo "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer" >> "$GITHUB_ENV"
+
+      # libevent, ncurses and utf8proc are what tmux needs to build. utf8proc deliberately: it is
+      # what decides how wide tmux thinks a character is, so a server built without it would
+      # disagree with every real installation about layouts.
+      - name: Install tmux build dependencies
+        run: brew install libevent ncurses utf8proc
+
+      - name: Cache the built tmuxen
+        uses: actions/cache@v4
+        with:
+          path: .tmux-matrix/bin
+          key: tmux-matrix-${{ runner.os }}-${{ hashFiles('Scripts/build-tmux-matrix.sh') }}
+
+      # Builds only what the cache did not restore, then runs the suite once per version, each on a
+      # private socket. Fails on the first version that fails, and prints how many tests each one
+      # actually ran — a skip is exactly as green as a pass, and old versions are where tests skip.
+      - name: Run the matrix
+        run: Scripts/test-matrix.sh
 
   package:
     name: Package .dmg

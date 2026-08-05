@@ -1415,6 +1415,94 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// …and the same question below 3.2, where there is nothing to subscribe with.
+    ///
+    /// The guard is the mirror image of the one above, so exactly one of the pair runs on any server:
+    /// `refresh-client -B` is tmux 3.2, and below it `pane_current_command` arrives only with a
+    /// `list-panes`. The label therefore follows what is running only as far as something *triggers*
+    /// one — `schedulePaneRefresh` on `%window-renamed` and `%window-pane-changed` — which is the
+    /// fallback, and the reason the test above says a background pane "kept its old label until
+    /// something unrelated happened to refresh". This asserts the fallback still closes the gap when
+    /// that something happens, which is the most the old versions can promise.
+    ///
+    /// It exists because the matrix made the hole visible: with one modern tmux on the machine, the
+    /// subscription test skipped nothing and the polling path had never run.
+    func testACommandInABackgroundPaneIsReportedAfterARefreshBelowSubscriptions() async throws {
+        let version = try XCTUnwrap(TmuxVersion(installedTmuxVersion() ?? ""))
+        try XCTSkipIf(
+            version.supportsSubscriptions,
+            "this is the pre-3.2 fallback; \(version.raw) subscribes instead"
+        )
+
+        runTmux(["new-session", "-d", "-s", sessionName, "-x", "100", "-y", "30"])
+        runTmux(["split-window", "-d", "-t", sessionName])
+
+        let service = SessionService()
+        let sink = LogSink()
+        await service.setDiagnosticLogger { message in
+            Task { await sink.append(message) }
+        }
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { host in
+            (host.activeSession?.activeWindow?.panes.count ?? 0) >= 2
+        }
+        let window = try XCTUnwrap(host.activeSession?.activeWindow)
+        let current = window.activePaneId
+        let background = try XCTUnwrap(window.panes.first { $0.id != current }?.id)
+
+        runTmux(["send-keys", "-t", background, "sleep 47", "Enter"])
+
+        // Wait for tmux to actually be *running* it before triggering the refresh, and this ordering
+        // is the whole test rather than a nicety. `send-keys` returns once the keys are delivered;
+        // the shell still has to fork and exec. A refresh that lands in that window reads the
+        // shell's own name — a correct answer to a question asked too early — and below 3.2 nothing
+        // polls again afterwards, so the stale value sticks. Written the other way round this test
+        // failed against a fallback that was working perfectly.
+        var running = false
+        for _ in 0..<50 where !running {
+            running = tmuxQuery(
+                ["display-message", "-p", "-t", background, "#{pane_current_command}"]
+            ) == "sleep"
+            if !running { try await Task.sleep(for: .milliseconds(200)) }
+        }
+        XCTAssertTrue(running, "the background command never started, so there is nothing to report")
+
+        // The event that triggers the refresh. A rename is the cheapest one that reaches
+        // `%window-renamed`, and it is a thing users do constantly — which is why the fallback is
+        // usable at all rather than merely present.
+        runTmux(["rename-window", "-t", window.id, "polling-refresh"])
+
+        // Two assertions, because they fail for different reasons and the first one localises the
+        // second: if the notification never arrived, the refresh it triggers cannot have run, and
+        // blaming the refresh would send the next reader looking in the wrong place.
+        let renamed = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.activeSession?.activeWindow?.name == "polling-refresh"
+        }
+        XCTAssertTrue(renamed, "%window-renamed never reached the model")
+
+        let reported = try await waitFor(seconds: 15) {
+            await service.getHost("local")?
+                .activeSession?.activeWindow?.panes.first { $0.id == background }?.command == "sleep"
+        }
+        let diagnostics = await sink.text
+        let latest = await service.getHost("local")
+        let panes = latest?.activeSession?.activeWindow?.panes.map { "\($0.id)=\($0.command)" } ?? []
+        let tmuxSays = tmuxQuery(
+            ["list-panes", "-a", "-F", "#{pane_id}=#{pane_current_command}"], allLines: true
+        ) ?? "(nothing)"
+        XCTAssertTrue(
+            reported,
+            "the polling fallback never reported the background pane's command after a refresh.\n"
+                + "model: \(panes)\ntmux:  \(tmuxSays.components(separatedBy: .newlines))"
+                + "\n\(diagnostics)"
+        )
+
+        runTmux(["send-keys", "-t", background, "C-c"])
+        await service.disconnectHost(hostId: "local")
+    }
+
     // MARK: - Stale client reconciliation (F4.17)
 
     /// An orphaned control-mode client is detached on attach; the user's own terminal is not.

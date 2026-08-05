@@ -1392,7 +1392,7 @@ public actor SessionService {
     private func handle(_ event: ControlEvent, hostId: String, connection: Connection) {
         switch event {
         case .begin(_, let number, let flags):
-            log("[\(hostId)] %begin \(number)")
+            log("[\(hostId)] %begin \(number) flags=\(flags) pending=\(connection.pending.count)")
             if let last = connection.lastCommandNumber, number <= last {
                 // Server-wide numbers only ever go up. A repeat means we are reading something that
                 // is not the frame we think it is.
@@ -2010,9 +2010,15 @@ public actor SessionService {
     /// every pane switch — and the session and window lists have not changed at those moments. Shares
     /// the same debounce task, so a burst of notifications costs one round trip.
     private func schedulePaneRefresh(hostId: String) {
-        guard let connection = connections[hostId], connection.handshakeComplete else { return }
+        guard let connection = connections[hostId], connection.handshakeComplete else {
+            log("[\(hostId)] pane refresh skipped: no handshaken channel")
+            return
+        }
         // Never narrows a full refresh that is already pending.
-        guard connection.topologyRefreshTask == nil else { return }
+        guard connection.topologyRefreshTask == nil else {
+            log("[\(hostId)] pane refresh skipped: a refresh is already pending")
+            return
+        }
         connection.pendingRefreshIsFullTopology = false
         connection.topologyRefreshTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(150))

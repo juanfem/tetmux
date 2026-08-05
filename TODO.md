@@ -8,10 +8,9 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**7 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
-integration matrix were closed on 2026-08-05; what they turned into is recorded in `CLAUDE.md`, not
-here. The matrix left one entry of its own behind — the untested polling fallback below — because
-running the suite on five servers instead of one is what made that hole visible.
+**6 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
+integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on 2026-08-06; what
+they turned into is recorded in `CLAUDE.md`, not here.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
@@ -32,16 +31,6 @@ References point into current `main`. Line numbers drift; the symbol names besid
   `insertText` — asserting nothing reaches the channel until commit and the committed string
   arrives as one `send-keys -H`; add a dead-key sequence (⌥e, e → é).
   `Sources/tetmuxUI/TerminalSurface.swift:133`, `Sources/tetmuxUI/KeyEventMonitor.swift`
-
-- [ ] **A positive test for the pane-command polling fallback (§3.4).** The subscription path has
-  one (`testACommandInABackgroundPaneIsReportedWithoutARefresh`) and it correctly skips below 3.2,
-  where `refresh-client -B` does not exist — but nothing then covers what happens *instead*, so
-  tmux 3.0 runs of the matrix have a hole exactly where the fallback lives. The mechanism is
-  `schedulePaneRefresh` on `%window-renamed` and `%window-pane-changed`.
-  *Do:* a counterpart guarded by `XCTSkipIf(version.supportsSubscriptions)` — the mirror image of
-  the existing guard, so exactly one of the pair runs on every version. Start a command in a
-  background pane, then cause a refresh-triggering event, and assert the model reports the command.
-  `Tests/tetmuxTests/SessionIntegrationTests.swift`, `Scripts/test-matrix.sh`
 
 - [ ] **Chaos tests (§8).** None exist. Each scenario must end in a defined state and recover.
   *Do,* as integration tests where the machinery allows: (1) kill the spawned process mid-stream

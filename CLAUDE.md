@@ -39,7 +39,8 @@ Scripts/test-matrix.sh                 # the integration suite against every one
 Scripts/test-matrix.sh 3.0 --filter testDraggingATabReordersTheSession
 ```
 
-`.github/workflows/ci.yml` runs **three** jobs on every push. `swift test` on macOS with tmux
+`.github/workflows/ci.yml` runs **three** jobs on every push, and a fourth — the tmux version matrix
+below — weekly and on demand. `swift test` on macOS with tmux
 installed — otherwise the integration suite silently skips itself and a green check means nothing, so
 the run fails if the skip fires. On Ubuntu, `swift build --target tetmuxCore` **and**
 `swift test --filter tetmuxCoreTests`, which is what exercises the §2.4 portability hedge; every job
@@ -1201,8 +1202,12 @@ pinned releases, so a rebuild is byte-identical forever. The scripts exist for *
 them the fixtures are one person's word about what they once saw.
 
 **…and the integration suite runs across it too, which is a different property.** The fixtures pin
-what each version *says*; `Scripts/test-matrix.sh` pins what tetmux *does* about it, which is where
-the version branches live — per-window sizing off below 2.9, tab reordering as `move-window -b` on
+what each version *says*; `Scripts/test-matrix.sh` pins what tetmux *does* about it. It is a CI job
+(`matrix` in `ci.yml`) rather than a per-push one: **weekly, plus `workflow_dispatch`** — press the
+button after touching a version-conditional path. Not on pushes or pull requests, because building
+five tmuxen from pinned tarballs is minutes of `./configure && make` each; `actions/cache` keyed on
+the build script pays that once. Running it locally is the same one command, and worth it before
+pushing a change to any fallback. It is where the version branches live — per-window sizing off below 2.9, tab reordering as `move-window -b` on
 3.2 and a run of `swap-window`s below it, pane commands subscribed on 3.2 and polled below, no flow
 control at all before 3.2. `PtyTransport.resolveTmux` reads `TETMUX_TMUX` to pick the binary, and it
 is **local-only by design**: a remote host runs whatever its own login shell finds, so a path on this
