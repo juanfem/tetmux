@@ -1161,6 +1161,24 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(keymap.shortcut(for: keyEvent("k", [])))
     }
 
+    /// The half of a named key that the display table cannot vouch for: a chord that reads correctly
+    /// and matches nothing is worse than one that reads badly. `charactersIgnoringModifiers` for
+    /// ⌃⌘Space really is `" "`, which is the same character the binding holds.
+    func testTheSpaceChordMatchesTheEventItWasRecordedFrom() {
+        let keymap = KeymapPolicy.default
+        XCTAssertEqual(
+            keymap.shortcut(for: keyEvent(" ", [.command, .control])),
+            .copyModeStartSelection
+        )
+        XCTAssertEqual(
+            KeyBinding(event: keyEvent(" ", [.command, .control])),
+            KeyBinding(" ", [.command, .control]),
+            "the recorder has to produce the binding the default map holds"
+        )
+        // Still exact about modifiers: a bare space belongs to the pane.
+        XCTAssertNil(keymap.shortcut(for: keyEvent(" ", [])))
+    }
+
     /// F4.21 — after the literal escape, even a bound chord belongs to the pane.
     func testLiteralEscapeLetsABoundChordThrough() {
         let keymap = KeymapPolicy.default
@@ -1180,10 +1198,33 @@ final class AppModelTests: XCTestCase {
             KeyBinding("=", [.command]),
             // The one the `+` separator could eat.
             KeyBinding("+", [.command, .shift]),
+            // …and the ones with no glyph of their own, which are stored by name.
+            KeyBinding(" ", [.command, .control]),
+            KeyBinding("\t", [.command]),
+            KeyBinding(Character(UnicodeScalar(0xF700)!), [.command]),
         ] {
             let text = binding.storageString
             XCTAssertEqual(KeyBinding(storageString: text), binding, "round trip of \(text)")
         }
+    }
+
+    /// A shortcut nobody can read back is a shortcut nobody can check, which is most of what the
+    /// settings table is for. Uppercasing the character rendered the space key as a chord ending in
+    /// nothing, and an arrow key as a private-use codepoint the font draws as a box.
+    func testKeysWithNoGlyphAreNamedTheWayMacOSNamesThem() {
+        XCTAssertEqual(KeyBinding(" ", [.command, .control]).displayString, "⌃⌘Space")
+        XCTAssertEqual(KeyBinding("\t", [.command]).displayString, "⌘⇥")
+        XCTAssertEqual(KeyBinding(Character(UnicodeScalar(0xF700)!), [.command]).displayString, "⌘↑")
+        XCTAssertEqual(KeyBinding("w", [.command, .shift]).displayString, "⇧⌘W")
+    }
+
+    /// `settings.json` is meant to be read and edited by hand (§2.3), so the stored form is the name
+    /// rather than the character — a literal trailing space would not survive anyone looking at it.
+    func testAKeyWithNoGlyphIsStoredByName() {
+        XCTAssertEqual(KeyBinding(" ", [.command, .control]).storageString, "ctrl+cmd+space")
+        XCTAssertEqual(KeyBinding(storageString: "ctrl+cmd+space"), KeyBinding(" ", [.command, .control]))
+        // A name and a one-character key cannot collide: every name is longer than one character.
+        XCTAssertEqual(KeyBinding(storageString: "cmd+s"), KeyBinding("s"))
     }
 
     func testAnUnparseableChordIsRejectedRatherThanGuessedAt() {

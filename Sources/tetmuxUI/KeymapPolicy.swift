@@ -95,13 +95,43 @@ public struct KeyBinding: Equatable, Sendable {
         (.command, "⌘", "cmd"),
     ]
 
-    /// `⇧⌘W`, for anywhere a person reads it.
+    /// The keys that have no glyph of their own, named the way macOS names them.
+    ///
+    /// Every one of these is a character `charactersIgnoringModifiers` really produces, so every one
+    /// of them is recordable today — and without this table they were rendered by uppercasing the
+    /// character, which for the space key is a chord ending in nothing and for an arrow key is a
+    /// private-use codepoint the font draws as a box. A shortcut nobody can read back is a shortcut
+    /// nobody can check, which is most of what the settings table is for.
+    ///
+    /// macOS spells the space key out — System Settings shows Spotlight's chord as `⌘Space` — and
+    /// uses a symbol for the rest, which is what the menus themselves do. The storage names are for
+    /// `settings.json`, which §2.3 chose so the file can be read and edited by hand: `cmd+ctrl+space`
+    /// says what it means, and a literal trailing space would not survive a person looking at it.
+    private static let namedKeys: [(key: Character, display: String, storage: String)] = [
+        (" ", "Space", "space"),
+        ("\t", "⇥", "tab"),
+        ("\u{1b}", "⎋", "escape"),
+        ("\u{7f}", "⌫", "delete"),
+        // AppKit's function-key block. `NSUpArrowFunctionKey` and its neighbours, written as scalars
+        // so the table stays a table.
+        (Character(UnicodeScalar(0xF700)!), "↑", "up"),
+        (Character(UnicodeScalar(0xF701)!), "↓", "down"),
+        (Character(UnicodeScalar(0xF702)!), "←", "left"),
+        (Character(UnicodeScalar(0xF703)!), "→", "right"),
+        (Character(UnicodeScalar(0xF729)!), "↖", "home"),
+        (Character(UnicodeScalar(0xF72B)!), "↘", "end"),
+        (Character(UnicodeScalar(0xF72C)!), "⇞", "pageup"),
+        (Character(UnicodeScalar(0xF72D)!), "⇟", "pagedown"),
+    ]
+
+    /// `⇧⌘W`, or `⌃⌘Space`, for anywhere a person reads it.
     public var displayString: String {
         let symbols = Self.displayOrder
             .filter { modifiers.contains($0.0) }
             .map(\.1)
             .joined()
-        return symbols + String(key).uppercased()
+        let name = Self.namedKeys.first { $0.key == key }?.display ?? String(key).uppercased()
+        return symbols + name
     }
 
     /// `cmd+shift+w`, for `settings.json`.
@@ -111,7 +141,8 @@ public struct KeyBinding: Equatable, Sendable {
     /// `{"closeWindow": 18}` is not that — nor is it stable in any sense the reader can check.
     public var storageString: String {
         let names = Self.displayOrder.filter { modifiers.contains($0.0) }.map(\.2)
-        return (names + [String(key)]).joined(separator: "+")
+        let keyText = Self.namedKeys.first { $0.key == key }?.storage ?? String(key)
+        return (names + [keyText]).joined(separator: "+")
     }
 
     /// Parses `storageString` back, rejecting anything it does not recognise.
@@ -132,7 +163,16 @@ public struct KeyBinding: Equatable, Sendable {
         let tail = parts[parts.count - 1]
         // An empty tail is only ever the `+` that the split consumed.
         let keyText = tail.isEmpty ? "+" : tail
-        guard keyText.count == 1, let key = keyText.first else { return nil }
+        // A name first, then a literal character. The two cannot collide: every name is longer than
+        // one character, and the check below rejects anything longer than one that is not a name.
+        let key: Character
+        if let named = Self.namedKeys.first(where: { $0.storage == keyText }) {
+            key = named.key
+        } else if keyText.count == 1, let single = keyText.first {
+            key = single
+        } else {
+            return nil
+        }
         guard !modifiers.isEmpty else { return nil }
 
         self.key = key
@@ -197,10 +237,10 @@ public struct KeymapPolicy: Sendable {
         // tmux's own `prefix [`, in Cmd space. Not ⌘C, which is Copy — and copy mode is the thing
         // you enter *before* copying, so taking the Copy chord for it would be exactly backwards.
         .copyMode: KeyBinding("[", [.command, .control]),
-        // tmux's own emacs copy table marks with `C-Space`, and that is the chord this wants — but a
-        // `KeyBinding` is a character, so it would render as `⌃⌘` followed by nothing in the menu and
-        // in the settings table, which is a shortcut nobody can read back. `S` for selection instead.
-        .copyModeStartSelection: KeyBinding("s", [.command, .control]),
+        // tmux's own emacs copy table marks with `C-Space`, and so does every emacs-descended editor;
+        // this is that chord in `Cmd` space. It reads as `⌃⌘Space` because `namedKeys` spells the
+        // space key out, which is what macOS does with it.
+        .copyModeStartSelection: KeyBinding(" ", [.command, .control]),
         // The one item that really is Copy: it ends with the selection on the Mac's pasteboard, which
         // is what ⌘C means everywhere. Available only in copy mode, where SwiftTerm has no selection
         // of its own for the ordinary ⌘C to act on.

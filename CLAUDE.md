@@ -958,6 +958,17 @@ builds its map with `updateValue`: assigning `nil` through a `[String: String?]`
 the key, which would make a deliberately unbound shortcut indistinguishable from an untouched one
 and bring its default back on the next launch.
 
+**A key with no glyph is named, not uppercased.** `KeyBinding` holds a `Character`, and rendering it
+by uppercasing gave the space key a chord ending in nothing and an arrow key a private-use codepoint
+the font draws as a box — both of which are recordable today, so both were reachable. `namedKeys`
+maps them to what macOS calls them: the word for space (System Settings shows Spotlight as
+`⌘Space`) and the symbol for the rest, the way the menus do. The *storage* name is separate and is
+for `settings.json`, which §2.3 chose so the file can be read by hand — `ctrl+cmd+space` says what it
+means and a literal trailing space would not survive anyone looking at it. Names and one-character
+keys cannot collide, because every name is longer than one character. What the table cannot vouch
+for is that the chord still *matches*, so that has its own test: `charactersIgnoringModifiers` for
+⌃⌘Space really is `" "`, which is the character the binding holds.
+
 **Anything that belongs to a window lives on `WindowState`, not `AppModel`.** Selection, focused
   pane, and every sheet the user can raise are per macOS window. Sharing them on the model produced two
   bugs with one cause: clicking a session in one window retargeted all of them, and one
