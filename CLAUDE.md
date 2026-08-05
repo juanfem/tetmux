@@ -741,8 +741,22 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   all*, because dimming a pane is dimming terminal text, and the frame around the focused one takes
   over the job at full accent saturation and double the width. The tests assert **direction**, not
   numbers — the failure they exist to catch is a later site that takes the standard value in both
-  branches, which leaves the preference switched on and doing nothing. `differentiateWithoutColor` is
-  still unread; the sidebar's connection rail and the status bar's RTT dot speak in hue alone.
+  branches, which leaves the preference switched on and doing nothing.
+- **`differentiateWithoutColor` has no policy type, deliberately.** Unlike contrast there are no
+  shared numbers to keep in step — the replacement channel is necessarily different at every site, a
+  word here and a filled chip there — so each site reads
+  `@Environment(\.accessibilityDifferentiateWithoutColor)` and answers for itself. Three sites, and
+  the interesting part is which ones needed anything. The **RTT dot** did: the number beside it is
+  the measurement and the hue is the judgement, so with colour gone "120 ms" answers nothing unless
+  you know the thresholds; it gains `· good`/`· fair`/`· slow`, which is the same answer the sidebar
+  already gives in words one panel up. The **⌥-armed close buttons** did: red is the entire content
+  of "this click will not stop to ask". The sidebar's **connection rail** did *not* — `hostStatusLabel`
+  already puts every state but `.connected` into words on the row the rail belongs to, and
+  `.connected` is the one with no label, so the states are already distinct without hue. Checking
+  that rather than decorating it is the point. One measured trap: doubling the armed glyph's rule
+  takes an 11×11 mark from 45 inked pixels to 65 offscreen and **still does not read** on a row where
+  it is drawn in `.secondary`, so the signal is a filled chip behind the button and the weight is
+  only its companion.
 
 ## Testing
 

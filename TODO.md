@@ -22,9 +22,8 @@ What is left falls into three groups, and they are not equally blocked:
   tab reordering and `move-window`, window/session state restoration, listing a host's sessions
   without attaching (F4.4), and the §8 test infrastructure — a containerised sshd matrix, chaos
   tests, a full geometry suite, a rendering corpus.
-- **Small and unblocked.** `differentiateWithoutColor` on the two indicators that speak in hue
-  alone, a UI for `newSession`'s start directory, and the three still-unwired declarations —
-  per-host OSC 52, an editable keymap, and ⌘⌥V's literal escape.
+- **Small and unblocked.** A UI for `newSession`'s start directory, and the three still-unwired
+  declarations — per-host OSC 52, an editable keymap, and ⌘⌥V's literal escape.
 
 ## Protocol correctness
 
@@ -269,8 +268,13 @@ What is left falls into three groups, and they are not equally blocked:
   unfocused pane stops being dimmed at all — dimming a pane is dimming terminal text, and the frame
   around the focused one takes over the job at full saturation and double the width. The tests assert
   direction rather than numbers, which is what stops a later site from taking the standard value in
-  both branches. `differentiateWithoutColor` is still unread: the sidebar's connection rail and the
-  status bar's RTT dot say their state in hue alone.*
+  both branches. `differentiateWithoutColor` is handled too, and with no policy type — the
+  replacement channel differs at every site, so each reads the environment itself. The RTT dot gains
+  `· good`/`· fair`/`· slow`, since the number beside it is the measurement and the hue was the
+  judgement; the ⌥-armed close buttons gain a filled chip, since red was the whole content of "this
+  will not stop to ask". The connection rail needed **nothing** — `hostStatusLabel` already says every
+  state but `.connected` in words, and `.connected` is the one with no label — which is worth having
+  checked rather than decorated.*
 
 ## Requirements shipped as stubs
 

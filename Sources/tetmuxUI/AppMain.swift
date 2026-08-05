@@ -519,6 +519,7 @@ private struct WindowTab: View {
 
     @State private var isHovering = false
     @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
     /// ⌥ skips the close confirmation here for the same reason it does in the tree — this is the same
     /// action on the same window, and a modifier that worked in one of the two places would read as a
     /// bug in the other.
@@ -526,6 +527,11 @@ private struct WindowTab: View {
 
     private func select() {
         model.select(in: state, host: state.selectedHostId ?? "", session: session.id, window: window.id)
+    }
+
+    /// §7 — the ⌥ state has to be readable without hue, and only when the user has asked for that.
+    private var saysArmedWithoutColour: Bool {
+        modifiers.isOptionHeld && differentiateWithoutColor
     }
 
     /// The window's label, with the focused pane's part in medium.
@@ -593,8 +599,14 @@ private struct WindowTab: View {
                 model.requestCloseWindow(in: state, skippingConfirmation: OptionKey.isHeld)
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
+                    // §7 — with `differentiateWithoutColor` on, red is the only thing saying this
+                    // click will not stop to ask. Weight *and* a chip, the same pairing the sidebar's
+                    // armed row button uses: the weight alone was measured there and does not read.
+                    .font(.system(size: 8, weight: saysArmedWithoutColour ? .black : .bold))
                     .frame(width: 13, height: 13)
+                    .background(
+                        Circle().fill(saysArmedWithoutColour ? Color.primary.opacity(0.30) : .clear)
+                    )
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

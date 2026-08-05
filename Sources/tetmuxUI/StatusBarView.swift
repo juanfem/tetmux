@@ -9,6 +9,8 @@ struct StatusBarView: View {
     let window: TmuxWindow
     let focusedPaneId: String?
 
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
+
     private var pane: TmuxPane? {
         window.panes.first { $0.id == (focusedPaneId ?? window.activePaneId) }
             ?? window.panes.first
@@ -41,7 +43,9 @@ struct StatusBarView: View {
             if let rtt = host.rttMilliseconds {
                 HStack(spacing: 4) {
                     Circle().fill(rttColor(rtt)).frame(width: 6, height: 6)
-                    Text(String(format: "%.0f ms", rtt)).font(.caption2).foregroundStyle(.secondary)
+                    Text(Self.rttText(rtt, differentiateWithoutColor: differentiateWithoutColor))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 .help("Round trip over the control channel")
             }
@@ -74,5 +78,24 @@ struct StatusBarView: View {
 
     private func rttColor(_ rtt: Double) -> Color {
         rtt < 50 ? .green : (rtt < 150 ? .orange : .red)
+    }
+
+    /// The dot is the judgement and the number is the measurement, so with colour taken away only the
+    /// measurement is left — and "120 ms" answers nothing unless you already know where the
+    /// thresholds sit. The word is the same answer the dot gives, in the one channel that survives.
+    ///
+    /// Words rather than a second shape, because that is the answer the sidebar already reached one
+    /// panel up: a host that is not simply connected says "reconnecting 3/8" or "degraded" in text
+    /// precisely because a coloured dot "would say the same thing twice and still not tell anyone
+    /// what yellow meant". A new shape vocabulary here would need learning; these do not.
+    ///
+    /// Only with the preference on. The status bar is a single compact line and the word is genuinely
+    /// redundant when the colour is doing its job — which is exactly the trade the preference exists
+    /// to let the user make.
+    static func rttText(_ rtt: Double, differentiateWithoutColor: Bool) -> String {
+        let measured = String(format: "%.0f ms", rtt)
+        guard differentiateWithoutColor else { return measured }
+        let judgement = rtt < 50 ? "good" : (rtt < 150 ? "fair" : "slow")
+        return "\(measured) · \(judgement)"
     }
 }

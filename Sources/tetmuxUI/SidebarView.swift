@@ -192,6 +192,18 @@ struct SidebarView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    /// The rail's hue, and the one colour-carried signal in the app that needs no
+    /// `differentiateWithoutColor` fallback (§7).
+    ///
+    /// Checked rather than assumed: `hostStatusLabel` puts every state but `.connected` into words
+    /// on the row the rail belongs to — a spinner, "reconnecting 3/8", "degraded", "failed", "not
+    /// connected" — and `.connected` is the one with no label at all. So the six states are already
+    /// six distinct readings with the hue removed, and adding a badge would be the second thing
+    /// saying what the label says, which is what that label was written to replace.
+    ///
+    /// The one gap is a host scrolled so far that its row is off screen while its rail is not. Left
+    /// alone deliberately: at that point the rail is 2pt of colour belonging to a host whose name is
+    /// also off screen, so it identifies nothing either way.
     private func railColor(_ state: ConnectionState) -> Color {
         switch state {
         case .connected: return .green
@@ -648,17 +660,20 @@ private struct RowButton: View {
     /// is what the user has asked for.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
+    /// Red is the *only* thing saying this click will not stop to ask, which is precisely the kind of
+    /// signal this preference exists to replace.
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
     @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
-            RowActionGlyph(kind: glyph)
+            RowActionGlyph(kind: glyph, isEmphasised: saysArmedWithoutColour)
                 .foregroundStyle(tint)
                 .frame(width: RowAction.size, height: RowAction.size)
                 .background(
                     RoundedRectangle(cornerRadius: RowAction.radius)
-                        .fill(isHovered ? RowAction.hoverFill(contrast) : Color.clear)
+                        .fill(chipFill)
                 )
                 .contentShape(RoundedRectangle(cornerRadius: RowAction.radius))
         }
@@ -676,6 +691,22 @@ private struct RowButton: View {
         if isArmed { return AnyShapeStyle(Color.red) }
         return AnyShapeStyle(isHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
     }
+
+    /// §7 — `differentiateWithoutColor`, and only then: red alone says this click will not stop to
+    /// ask, and that is the whole content of the state.
+    private var saysArmedWithoutColour: Bool { isArmed && differentiateWithoutColor }
+
+    /// The chip behind the glyph, which is the part that actually carries "armed" without hue.
+    ///
+    /// Filling the button's own background rather than adding a shape: this control already has that
+    /// rounded rectangle for hover, so arming it is a state of something already on screen instead of
+    /// a new element appearing under the pointer. The heavier rule alone was measured and is not
+    /// enough — 45 inked pixels to 65 on an 11×11 glyph drawn in `.secondary`, which reads offscreen
+    /// and does not read on a row.
+    private var chipFill: Color {
+        if saysArmedWithoutColour { return Color.primary.opacity(0.30) }
+        return isHovered ? RowAction.hoverFill(contrast) : Color.clear
+    }
 }
 
 /// The `+` and the `✕` on a row action, drawn as rules rather than set from SF Symbols.
@@ -690,6 +721,19 @@ private struct RowActionGlyph: View {
     enum Kind { case plus, cross }
 
     let kind: Kind
+    /// Draws the same glyph at a heavier stroke, for `differentiateWithoutColor` (§7).
+    ///
+    /// Weight rather than a third shape, which keeps the reasoning above intact: the two glyphs are
+    /// the same two rules at two rotations *because* that is the only way they weigh the same, and a
+    /// distinct armed shape would have to be matched against both all over again — for a state that
+    /// lasts exactly as long as a key is held. Heavier says "more of what this already is", which is
+    /// what arming means.
+    ///
+    /// Measured, because it is not enough on its own: doubling the rule takes an 11×11 glyph from 45
+    /// inked pixels to 65 at 1×, which is a real difference offscreen and did not read on a row where
+    /// the glyph is drawn in `.secondary`. So the caller pairs this with a filled chip behind the
+    /// button — this is the part that keeps the *glyph* consistent with the chip, not the signal.
+    var isEmphasised: Bool = false
 
     /// The rule length before rotation.
     private static let length: CGFloat = 11
@@ -703,7 +747,10 @@ private struct RowActionGlyph: View {
     }
 
     private var rule: some View {
-        Capsule().frame(width: Self.length, height: TreeIcon.stroke)
+        Capsule().frame(
+            width: Self.length,
+            height: isEmphasised ? TreeIcon.stroke * 2 : TreeIcon.stroke
+        )
     }
 }
 
