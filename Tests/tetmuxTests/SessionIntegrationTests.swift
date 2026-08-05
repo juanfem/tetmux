@@ -4,21 +4,58 @@ import XCTest
 
 /// End-to-end over a real PTY and a real tmux server (§8, integration matrix). Skipped when tmux
 /// is not installed so the suite still runs on a bare CI image.
+///
+/// **Every test gets a tmux server of its own**, and that is load-bearing rather than tidy. The
+/// suite used to share whatever server the machine already had, which worked for one reason: a
+/// developer's tmux has been up for days, is healthy, and is the same version as the client. Neither
+/// half of that survives contact with §8's version matrix, and both were hiding real defects.
+///
+/// Two of them, found the first time this ran against a private server. A test probed an untouched
+/// host and asserted the answer was non-empty — true only because the machine happened to have
+/// sessions of its own, so it would have failed on any clean box. And tests leak clients: a
+/// `SessionService` that is never disconnected leaves a live `tmux -CC` attached, and those
+/// accumulate across a run until F4.17's orphan reconciliation is detaching a dozen of them on every
+/// attach. Against a long-lived server that is merely untidy; against a fresh one it wedged the
+/// suite about twenty tests in, and every test after it timed out at fifteen seconds reporting
+/// nothing that pointed at the cause.
+///
+/// A server per test costs a `kill-server` each and makes the suite hermetic: no ambient sessions,
+/// no inherited clients, and nothing that depends on what the person running it happens to be doing
+/// in another window.
 final class SessionIntegrationTests: XCTestCase {
     private var sessionName = ""
+    /// This test's `TMUX_TMPDIR`. tmux puts its socket under `<dir>/tmux-<uid>/`, so a directory is
+    /// the whole of the isolation — and the server dies with it.
+    private var serverDirectory: URL?
 
     override func setUp() async throws {
-        try XCTSkipIf(PtyTransport.resolveExecutable("tmux") == nil, "tmux is not installed")
+        try XCTSkipIf(PtyTransport.resolveTmux() == nil, "tmux is not installed")
         sessionName = "tetmux-test-\(UUID().uuidString.prefix(8))"
+
+        // Under /tmp rather than `FileManager`'s temporary directory: a unix socket path is capped
+        // at 104 bytes and macOS's per-user temp directory is a ~50-character path before anything
+        // is appended to it.
+        let directory = URL(fileURLWithPath: "/tmp/tetmux-srv-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        serverDirectory = directory
+        // The child processes every channel spawns inherit this, which is what makes it reach tmux.
+        setenv("TMUX_TMPDIR", directory.path, 1)
     }
 
     override func tearDown() async throws {
         guard !sessionName.isEmpty else { return }
-        runTmux(["kill-session", "-t", sessionName])
+        // The whole server, not this test's session: what has to go is every client the test left
+        // attached, and killing the session it names would leave the others behind.
+        runTmux(["kill-server"])
+        if let serverDirectory {
+            try? FileManager.default.removeItem(at: serverDirectory)
+            self.serverDirectory = nil
+        }
+        unsetenv("TMUX_TMPDIR")
     }
 
     private func runTmux(_ arguments: [String], tmuxDirectory: URL? = nil) {
-        guard let tmux = PtyTransport.resolveExecutable("tmux") else { return }
+        guard let tmux = PtyTransport.resolveTmux() else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tmux)
         process.arguments = arguments
@@ -356,9 +393,16 @@ final class SessionIntegrationTests: XCTestCase {
 
         await service.switchSession(hostId: "local", sessionId: target.id)
 
-        // The client really moved: tmux reports the new session as the attached one.
+        // The client really moved, asserted through `liveSessionIds` — tetmux's own record of what it
+        // is attached to — rather than through `TmuxSession.isAttached`, which is tmux's client count.
+        // The two differ by version: **tmux 3.0 does not count a control-mode client in
+        // `#{session_attached}` at all** (verified across the matrix: 3.0 answers 0 for the very
+        // session this client is attached to, 3.2a onward answer 1). Asserting tmux's field made this
+        // test fail on 3.0 for a reason that has nothing to do with `switch-client`, and it was the
+        // wrong field regardless: `isAttached` counts terminals elsewhere on the machine and so can
+        // never answer "did *our* client move", which is what this test is about.
         let switched = try await waitForHost(service, timeout: 10) { $0.activeSessionId == target.id }
-        XCTAssertTrue(try XCTUnwrap(switched.sessions.first { $0.id == target.id }).isAttached)
+        XCTAssertTrue(switched.isLive(target.id), "the client did not move to the target session")
 
         // And output for a pane in the newly attached session now flows.
         let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
@@ -1264,7 +1308,7 @@ final class SessionIntegrationTests: XCTestCase {
 
     /// `show-options -w` inherits, so this reports the session's effective value.
     private func windowSizeOption() -> String? {
-        guard let tmux = PtyTransport.resolveExecutable("tmux") else { return nil }
+        guard let tmux = PtyTransport.resolveTmux() else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tmux)
         process.arguments = ["show-options", "-t", sessionName, "window-size"]
@@ -1383,7 +1427,7 @@ final class SessionIntegrationTests: XCTestCase {
         // The orphan. Held for the whole test so nothing but the reconciliation can end it.
         let orphan = PtyTransport()
         let orphanStream = try orphan.spawn(
-            executable: try XCTUnwrap(PtyTransport.resolveExecutable("tmux")),
+            executable: try XCTUnwrap(PtyTransport.resolveTmux()),
             arguments: TmuxCommand.localArguments(mode: .attach(sessionName: sessionName)),
             environment: Self.childLikeEnvironment(),
             initialSize: (cols: 80, rows: 24)
@@ -1428,7 +1472,7 @@ final class SessionIntegrationTests: XCTestCase {
         // A non-control client: `tmux attach` on a pty, with no `-CC`.
         let terminal = PtyTransport()
         let terminalStream = try terminal.spawn(
-            executable: try XCTUnwrap(PtyTransport.resolveExecutable("tmux")),
+            executable: try XCTUnwrap(PtyTransport.resolveTmux()),
             arguments: ["attach-session", "-t", sessionName],
             environment: Self.childLikeEnvironment(),
             initialSize: (cols: 80, rows: 24)
@@ -1471,7 +1515,7 @@ final class SessionIntegrationTests: XCTestCase {
         // A colleague in another terminal, which is exactly a plain `tmux attach` on a pty.
         let bystander = PtyTransport()
         let bystanderStream = try bystander.spawn(
-            executable: try XCTUnwrap(PtyTransport.resolveExecutable("tmux")),
+            executable: try XCTUnwrap(PtyTransport.resolveTmux()),
             arguments: ["attach-session", "-t", sessionName],
             environment: Self.childLikeEnvironment(),
             initialSize: (cols: 80, rows: 24)
@@ -1555,7 +1599,7 @@ final class SessionIntegrationTests: XCTestCase {
     /// Static so the polling closures in `waitFor`, which are `@Sendable`, can call it without
     /// capturing the (non-Sendable) test case.
     private static func clientTtys(of session: String) -> [String] {
-        guard let tmux = PtyTransport.resolveExecutable("tmux") else { return [] }
+        guard let tmux = PtyTransport.resolveTmux() else { return [] }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tmux)
         process.arguments = ["list-clients", "-t", session, "-F", "#{client_tty}"]
@@ -1614,11 +1658,10 @@ final class SessionIntegrationTests: XCTestCase {
         // …and still running in the other, with the same process behind it. Filtered rather than
         // listed: that session has a window of its own, so the first line of a plain listing is not
         // the one under test.
-        let survivor = tmuxQuery([
-            "list-windows", "-t", other,
-            "-f", "#{==:#{window_id},\(windowId)}", "-F", "#{window_id}",
-        ])
-        XCTAssertEqual(survivor, windowId, "the window did not survive in its other session")
+        XCTAssertTrue(
+            sessionContainsWindow(windowId, session: other),
+            "the window did not survive in its other session"
+        )
         XCTAssertEqual(
             tmuxQuery(["display-message", "-p", "-t", paneId, "#{pane_pid}"]), pid,
             "closing a tab killed the process (F4.9)"
@@ -1630,9 +1673,12 @@ final class SessionIntegrationTests: XCTestCase {
     /// Dragging a tab reorders the session's windows, and the order the strip shows is the order
     /// `list-windows` reports — so this is the assertion the whole feature reduces to.
     ///
-    /// Against whatever tmux is on PATH, which is 3.2 or newer on any machine this runs on, so it
-    /// exercises the `move-window -b` branch. The `swap-window` fallback below 3.2 is asserted from
-    /// the fixture matrix's own probing rather than here; there is one tmux on the box.
+    /// It takes whichever branch the server supports and asserts the same outcome either way, which
+    /// is what makes it worth running twice: `move-window -b` on 3.2 and newer, and a run of adjacent
+    /// `swap-window`s below it. That second branch had never executed — the comment here used to say
+    /// so, because there is one tmux on a developer's machine — and `Scripts/test-matrix.sh` is what
+    /// changed it: the same assertions against 3.0 are the only thing that has ever proved the
+    /// fallback puts windows in the order a drop asked for.
     func testDraggingATabReordersTheSession() async throws {
         runTmux(["new-session", "-d", "-s", sessionName, "-n", "one"])
         runTmux(["new-window", "-t", sessionName, "-n", "two"])
@@ -1659,12 +1705,16 @@ final class SessionIntegrationTests: XCTestCase {
                   let session = host.sessions.first(where: { $0.name == name }) else { return false }
             return session.windows.map(\.id) == expected
         }
+        // Two assertions, and on the fallback branch they fail separately. tmux agreeing while the
+        // model does not is the exact shape of the bug 3.0 exposed: `swap-window` really does reorder
+        // the windows, and announces only `%session-window-changed`, which says nothing about order —
+        // so the strip kept what it had last read. The model assertion is the one that caught it.
         XCTAssertTrue(reordered, "the windows did not end up in the dropped order")
-        // …and tmux agrees, rather than only our model having moved them.
         XCTAssertEqual(
             tmuxQuery(["list-windows", "-t", sessionName, "-F", "#{window_id}"])?
                 .components(separatedBy: "\n").first,
-            ids[2]
+            ids[2],
+            "tmux disagrees with the model about where the window went"
         )
 
         await service.disconnectHost(hostId: "local")
@@ -1692,9 +1742,7 @@ final class SessionIntegrationTests: XCTestCase {
                 .components(separatedBy: "\n").first
         )
         let pid = try XCTUnwrap(tmuxQuery(["display-message", "-p", "-t", paneId, "#{pane_pid}"]))
-        let targetId = try XCTUnwrap(
-            tmuxQuery(["list-sessions", "-f", "#{==:#{session_name},\(other)}", "-F", "#{session_id}"])
-        )
+        let targetId = try XCTUnwrap(sessionId(named: other))
 
         await service.moveWindow(
             hostId: "local", windowId: moving.id, fromSession: source.id, toSession: targetId
@@ -1713,19 +1761,12 @@ final class SessionIntegrationTests: XCTestCase {
             return inTarget && !stillInSource
         }
         XCTAssertTrue(arrived, "the window never moved to the target session")
-        XCTAssertEqual(
-            tmuxQuery([
-                "list-windows", "-t", other,
-                "-f", "#{==:#{window_id},\(moving.id)}", "-F", "#{window_id}",
-            ]),
-            moving.id,
+        XCTAssertTrue(
+            sessionContainsWindow(moving.id, session: other),
             "the model says it moved and tmux does not"
         )
-        XCTAssertNil(
-            tmuxQuery([
-                "list-windows", "-t", self.sessionName,
-                "-f", "#{==:#{window_id},\(moving.id)}", "-F", "#{window_id}",
-            ]),
+        XCTAssertFalse(
+            sessionContainsWindow(moving.id, session: self.sessionName),
             "the window is still linked into the session it was moved out of"
         )
         XCTAssertEqual(
@@ -1751,9 +1792,7 @@ final class SessionIntegrationTests: XCTestCase {
         let windowId = try XCTUnwrap(
             host.sessions.first { $0.name == sessionName }?.windows.first?.id
         )
-        let targetId = try XCTUnwrap(
-            tmuxQuery(["list-sessions", "-f", "#{==:#{session_name},\(other)}", "-F", "#{session_id}"])
-        )
+        let targetId = try XCTUnwrap(sessionId(named: other))
 
         await service.linkWindow(hostId: "local", windowId: windowId, toSession: targetId)
 
@@ -1763,20 +1802,12 @@ final class SessionIntegrationTests: XCTestCase {
                 .windows.contains { $0.id == windowId } ?? false
         }
         XCTAssertTrue(linked, "the window was never linked into the second session")
-        XCTAssertEqual(
-            tmuxQuery([
-                "list-windows", "-t", other,
-                "-f", "#{==:#{window_id},\(windowId)}", "-F", "#{window_id}",
-            ]),
-            windowId,
+        XCTAssertTrue(
+            sessionContainsWindow(windowId, session: other),
             "the model says it is linked and tmux does not"
         )
-        XCTAssertEqual(
-            tmuxQuery([
-                "list-windows", "-t", self.sessionName,
-                "-f", "#{==:#{window_id},\(windowId)}", "-F", "#{window_id}",
-            ]),
-            windowId,
+        XCTAssertTrue(
+            sessionContainsWindow(windowId, session: self.sessionName),
             "linking took the window out of its original session — that would be a move"
         )
 
@@ -2131,6 +2162,24 @@ final class SessionIntegrationTests: XCTestCase {
 
     /// An ssh whose host key is unknown: the OpenSSH first-contact block, verbatim, and then the
     /// command it was given once the answer arrives.
+    /// The `export PATH=…` line that puts the matrix tmux in front of a stand-in ssh's own `PATH`,
+    /// or nothing when no version is being forced.
+    ///
+    /// Every script here that ends in `exec /bin/sh -c "$1"` runs the *remote command*, and that
+    /// command runs `tmux` by bare name — correctly, because on a real remote host the far side's
+    /// login shell is what has to find it, and `TETMUX_TMUX` names a path on this machine.
+    ///
+    /// Under the version matrix that correctness became a trap. A stand-in "remote" host shares this
+    /// machine's `TMUX_TMPDIR`, so the 3.7b on `PATH` started a **3.7b server on the matrix socket**;
+    /// every local test afterwards pointed a 3.5 client at it, and a tmux client cannot speak to a
+    /// server of another version. One test poisoned the socket and the next twenty timed out at
+    /// fifteen seconds each, reporting nothing that pointed at the cause.
+    private var matrixPathExport: String {
+        guard let tmux = ProcessInfo.processInfo.environment[PtyTransport.tmuxOverrideVariable],
+              !tmux.isEmpty else { return "" }
+        return "export PATH=\(URL(fileURLWithPath: tmux).deletingLastPathComponent().path):$PATH\n"
+    }
+
     private func writeFakeHostKeySshScript() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("tetmux-fake-hostkey-\(UUID().uuidString.prefix(8)).sh")
@@ -2138,7 +2187,7 @@ final class SessionIntegrationTests: XCTestCase {
         // and the thing a hand-written approximation gets wrong.
         let script = """
         #!/bin/sh
-        printf "The authenticity of host '[devbox]:2222 ([10.0.0.9]:2222)' can't be established.\\r\\n"
+        \(matrixPathExport)printf "The authenticity of host '[devbox]:2222 ([10.0.0.9]:2222)' can't be established.\\r\\n"
         printf "ED25519 key fingerprint is: SHA256:Qk9zR2xhY2VEb2NFeGFtcGxlS2V5MDAwMDAwMDAwMDA\\r\\n"
         printf "This key is not known by any other names.\\r\\n"
         printf "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
@@ -2198,10 +2247,13 @@ final class SessionIntegrationTests: XCTestCase {
             .appendingPathComponent("tetmux-iso-\(UUID().uuidString.prefix(8))", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let script = directory.appendingPathComponent("ssh.sh")
+        // See `matrixPathExport`: this stands in for a remote host, so its tmux comes from `PATH` —
+        // which under the matrix has to be the version being tested, or the helpers querying this
+        // server would be a client of one version talking to a server of another.
         try """
         #!/bin/sh
         export TMUX_TMPDIR=\(directory.path)
-        exec /bin/sh -c "$1"
+        \(matrixPathExport)exec /bin/sh -c "$1"
         """.write(to: script, atomically: true, encoding: .utf8)
         return (directory, script)
     }
@@ -2212,7 +2264,7 @@ final class SessionIntegrationTests: XCTestCase {
     }
 
     private func sessionNames(on server: (directory: URL, script: URL)) -> [String] {
-        guard let tmux = PtyTransport.resolveExecutable("tmux") else { return [] }
+        guard let tmux = PtyTransport.resolveTmux() else { return [] }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tmux)
         process.arguments = ["list-sessions", "-F", "#{session_name}"]
@@ -2279,6 +2331,15 @@ final class SessionIntegrationTests: XCTestCase {
 
     /// The answer is offered whichever way it was learned, and a channel's answer wins.
     func testAConnectedHostPrefersItsChannelOverAProbe() async throws {
+        // Something for the probe to find, made here rather than assumed. This test used to probe an
+        // untouched server and assert the answer was non-empty, which is only true when the machine
+        // running it already has tmux sessions of its own — so it passed on a developer's box and
+        // would have failed on any clean one. The version matrix runs against a private, empty
+        // server, which is what made an ambient dependency visible for the first time.
+        let existing = "\(sessionName)-probeable"
+        runTmux(["new-session", "-d", "-s", existing])
+        defer { runTmux(["kill-session", "-t", existing]) }
+
         let service = SessionService()
         await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
         await service.discoverSessions(hostId: "local")
@@ -2527,7 +2588,7 @@ final class SessionIntegrationTests: XCTestCase {
             .appendingPathComponent("tetmux-fake-ssh-\(UUID().uuidString.prefix(8)).sh")
         let script = """
         #!/bin/sh
-        # No trailing newline: ssh blocks on the prompt, and that is exactly the signal the
+        \(matrixPathExport)# No trailing newline: ssh blocks on the prompt, and that is exactly the signal the
         # detector keys on.
         printf "tester@fake-host's password: "
         read -r answer
@@ -2792,8 +2853,13 @@ final class SessionIntegrationTests: XCTestCase {
     }
 
     /// Runs a tmux command outside the channel and returns its first line of output.
-    private func tmuxQuery(_ arguments: [String]) -> String? {
-        guard let tmux = PtyTransport.resolveExecutable("tmux") else { return nil }
+    /// Runs a tmux command and returns its output — the first line, or all of it when asked.
+    ///
+    /// The default is the first line because most callers ask a question with one answer, and
+    /// substring matching over a joined list is a trap. `allLines` is for the two helpers that have
+    /// to filter a listing themselves on versions with no `-f`.
+    private func tmuxQuery(_ arguments: [String], allLines: Bool = false) -> String? {
+        guard let tmux = PtyTransport.resolveTmux() else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tmux)
         process.arguments = arguments
@@ -2804,7 +2870,8 @@ final class SessionIntegrationTests: XCTestCase {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? nil : text.components(separatedBy: .newlines).first
+        if text.isEmpty { return nil }
+        return allLines ? text : text.components(separatedBy: .newlines).first
     }
 
     /// "tmux 3.7b" — `TmuxVersion` skips the leading non-digits itself.
@@ -2812,12 +2879,37 @@ final class SessionIntegrationTests: XCTestCase {
         tmuxQuery(["-V"])
     }
 
+    /// A session's `$id` from its name, and a window's presence in a session, without tmux's `-f`.
+    ///
+    /// `list-sessions -f` and `list-windows -f` are **tmux 3.1**: 3.0 answers `illegal option -- f`.
+    /// Filtering here rather than in tmux costs a list and a `contains`, and it is the difference
+    /// between a helper that works on every version in the matrix and three tests that fail on the
+    /// oldest one for a reason that has nothing to do with what they assert.
+    private func sessionId(named name: String) -> String? {
+        guard let listing = tmuxQuery(["list-sessions", "-F", "#{session_name}|#{session_id}"], allLines: true)
+        else { return nil }
+        for line in listing.components(separatedBy: .newlines) {
+            let fields = line.components(separatedBy: "|")
+            guard fields.count == 2, fields[0] == name else { continue }
+            return fields[1]
+        }
+        return nil
+    }
+
+    private func sessionContainsWindow(_ windowId: String, session: String) -> Bool {
+        guard let listing = tmuxQuery(["list-windows", "-t", session, "-F", "#{window_id}"], allLines: true)
+        else { return false }
+        return listing.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .contains(windowId)
+    }
+
     /// Every session on the server, as exact names.
     ///
     /// `tmuxQuery` returns only the first line, and substring matching over a joined list is a trap:
     /// a session named `foo-survivor` contains `foo`, so "is `foo` gone?" answers itself wrongly.
     private func tmuxSessionNames() -> [String] {
-        guard let tmux = PtyTransport.resolveExecutable("tmux") else { return [] }
+        guard let tmux = PtyTransport.resolveTmux() else { return [] }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tmux)
         process.arguments = ["list-sessions", "-F", "#{session_name}"]

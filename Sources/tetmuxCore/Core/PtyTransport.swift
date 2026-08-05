@@ -104,6 +104,33 @@ public final class PtyTransport: @unchecked Sendable {
         return nil
     }
 
+    /// The environment variable that overrides which **local** tmux is run (§8's version matrix).
+    public static let tmuxOverrideVariable = "TETMUX_TMUX"
+
+    /// The local tmux binary: whatever `PATH` finds, unless `TETMUX_TMUX` names one.
+    ///
+    /// §8 asks for the integration suite across the version matrix, and a machine has one tmux on its
+    /// `PATH` — so every version-conditional *behaviour* was tested on exactly the version the
+    /// developer happened to have. Several tests assert an outcome and silently change which branch
+    /// they exercise with the version (the tab reorder is `move-window -b` on 3.2 and a run of
+    /// `swap-window`s below it), which is precisely the value the matrix unlocks: the same assertions,
+    /// against five servers.
+    ///
+    /// **Local only, deliberately.** A remote channel runs whatever `tmux` the far machine's login
+    /// shell finds, and pointing it at a path on *this* one would name a binary that is not there.
+    ///
+    /// A named binary that cannot be executed returns `nil` rather than falling back to `PATH`, and
+    /// that is the important half: a typo in a matrix run that quietly used the system tmux would
+    /// report five passes for one version, which is worse than no matrix at all. `nil` becomes
+    /// `executableNotFound`, which is loud.
+    public static func resolveTmux(path: String? = nil) -> String? {
+        if let override = ProcessInfo.processInfo.environment[tmuxOverrideVariable],
+           !override.isEmpty {
+            return access(override, X_OK) == 0 ? override : nil
+        }
+        return resolveExecutable("tmux", path: path)
+    }
+
     /// Spawns `executable` on a fresh PTY and streams everything it writes.
     ///
     /// The stream finishes on EOF, or throws `PtyError.childExited` when the child failed — which is

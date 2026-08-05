@@ -8,8 +8,10 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**7 features, 1 blocked, 2 parked.** The six small items this file opened with, and copy mode, were
-closed on 2026-08-05; what they turned into is recorded in `CLAUDE.md`, not here.
+**8 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
+integration matrix were closed on 2026-08-05; what they turned into is recorded in `CLAUDE.md`, not
+here. The matrix left two entries of its own behind — a hanging test and an untested fallback —
+because running the suite on five servers instead of one is what made them visible.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
@@ -31,20 +33,33 @@ References point into current `main`. Line numbers drift; the symbol names besid
   arrives as one `send-keys -H`; add a dead-key sequence (⌥e, e → é).
   `Sources/tetmuxUI/TerminalSurface.swift:133`, `Sources/tetmuxUI/KeyEventMonitor.swift`
 
-- [ ] **Run the integration suite across the version matrix (§8).** The parsing matrix is done —
-  50 fixtures from five built versions — but the suite still runs against whatever `tmux` is on
-  PATH, so every version-conditional *behaviour* (per-window sizing off below 2.9, `swap-window`
-  reorders below 3.2, polling below 3.2, the 2.4–2.9 warning) is untested on the versions it
-  exists for; those tests self-skip on a new server.
-  *Do:* teach `SessionIntegrationTests` a `TETMUX_TMUX` environment variable that overrides the
-  binary path (thread it through to `PtyTransport`'s argv where the command is built). Add
-  `Scripts/test-matrix.sh`: build the matrix if absent, then loop the versions running
-  `swift test --filter SessionIntegrationTests` with `TETMUX_TMUX` set, failing on first
-  failure. Local and scripted like the capture pipeline, and for the same reason — CI's tmux is
-  one version, and the point is the ones it is not. Where a version-conditional path currently
-  self-skips, make the skip *conditional on the version actually not applying* rather than on
-  convenience, so the matrix run genuinely exercises it.
-  `Tests/tetmuxTests/SessionIntegrationTests.swift`, `Scripts/build-tmux-matrix.sh`
+- [ ] **`testASecondAnswerOnTheSameChannelIsIgnored` hangs intermittently in a full run.** Not a
+  version bug: it passes alone on 3.0, 3.2a, 3.5 and 3.7b in well under a second, and a full-suite
+  run of 3.5 has passed 60/60 with it in. But a full run stops dead on it often enough to block
+  `Scripts/test-matrix.sh` from completing, with two live `tmux -CC` clients for its session and no
+  progress for minutes — so it is an unbounded wait somewhere, not a slow one. Every explicit wait
+  in the test is bounded (`waitForHost` 10 s and 15 s, `withTimeout` 10 s), which points at an
+  `await` against a wedged `SessionService` actor rather than at the test's own timeouts: a blocked
+  actor makes every one of them hang before its deadline can fire.
+  *Do:* reproduce under `sample`/`--diagnose` with the fake-password host to find which actor hop
+  never returns — the suspects are `subscribeToPane` and `sendKeys` after two answers on one
+  channel. The `answeredSecret` / `answersSent` bookkeeping (§4.8's one-secret rule) is the code
+  this test is about and the obvious place for a path that never resumes.
+  *Test:* it already exists; what it needs is to stop hanging. Whatever the cause, the fix belongs
+  with a bound, since an integration suite that can hang forever fails as a stall rather than as an
+  assertion.
+  `Tests/tetmuxTests/SessionIntegrationTests.swift:2755`,
+  `Sources/tetmuxCore/Session/SessionService.swift` (`answerAuthenticationPrompt`)
+
+- [ ] **A positive test for the pane-command polling fallback (§3.4).** The subscription path has
+  one (`testACommandInABackgroundPaneIsReportedWithoutARefresh`) and it correctly skips below 3.2,
+  where `refresh-client -B` does not exist — but nothing then covers what happens *instead*, so
+  tmux 3.0 runs of the matrix have a hole exactly where the fallback lives. The mechanism is
+  `schedulePaneRefresh` on `%window-renamed` and `%window-pane-changed`.
+  *Do:* a counterpart guarded by `XCTSkipIf(version.supportsSubscriptions)` — the mirror image of
+  the existing guard, so exactly one of the pair runs on every version. Start a command in a
+  background pane, then cause a refresh-triggering event, and assert the model reports the command.
+  `Tests/tetmuxTests/SessionIntegrationTests.swift`, `Scripts/test-matrix.sh`
 
 - [ ] **Chaos tests (§8).** None exist. Each scenario must end in a defined state and recover.
   *Do,* as integration tests where the machinery allows: (1) kill the spawned process mid-stream
@@ -133,16 +148,25 @@ References point into current `main`. Line numbers drift; the symbol names besid
   terminator closing nothing, a `%begin` with nothing pending are all logged — but detecting is
   not recovering, and there is still no recovery: a desynced channel keeps running with responses
   landing one command off. Parked for three reasons, and the first alone would not be enough.
-  Everything that can *cause* one (partial writes, secrets near the FIFO) is treated as fatal
-  instead, so the detectors should never fire. More importantly, **they are diagnostics, and
-  promoting a diagnostic into a trigger changes what a false positive costs**: today a detector
-  that is wrong about some tmux version's numbering produces a spurious log line; wired to a
-  teardown it produces a reconnect storm on a healthy channel — teardown, reattach, handshake
-  *succeeds*, detector fires again — and the backoff never engages, because each cycle's completed
-  handshake resets the attempt counter. So the real fix is not the one-line teardown it first
-  appears to be: it needs a recovered-once-already guard per host, where a second desync in the
-  same epoch stops and surfaces instead of looping. And there is nothing to calibrate against —
-  the log line has never been observed outside the tests that forge one. **That log line
-  appearing in real diagnostics is the trigger to un-park this**, because it means an unknown
-  cause exists and there is finally an example to design against.
-  `Sources/tetmuxCore/Session/SessionService.swift` (desync logging beside the `%begin` handling)
+  Everything known to *cause* one (partial writes, secrets near the FIFO, and now unsolicited
+  mode-table blocks) is prevented or treated as fatal instead, so the detectors should never
+  fire. More importantly, **they are diagnostics, and promoting a diagnostic into a trigger
+  changes what a false positive costs**: a detector that is wrong produces a spurious log line;
+  wired to a teardown it produces a reconnect storm on a healthy channel — teardown, reattach,
+  handshake *succeeds*, detector fires again — and the backoff never engages, because each
+  cycle's completed handshake resets the attempt counter. So the real fix is not the one-line
+  teardown it first appears to be: it needs a recovered-once-already guard per host, where a
+  second desync in the same epoch stops and surfaces instead of looping.
+  The copy-mode work (commit `1849b15`) proved this caution right rather than loosening it: the
+  "`%begin` with nothing pending" detector's false positive turned out to be *real* — tmux opens
+  an unsolicited block for every command a pane's mode table dispatches, so any copy-mode
+  keystroke, from any client, would have fired it — and the right fix was neither recovery nor
+  teardown but classification: `ControlCodec.blockAnswersOurCommand` reads the flags bitfield and
+  the FIFO no longer consumes blocks that answer nothing we sent. Had detection been wired to
+  teardown before that was understood, `prefix [` in a pane would have dropped the connection.
+  The first real desync cause was found by feature work, not by the log line firing — which is
+  the pattern to expect. **The log line appearing in real diagnostics remains the trigger to
+  un-park this**: it means another unknown cause exists and there is finally an example to
+  design against.
+  `Sources/tetmuxCore/Session/SessionService.swift` (desync logging beside the `%begin` handling),
+  `Sources/tetmuxCore/Core/ControlCodec.swift` (`blockAnswersOurCommand`)

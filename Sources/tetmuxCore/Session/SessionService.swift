@@ -1269,7 +1269,7 @@ public actor SessionService {
                     shell: ProcessInfo.processInfo.environment["SHELL"]
                 )
             }
-            guard let tmux = PtyTransport.resolveExecutable("tmux", path: searchPath()) else {
+            guard let tmux = PtyTransport.resolveTmux(path: searchPath()) else {
                 throw PtyError.executableNotFound("tmux")
             }
             switch flavour {
@@ -3231,6 +3231,16 @@ public actor SessionService {
         let to = before.flatMap { remaining.firstIndex(of: $0) } ?? remaining.count
         guard to != from else { return }
 
+        // Both branches end by asking for the topology again, and that is not belt-and-braces: the
+        // window *order* lives only in `list-windows`, and neither command has a notification that
+        // means "the order changed". `move-window` looked as though it did — it emits `%window-add`
+        // then `%window-close` for the same window, because tmux implements it by unlinking and
+        // relinking, and those happen to schedule a refresh. `swap-window` emits
+        // `%session-window-changed` alone, which only says which window is *active*. So below tmux
+        // 3.2 a dragged tab reordered the windows on the server and the strip never moved: the model
+        // kept the order it last read, silently, until something unrelated refreshed it. Found by
+        // running the suite against 3.0 (`Scripts/test-matrix.sh`); it cannot be seen on a machine
+        // with one modern tmux, where the accident holds.
         let connection = connections[hostId]
         // Unknown version is treated as modern, like every other version gate here: an old server
         // answers with an error the user sees, where assuming old on a new one would silently take
@@ -3248,6 +3258,7 @@ public actor SessionService {
                 "move-window \(flag) -s \(TmuxCommand.quote("\(sessionId):\(windowId)")) -t \(anchor)",
                 kind: .userCommand("Reorder window"), hostId: hostId
             )
+            scheduleTopologyRefresh(hostId: hostId)
             return
         }
 
@@ -3259,6 +3270,7 @@ public actor SessionService {
             send("swap-window -d -s \(windowId) -t \(neighbour)",
                  kind: .userCommand("Reorder window"), hostId: hostId)
         }
+        scheduleTopologyRefresh(hostId: hostId)
     }
 
     /// Moves a window out of one session and into another (F4.9's other half — nothing is killed).

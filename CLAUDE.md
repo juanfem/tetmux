@@ -33,6 +33,10 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter Ses
 Scripts/package-dmg.sh                 # .app bundle inside a .dmg, in dist/
 Scripts/package-dmg.sh --skip-build    # …from whatever is already in .build/release
 Scripts/package-dmg.sh --version 1.2.3 --output dist
+
+Scripts/build-tmux-matrix.sh           # tmux 3.0/3.2a/3.3a/3.4/3.5 from pinned tarballs
+Scripts/test-matrix.sh                 # the integration suite against every one of them
+Scripts/test-matrix.sh 3.0 --filter testDraggingATabReordersTheSession
 ```
 
 `.github/workflows/ci.yml` runs **three** jobs on every push. `swift test` on macOS with tmux
@@ -205,6 +209,16 @@ and both address windows by `@id`, never by index: a session's indices are arbit
 contiguous, so a position in the strip is not an index. The *source* of a move carries its session
 (`-s $2:@7`), because a window linked into several sessions is reachable by id from any of them and
 an unqualified `-s` leaves tmux to choose which one it leaves.
+
+**…and a reorder has to ask for the topology back, because no notification means "the order
+changed".** `move-window` looks as though one does: it emits `%window-add @2` then `%window-close @2`
+for the same window, since tmux implements it by unlinking and relinking, and those schedule a
+refresh. That is an accident of the implementation, and the fallback does not share it —
+`swap-window` emits `%session-window-changed` alone, which says only which window is now *active*. So
+below tmux 3.2 a dragged tab reordered the windows on the server and the strip never moved: the model
+kept the order it last read until something unrelated refreshed it. Both branches now schedule the
+refresh themselves. Found by `Scripts/test-matrix.sh` on 3.0 — it is invisible on a machine with one
+modern tmux, where the accident holds.
 
 **State broadcasts are for topology changes only.** `SessionService.ingest` diffs `HostState` and
 broadcasts only when it actually changed. Broadcasting on `%output` rebuilds the SwiftUI tree for
@@ -520,6 +534,12 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   field layout makes every pane go quietly dead.
 - `%subscription-changed <name> <session> <window> <index> <pane> : <value>` — same reserved colon.
   The name must be checked: another control client can hold subscriptions of its own.
+- **`#{session_attached}` does not count a control-mode client on tmux 3.0.** Verified across the
+  built matrix: 3.0 answers `0` for the very session this client is attached to, and 3.2a onward
+  answer `1`. So `TmuxSession.isAttached` is always false on a 3.0 server for tetmux's own sessions —
+  cosmetic, because nothing decides anything from it. `HostState.liveSessionIds` is what answers "are
+  these panes live", it is tetmux's own record, and it is the same on every version. Anything
+  asserting that a client moved must use it.
 - `%output` payloads are octal-escaped and arbitrary binary. Decode on bytes, never via `String`.
 - Lines are bounded at 16 MiB, after which the buffer resets. A control stream that never sends a
   newline is otherwise unbounded memory growth.
@@ -1166,6 +1186,30 @@ regression shows as the parser disagreeing with it — regenerate it each run an
 "the parser agrees with whatever tmux just said", which is true by construction. The inputs are
 pinned releases, so a rebuild is byte-identical forever. The scripts exist for *provenance*: without
 them the fixtures are one person's word about what they once saw.
+
+**…and the integration suite runs across it too, which is a different property.** The fixtures pin
+what each version *says*; `Scripts/test-matrix.sh` pins what tetmux *does* about it, which is where
+the version branches live — per-window sizing off below 2.9, tab reordering as `move-window -b` on
+3.2 and a run of `swap-window`s below it, pane commands subscribed on 3.2 and polled below, no flow
+control at all before 3.2. `PtyTransport.resolveTmux` reads `TETMUX_TMUX` to pick the binary, and it
+is **local-only by design**: a remote host runs whatever its own login shell finds, so a path on this
+machine would name a binary that is not there. A named binary that cannot be executed returns `nil`
+rather than falling back to `PATH`, because a typo that quietly used the system tmux would report
+five passes for one version.
+
+Most of the value needed no new tests: several already assert an *outcome* and take whichever branch
+the server supports, so the same assertions under 3.0 are the only thing that has ever executed the
+`swap-window` fallback end to end. What it did need was **isolation**, and finding that out was the
+first thing the matrix did. Every test now gets a tmux server of its own (`TMUX_TMPDIR` per test,
+`kill-server` in `tearDown`), because sharing the machine's server had been hiding two real defects:
+a test that probed an untouched host and asserted a non-empty answer, which is true only on a machine
+that already has sessions; and leaked clients — a `SessionService` that is never disconnected leaves
+a live `tmux -CC` attached — accumulating until the run wedged, after which every remaining test
+timed out at fifteen seconds saying nothing about why. Anything that stands in for a *remote* host
+with a shell script has to put the matrix binary on its own `PATH` (`matrixPathExport`): those
+scripts share this machine's `TMUX_TMPDIR`, so a stand-in running the system tmux starts a server of
+the wrong version on the socket every later test is using, and a tmux client cannot speak to a server
+of another version.
 
 Three things keep a capture a record of a **version** rather than of a machine, and each was a real
 leak before it was fixed: `-f /dev/null` so nobody's `~/.tmux.conf` gets in; every pane running
