@@ -1831,6 +1831,145 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "empty")
     }
 
+    /// A connect the user asked for that fails is reported, not retried.
+    ///
+    /// The backoff is for a link that *dropped*: the session is still on the server and getting back
+    /// to it should not need a click. A host that never connected has lost nobody anything, and
+    /// eight silent attempts over ninety seconds neither fix a wrong hostname nor say that is what it
+    /// is. The reason goes on screen with the Retry that is already beside it.
+    func testAManualConnectThatFailsIsNotRetried() async throws {
+        let script = try writeFailingSshScript()
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(
+            id: "unreachable", name: "unreachable", isLocal: false,
+            customCommand: "/bin/sh \(script.path)"
+        ))
+        await service.openHost(hostId: "unreachable")
+
+        let failed = try await waitForHost(service, id: "unreachable", timeout: 10) { host in
+            if case .failed = host.connectionState { return true }
+            return false
+        }
+        XCTAssertTrue(
+            try XCTUnwrap(failed.connectionState.reason).contains("Connection refused"),
+            "the user must be told what ssh said: \(String(describing: failed.connectionState.reason))"
+        )
+
+        // …and it stays failed. `.reconnecting` here would be the backoff taking it.
+        try await Task.sleep(for: .seconds(3))
+        let latest = await service.getHost("unreachable")
+        let after = try XCTUnwrap(latest)
+        guard case .failed = after.connectionState else {
+            return XCTFail("a manual connect was retried: \(after.connectionState)")
+        }
+    }
+
+    /// …while a *dropped* link is exactly what the backoff is for, and still gets it.
+    func testARecoveryAttemptThatFailsKeepsTrying() async throws {
+        let script = try writeFailingSshScript()
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(
+            id: "dropped", name: "dropped", isLocal: false,
+            customCommand: "/bin/sh \(script.path)"
+        ))
+        // The call the backoff itself makes, and the one `probeAllConnections` makes on wake.
+        try? await service.connectHost(hostId: "dropped", isRecovery: true)
+
+        let retrying = try await waitForHost(service, id: "dropped", timeout: 10) { host in
+            if case .reconnecting = host.connectionState { return true }
+            return false
+        }
+        guard case .reconnecting(let attempt, _) = retrying.connectionState else {
+            return XCTFail("expected the backoff to take it")
+        }
+        XCTAssertGreaterThanOrEqual(attempt, 1)
+
+        await service.disconnectHost(hostId: "dropped")
+    }
+
+    /// A host-key question reaches the user and can be answered, instead of hanging for 45 seconds.
+    ///
+    /// End to end through the real machinery — detect, publish, answer, handshake — with a script in
+    /// place of ssh, because a genuine first contact needs a server whose key nobody here has. What
+    /// the script emits is the byte-for-byte capture from OpenSSH against a real host, including the
+    /// detail that made this a bug: the question ends in `? `, not a colon, so the old detector
+    /// returned nil, nothing was ever published, and the channel sat until the watchdog killed it.
+    func testAHostKeyQuestionIsAskedAndCanBeAnswered() async throws {
+        let script = try writeFakeHostKeySshScript()
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(
+            id: "newkey", name: "newkey", isLocal: false, customCommand: "/bin/sh \(script.path)"
+        ))
+        try await service.connectHost(hostId: "newkey", targetSession: sessionName)
+
+        let asking = try await waitForHost(service, id: "newkey", timeout: 10) {
+            $0.authenticationPrompt != nil
+        }
+        let prompt = try XCTUnwrap(asking.authenticationPrompt)
+        XCTAssertEqual(prompt.kind, .hostKey)
+        XCTAssertFalse(prompt.answerIsSecret, "a host key is a decision, not a secret")
+        XCTAssertEqual(prompt.text, "Are you sure you want to continue connecting (yes/no/[fingerprint])?")
+        // The fingerprint is the whole content of the decision, and it is on another line.
+        XCTAssertEqual(
+            prompt.context?.contains("SHA256:Qk9zR2xhY2VEb2NFeGFtcGxlS2V5MDAwMDAwMDAwMDA"), true,
+            "got: \(String(describing: prompt.context))"
+        )
+
+        // Answering `yes` is what the sheet's Continue button sends — ssh's own word, not ours.
+        await service.answerAuthenticationPrompt(hostId: "newkey", secret: "yes")
+
+        let connected = try await waitForHost(service, id: "newkey", timeout: 15) { host in
+            host.connectionState == .connected && host.activeSession?.activeWindow?.layoutTree != nil
+        }
+        XCTAssertNil(connected.authenticationPrompt, "the prompt must clear once the protocol speaks")
+
+        await service.disconnectHost(hostId: "newkey")
+    }
+
+    /// An ssh whose host key is unknown: the OpenSSH first-contact block, verbatim, and then the
+    /// command it was given once the answer arrives.
+    private func writeFakeHostKeySshScript() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-fake-hostkey-\(UUID().uuidString.prefix(8)).sh")
+        // No trailing newline after the question — that is the signal that ssh is *sitting* on it,
+        // and the thing a hand-written approximation gets wrong.
+        let script = """
+        #!/bin/sh
+        printf "The authenticity of host '[devbox]:2222 ([10.0.0.9]:2222)' can't be established.\\r\\n"
+        printf "ED25519 key fingerprint is: SHA256:Qk9zR2xhY2VEb2NFeGFtcGxlS2V5MDAwMDAwMDAwMDA\\r\\n"
+        printf "This key is not known by any other names.\\r\\n"
+        printf "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        read -r answer
+        if [ "$answer" != "yes" ]; then
+          echo 'Host key verification failed.' >&2
+          exit 255
+        fi
+        printf "\\r\\nWarning: Permanently added '[devbox]:2222' to the list of known hosts.\\r\\n"
+        exec /bin/sh -c "$1"
+        """
+        try script.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    /// An ssh that fails the way an unreachable host does: a message on stderr and a non-zero exit,
+    /// with nothing that looks like an authentication failure or an empty tmux server.
+    private func writeFailingSshScript() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-fake-down-\(UUID().uuidString.prefix(8)).sh")
+        try """
+        #!/bin/sh
+        echo 'ssh: connect to host unreachable port 22: Connection refused' >&2
+        exit 255
+        """.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
     /// F4.15 is untouched: *automatic* recovery still never creates. Only the click does.
     func testAutomaticRecoveryStillRefusesToCreate() async throws {
         let server = try isolatedServer()

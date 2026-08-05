@@ -86,6 +86,10 @@ public actor SessionService {
     /// "press any key", a wedged remote tmux — where the UI sat on "Connecting…" for the life of the
     /// process with no error, no retry, and nothing to distinguish it from a slow link.
     private static let handshakeTimeout = Duration.seconds(45)
+    /// How long the pre-handshake stream must be quiet before an unclassified prompt is believed.
+    private static let promptSettleDelay = Duration.milliseconds(700)
+    /// Answers to prompts per channel, whatever they were classified as.
+    private static let maxPromptAnswers = 3
 
     public init() {}
 
@@ -175,10 +179,17 @@ public actor SessionService {
         /// Whether a secret has already been written on this channel. One attempt per channel: a
         /// rejected password answered again is how accounts get locked out, and the retry the user
         /// really wants is a fresh connection with a fresh prompt.
-        var answeredPrompt = false
-        /// The prompt we have already told the UI about, so the same bytes arriving in a later read
-        /// do not raise it twice.
-        var reportedPrompt: AuthenticationPrompt.Kind?
+        var answeredSecret = false
+        /// Everything written in answer to a prompt, secret or not. A ceiling on this bounds the
+        /// damage when a prompt was classified wrongly — an unrecognised question could be a password
+        /// prompt in a language nobody here reads.
+        var answersSent = 0
+        /// The prompt text we have already told the UI about, so the same bytes arriving in a later
+        /// read do not raise it twice — and so a *different* question after it still can.
+        var reportedPromptText: String?
+        /// Holds an unclassified question until the stream stops moving. A read can land mid-line,
+        /// which makes an ordinary banner look exactly like ssh waiting on a prompt.
+        var promptSettleTask: Task<Void, Never>?
 
         var pendingKeys: [String: [UInt8]] = [:]
         var repaintedPanes: Set<String> = []
@@ -220,6 +231,12 @@ public actor SessionService {
         /// Whether this channel was a recovery attach to the remembered session name, so a death
         /// before the handshake can be read as "that session is gone" rather than "the host is down".
         var attachedByRememberedName = false
+
+        /// Whether this attempt is part of a recovery chain rather than something the user just
+        /// asked for. It decides whether *failing* is worth retrying: a link that dropped should come
+        /// back on its own, and a host that never connected in the first place should say why and
+        /// wait to be told again.
+        var isRecoveryAttempt = false
 
         /// Whether finding nothing to attach to means "make one".
         ///
@@ -284,6 +301,7 @@ public actor SessionService {
             topologyRefreshTask?.cancel()
             clientRefreshTask?.cancel()
             handshakeWatchdog?.cancel()
+            promptSettleTask?.cancel()
         }
     }
 
@@ -508,6 +526,7 @@ public actor SessionService {
             )
             connection.attachedByRememberedName = isRecovery && attachMode != .attachAny
             connection.createsIfServerIsEmpty = createIfEmpty
+            connection.isRecoveryAttempt = isRecovery
             connections[hostId] = connection
         } catch {
             let reason = describe(error)
@@ -1642,15 +1661,60 @@ public actor SessionService {
     /// answer. Without this a GUI simply hangs at "Connecting…" until ssh gives up: the prompt is on
     /// a pty nobody is looking at.
     private func detectAuthenticationPrompt(hostId: String, connection: Connection) {
-        guard !connection.answeredPrompt else { return }
         guard let kind = SshPromptDetector.pendingPrompt(in: connection.preHandshakeLog) else { return }
-        guard connection.reportedPrompt != kind else { return }
-        connection.reportedPrompt = kind
+        // A secret already went down this channel. Never a second one: a rejected password answered
+        // again is how accounts get locked out, and the retry the user really wants is a fresh
+        // connection with a fresh prompt.
+        if kind == .password || kind == .keyPassphrase, connection.answeredSecret { return }
+        guard let text = SshPromptDetector.promptText(in: connection.preHandshakeLog) else { return }
+        guard connection.reportedPromptText != text else { return }
 
-        let text = SshPromptDetector.promptText(in: connection.preHandshakeLog) ?? "Password:"
-        log("[\(hostId)] ssh is waiting on a \(kind == .password ? "password" : "key passphrase") prompt")
+        // An unclassifiable question is believed only once the stream has stopped moving. The
+        // classified shapes are distinctive enough to act on at once; "a line ending in a colon" is
+        // not, because a read can land mid-line and make an ordinary banner look like it is waiting.
+        if kind == .question {
+            scheduleQuestionConfirmation(hostId: hostId, connection: connection)
+            return
+        }
+        publish(prompt: kind, text: text, hostId: hostId, connection: connection)
+    }
+
+    /// Waits for the stream to settle before believing an unclassified prompt is one.
+    private func scheduleQuestionConfirmation(hostId: String, connection: Connection) {
+        connection.promptSettleTask?.cancel()
+        let length = connection.preHandshakeLog.count
+        let epoch = connection.epoch
+        connection.promptSettleTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.promptSettleDelay)
+            guard !Task.isCancelled else { return }
+            await self?.confirmPendingQuestion(hostId: hostId, epoch: epoch, unchangedLength: length)
+        }
+    }
+
+    private func confirmPendingQuestion(hostId: String, epoch: UUID, unchangedLength: Int) {
+        guard let connection = channel(of: hostId, epoch: epoch), !connection.handshakeComplete else { return }
+        // Something else arrived; whatever that line was, it was not ssh stopping on it.
+        guard connection.preHandshakeLog.count == unchangedLength else { return }
+        guard SshPromptDetector.pendingPrompt(in: connection.preHandshakeLog) == .question,
+              let text = SshPromptDetector.promptText(in: connection.preHandshakeLog),
+              connection.reportedPromptText != text else { return }
+        publish(prompt: .question, text: text, hostId: hostId, connection: connection)
+    }
+
+    private func publish(
+        prompt kind: AuthenticationPrompt.Kind,
+        text: String,
+        hostId: String,
+        connection: Connection
+    ) {
+        connection.reportedPromptText = text
+        log("[\(hostId)] ssh has stopped on a \(kind) prompt")
+        // The lines above the question, for the one kind where the question alone means nothing.
+        let context = kind == .hostKey
+            ? SshPromptDetector.promptContext(in: connection.preHandshakeLog)
+            : nil
         withHost(hostId) { host in
-            host.authenticationPrompt = AuthenticationPrompt(kind: kind, text: text)
+            host.authenticationPrompt = AuthenticationPrompt(kind: kind, text: text, context: context)
         }
         // Broadcast here rather than leaving it to `ingest`: a prompt produces no protocol events at
         // all, and `ingest` returns before its diff when the codec yielded nothing. This fires once
@@ -1668,8 +1732,24 @@ public actor SessionService {
     /// The secret is never logged, never stored on the connection, and never put in
     /// `preHandshakeLog`, which is surfaced to the user verbatim when a channel dies.
     public func answerAuthenticationPrompt(hostId: String, secret: String) {
-        guard let connection = connections[hostId], !connection.answeredPrompt else { return }
-        connection.answeredPrompt = true
+        guard let connection = connections[hostId] else { return }
+        let kind = hosts[hostId]?.authenticationPrompt?.kind
+
+        // One secret per channel, and never a second — that rule is what keeps a rejected password
+        // from being resubmitted into a lockout. It applies to what was *classified* as a secret; a
+        // host-key answer is not one, and a login that needs "yes" and then a password would
+        // otherwise be unable to give both.
+        if kind == .password || kind == .keyPassphrase {
+            guard !connection.answeredSecret else { return }
+            connection.answeredSecret = true
+        }
+        // …and a hard ceiling regardless of classification, because an unclassified question could
+        // be a password prompt in a language nobody here reads.
+        guard connection.answersSent < Self.maxPromptAnswers else {
+            log("[\(hostId)] refusing a further answer: \(Self.maxPromptAnswers) already sent on this channel")
+            return
+        }
+        connection.answersSent += 1
         withHost(hostId) { $0.authenticationPrompt = nil }
         broadcastState()
 
@@ -3129,6 +3209,7 @@ public actor SessionService {
         // Read before `teardown`, which lets the connection go.
         let createsIfServerIsEmpty = connection.createsIfServerIsEmpty
         let handshakeComplete = connection.handshakeComplete
+        let isRecoveryAttempt = connection.isRecoveryAttempt
         let defaultName = hosts[hostId].map { defaultSessionName(for: $0.config) } ?? "tetmux-main"
         // A recovery attach that died before tmux ever spoke is the remembered session failing to
         // resolve — `attach-session -t <name>` exits when there is no such session. The next attempt
@@ -3224,6 +3305,23 @@ public actor SessionService {
 
         // F4.14: authentication failures are not retried — retrying just locks the account out.
         if isAuthenticationFailure(reason) {
+            withHost(hostId) { $0.connectionState = .failed(reason: reason) }
+            broadcastState()
+            return
+        }
+
+        // **The backoff is for a connection that dropped, not for one that never started.** A channel
+        // the user asked for and that never reached a handshake has failed at something the user is
+        // standing right there to read — a wrong hostname, a refused port, a host that is off — and
+        // eight silent attempts over a minute and a half neither fix it nor say so. The reason goes on
+        // screen instead, with the Retry button that is already there.
+        //
+        // A channel that *did* handshake and then died is the case F4.14 exists for: the link went,
+        // the session is still on the server, and getting back to it should not need a click. So is a
+        // recovery attempt that fails before its handshake — that is the lid closing on a train, where
+        // failing to connect is the expected state for the next several attempts.
+        if !handshakeComplete, !isRecoveryAttempt {
+            log("[\(hostId)] connect failed and nobody has lost anything; leaving it to the user")
             withHost(hostId) { $0.connectionState = .failed(reason: reason) }
             broadcastState()
             return

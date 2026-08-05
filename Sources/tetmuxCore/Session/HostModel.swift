@@ -588,6 +588,20 @@ public struct AuthenticationPrompt: Equatable, Sendable, Identifiable {
         /// A private key's passphrase. Belongs to the key, not the host, so it is never filled from
         /// the host's stored password and is never offered for storage.
         case keyPassphrase
+        /// The first-contact host-key confirmation — `Are you sure you want to continue connecting
+        /// (yes/no/[fingerprint])?`.
+        ///
+        /// Not a secret and not a text field: a decision, with the fingerprint in front of the person
+        /// making it. §2.3 forbids the *application* accepting a host key, which this does not do —
+        /// it puts ssh's own question on screen and sends the user's answer, which is what a terminal
+        /// does. A key that has *changed* never reaches here: ssh refuses that outright rather than
+        /// asking, so this can only ever be a host nobody has met before.
+        case hostKey
+        /// Anything else ssh has stopped to ask: a one-time code, a PAM challenge, a question from a
+        /// `ProxyCommand`. Unclassifiable by construction — the shapes vary per site — so it is shown
+        /// verbatim and whatever is typed goes back. Treated as a secret (never echoed, never stored)
+        /// because the commonest case is a second factor.
+        case question
     }
 
     /// Distinct per prompt occurrence, so a second prompt after a rejected password is not mistaken
@@ -597,11 +611,27 @@ public struct AuthenticationPrompt: Equatable, Sendable, Identifiable {
     /// What ssh actually asked, verbatim (§7) — it names the account and host, which is the only way
     /// the user can tell which of several prompts they are answering.
     public var text: String
+    /// The lines leading up to the question, when the question is meaningless without them.
+    ///
+    /// A host-key confirmation is the case: the fingerprint the user is being asked to trust is on a
+    /// different line from the question, and a dialog that showed only "Are you sure you want to
+    /// continue connecting?" would be asking somebody to approve something it had not shown them.
+    public var context: String?
 
-    public init(id: UUID = UUID(), kind: Kind, text: String) {
+    public init(id: UUID = UUID(), kind: Kind, text: String, context: String? = nil) {
         self.id = id
         self.kind = kind
         self.text = text
+        self.context = context
+    }
+
+    /// Whether the answer is a secret — which decides both that the field is obscured and that a
+    /// wrong answer must not be retried automatically.
+    public var answerIsSecret: Bool {
+        switch kind {
+        case .password, .keyPassphrase, .question: return true
+        case .hostKey: return false
+        }
     }
 }
 

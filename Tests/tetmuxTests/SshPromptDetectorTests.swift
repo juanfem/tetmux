@@ -66,26 +66,57 @@ final class SshPromptDetectorTests: XCTestCase {
     /// §2.3 — the application never auto-accepts a host key. Captured from a connection with an empty
     /// `known_hosts`; it must not be mistaken for something answerable, or tetmux would be typing
     /// secrets at a fingerprint confirmation.
-    func testDoesNotClassifyAHostKeyConfirmation() {
-        let captured = bytes("""
-        \rThe authenticity of host '127.0.0.1 (127.0.0.1)' can't be established.\r
-        ED25519 key fingerprint is: SHA256:Fe3EpW6lvvjclGD7kDiIK7MRfppuUtwXKP3Gdd3ZiXY\r
-        This key is not known by any other names.\r
-        Are you sure you want to continue connecting (yes/no/[fingerprint])?
-        """)
-        XCTAssertNil(SshPromptDetector.pendingPrompt(in: captured))
-        // It is still surfaced verbatim, which is how the user finds out what happened (§7).
+    /// A host-key confirmation is a question with an answer, and it used to be silence.
+    ///
+    /// Captured against a real server with a scratch `known_hosts`, which is the only way to make
+    /// OpenSSH produce a genuine first contact. The detail that made this a bug: the last line ends
+    /// in **`? `**, not a colon — so the colon rule missed it, nothing was published, and the channel
+    /// hung until the 45 s handshake watchdog killed it with the question sitting unanswered on a pty
+    /// nobody was looking at.
+    func testClassifiesAHostKeyConfirmation() {
+        let captured = bytes(
+            "\rThe authenticity of host '[server.example.org]:2222 ([2001:db8::1]:2222)' can't be established.\r\n"
+            + "ED25519 key fingerprint is: SHA256:Qk9zR2xhY2VEb2NFeGFtcGxlS2V5MDAwMDAwMDAwMDA\r\n"
+            + "This key is not known by any other names.\r\n"
+            + "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        )
+        XCTAssertEqual(SshPromptDetector.pendingPrompt(in: captured), .hostKey)
         XCTAssertEqual(
             SshPromptDetector.promptText(in: captured),
             "Are you sure you want to continue connecting (yes/no/[fingerprint])?"
         )
+
+        // The question alone is not enough to answer it. The fingerprint is on another line, and a
+        // dialog that asked someone to trust a key without showing it would be asking for nothing.
+        let context = try? XCTUnwrap(SshPromptDetector.promptContext(in: captured))
+        XCTAssertEqual(context?.contains("SHA256:Qk9zR2xhY2VEb2NFeGFtcGxlS2V5MDAwMDAwMDAwMDA"), true)
+        XCTAssertEqual(context?.contains("authenticity of host"), true)
     }
 
-    /// A second factor is not the account password. Answering it from the Keychain would burn the
-    /// prompt and fail the login.
-    func testDoesNotClassifyASecondFactorPrompt() {
-        XCTAssertNil(SshPromptDetector.pendingPrompt(in: bytes("Verification code: ")))
-        XCTAssertNil(SshPromptDetector.pendingPrompt(in: bytes("Duo two-factor login for me\r\n\r\nPasscode or option (1-1): ")))
+    /// ssh's re-ask when the answer was not one of the three it takes.
+    func testClassifiesTheHostKeyReAsk() {
+        XCTAssertEqual(
+            SshPromptDetector.pendingPrompt(in: bytes("Please type 'yes', 'no' or the fingerprint: ")),
+            .hostKey
+        )
+    }
+
+    /// A second factor is recognised as *a question*, and never as a password.
+    ///
+    /// The distinction is the safety property. Classifying it as a password would fill it from the
+    /// Keychain, which burns a one-time prompt and fails the login; classifying it as nothing at all
+    /// — which is what used to happen — hangs the connection for 45 seconds and then fails it with
+    /// no explanation. It is asked, verbatim, and the answer is never stored.
+    func testASecondFactorIsAQuestionRatherThanAPassword() {
+        for prompt in [
+            "Verification code: ",
+            "Duo two-factor login for me\r\n\r\nPasscode or option (1-1): ",
+            "Enter the 6-digit code from your authenticator app: ",
+        ] {
+            let kind = SshPromptDetector.pendingPrompt(in: bytes(prompt))
+            XCTAssertEqual(kind, .question, prompt)
+            XCTAssertNotEqual(kind, .password, "a second factor must never be answered from the Keychain")
+        }
     }
 
     // MARK: - Robustness

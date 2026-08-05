@@ -37,11 +37,56 @@ public enum SshPromptDetector {
             return .password
         }
 
-        // Everything else ssh can ask — a host-key confirmation ("Are you sure you want to continue
-        // connecting (yes/no/[fingerprint])?"), a FIDO touch, a one-time code — is deliberately not
-        // answered here. §2.3: the application never auto-accepts a host key, and a stored account
-        // password is not the answer to a second factor.
+        // First contact with a host key. Captured verbatim from OpenSSH against a real server:
+        //
+        //   The authenticity of host '[host]:2222 ([addr]:2222)' can't be established.
+        //   ED25519 key fingerprint is: SHA256:F1eJ…
+        //   This key is not known by any other names.
+        //   Are you sure you want to continue connecting (yes/no/[fingerprint])?
+        //
+        // Note what the last line ends in: **`? `**, not a colon. That is why this used to return
+        // nil and the channel then hung until the 45 s handshake watchdog killed it, with the
+        // question sitting unanswered on a pty nobody was looking at.
+        //
+        // A *changed* key never arrives here — ssh refuses that outright with `Host key verification
+        // failed` rather than asking — so classifying this cannot make it easier to accept one.
+        if lowered.contains("continue connecting") || lowered.contains("authenticity of host") {
+            return .hostKey
+        }
+        // ssh's re-ask when the answer was not one of the three it accepts.
+        if lowered.contains("please type"), lowered.contains("yes") {
+            return .hostKey
+        }
+
+        // Anything else ssh has stopped on. The shape cannot be known — a one-time code, a PAM
+        // challenge, a `ProxyCommand` asking something of its own — so the test is the *stopping*
+        // rather than the wording: a line with no newline after it that ends the way a question ends.
+        //
+        // This is the case that used to be silence. Misreading a prompt is worse than missing one
+        // (the answer to a prompt is a secret), which is why nothing is filled in automatically here
+        // and the caller waits for the stream to settle before believing it — a chunk boundary can
+        // land mid-line and make an ordinary banner look like it is waiting.
+        if line.hasSuffix(":") || line.hasSuffix("?") {
+            return .question
+        }
         return nil
+    }
+
+    /// The last few lines of the stream, for a prompt whose *context* is the answer.
+    ///
+    /// A host-key confirmation is meaningless without the fingerprint above it, and the fingerprint
+    /// is on a different line from the question. Everything here is shown verbatim (§7); nothing is
+    /// summarised, because a summary of a fingerprint is a fingerprint nobody can check.
+    public static func promptContext(in bytes: [UInt8], lines limit: Int = 6) -> String? {
+        let tail = bytes.count > tailBytes ? Array(bytes.suffix(tailBytes)) : bytes
+        guard !tail.isEmpty else { return nil }
+        let text = String(decoding: tail, as: UTF8.self)
+        let lines = text
+            .split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return nil }
+        return lines.suffix(limit).joined(separator: "\n")
     }
 
     /// The verbatim prompt text, for showing the user exactly what ssh asked.

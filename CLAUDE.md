@@ -631,11 +631,16 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   only in each window's `onChange`, because `syncDisplayedSessions` reads the selections in the same
   pass and a SwiftUI `onChange` is not guaranteed to have run by then: a restored session otherwise
   got no tmux client until something unrelated changed the topology, i.e. panes on screen and frozen.
-- Authentication failures are not retried; other disconnects back off 1 s → 60 s with jitter and a
-  circuit breaker after 8 attempts (F4.14). An explicit reconnect — `reconnectNow`, behind the
-  banner button, the sidebar row, and the placeholder's Retry — clears that breaker, because a click
-  is the user asserting the host is reachable and a host that spent its attempts must still come
-  back. A pending backoff is a *task*, and both `disconnectHost` and `reconnectNow` cancel it: a host
+- **The backoff is for a connection that dropped, not for one that never started.** Authentication
+  failures are not retried, and neither is a connect the *user* asked for that never reached a
+  handshake: it failed at something they are standing there to read — a wrong hostname, a refused
+  port, a host that is off — and eight silent attempts over ninety seconds neither fix that nor say
+  what it is. The reason goes on screen with the Retry beside it. What does back off (1 s → 60 s with
+  jitter, circuit breaker after 8 — F4.14) is a channel that handshaked and then died, and a recovery
+  attempt that fails before its handshake, which is the lid closing on a train: failing is the
+  expected state for the next several attempts. `Connection.isRecoveryAttempt` is the difference.
+  An explicit connect clears the breaker, because a click is the user asserting the host is reachable
+  and a host that spent its attempts must still come back. A pending backoff is a *task*, and both `disconnectHost` and `reconnectNow` cancel it: a host
   the user deliberately closed used to reconnect a minute later, possibly raising a password prompt,
   because `.disconnected.isActive` is false and `connectHost`'s guard never saw it.
 - **A reconnect reattaches to `reconnectTarget`, not to the session it first connected with.** It is
@@ -648,12 +653,29 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   so the user needs to be told they are a snapshot and given a button. A 10 s `display-message -p ''`
   round trip is what the status bar's RTT dot reports (F4.29).
 - **ssh prompts on a pty nobody is looking at.** `SshPromptDetector` watches the pre-handshake stream
-  for a prompt ssh is *sitting* on — the signal is a line ending in a colon with no newline after it, so
-  a banner mentioning a password is correctly ignored. The prompt is published on
+  for a prompt ssh is *sitting* on — the signal is a trailing line with no newline after it, so a
+  banner mentioning a password is correctly ignored. The prompt is published on
   `HostState.authenticationPrompt` (not folded into `ConnectionState`, which every UI switch would then
-  have to grow a meaningless case for) and either filled from the Keychain or shown in a sheet. Host-key
-  confirmations and second factors are deliberately *not* classified: §2.3 forbids auto-accepting a key,
-  and an account password is not a passcode. Fixtures are real captures from OpenSSH under a pty.
+  have to grow a meaningless case for) and either filled from the Keychain or shown in a sheet.
+  Fixtures are real captures from OpenSSH under a pty.
+
+  **Four kinds, and the last two exist because "not classified" meant "hangs for 45 seconds".** A
+  password and a key passphrase are answered as before. A **host key** is a first-contact question,
+  and it is a *decision* rather than a text field: ssh's own lines are shown verbatim — the
+  fingerprint is on a different line from the question, hence `promptContext` — with Cancel as the
+  default button and no "always trust". That is not §2.3's forbidden auto-accept; §2.3 forbids the
+  *application* accepting a key, and this puts ssh's question in front of the person who has to
+  answer it. A key that *changed* cannot arrive here at all: ssh refuses that outright instead of
+  asking. Everything else — a one-time code, a PAM challenge, something a `ProxyCommand` wants — is a
+  **question**: shown verbatim, answered, never stored, never filled from the Keychain.
+
+  Two details are load-bearing. The host-key line ends in **`? `, not a colon**, which is exactly why
+  the old colon rule returned nil and the channel then sat until the handshake watchdog killed it.
+  And an unclassified question is believed only after the stream has been quiet for 700 ms, because a
+  read can land mid-line and make an ordinary banner look like ssh waiting on a prompt. One *secret*
+  per channel still holds — a rejected password resubmitted is how accounts get locked out — but a
+  host-key answer is not a secret, so "yes" followed by a password now works; a hard ceiling of three
+  answers bounds the case where a question was classified wrongly.
 - **Keychain access lives in `tetmuxUI`, not `tetmuxCore`.** `Security.framework` is as macOS-only as
   AppKit (§2.4). `SessionService` never reads a credential — it publishes the prompt and is handed an
   answer — so the platform boundary stays put. Calls run on a detached task: `SecItemCopyMatching` can

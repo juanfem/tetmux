@@ -129,6 +129,14 @@ enum Diagnostics {
                 print("✘ \(prompt.text.debugDescription) — this host has no stored password; the app would prompt")
             case .keyPassphrase:
                 print("✘ \(prompt.text.debugDescription) — add the key to your ssh agent")
+            case .hostKey:
+                // The CLI answers nothing here on purpose. Accepting a host key is a decision with
+                // the fingerprint in front of the person making it, and `--diagnose` prints to a
+                // terminal that may not have one in front of anybody.
+                print("✘ \(prompt.text.debugDescription) — a host key needs deciding; the app would ask")
+                if let context = prompt.context { print(context) }
+            case .question:
+                print("✘ \(prompt.text.debugDescription) — ssh is waiting on this; the app would ask")
             }
             answered = true
         }
