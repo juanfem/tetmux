@@ -471,6 +471,49 @@ final class PaneTerminalView: TerminalView, NSMenuItemValidation {
         coordinator?.pasteFromPasteboard()
     }
 
+    // MARK: - Accessibility
+
+    /// What is on the screen, which is what a screen reader is asking for.
+    ///
+    /// SwiftTerm's own accessibility service is an empty stub, so a pane was an element with a name,
+    /// a role and nothing to read — every piece of chrome around the terminal was announced and the
+    /// terminal was silent. This is the visible viewport only: bounded by the grid rather than by the
+    /// scrollback, so it stays cheap however much history the pane is holding, and it is what
+    /// "read the window" should mean for a terminal in any case.
+    ///
+    /// Still missing, and the reason the TODO entry stays open: nothing posts `.valueChanged`, so
+    /// output that arrives while VoiceOver is idle is not announced — the user has to go back and
+    /// read. Announcing it properly means diffing for the lines that are new, because re-reading the
+    /// whole screen on every chunk of a build log is worse than saying nothing.
+    override func accessibilityValue() -> Any? {
+        visibleText()
+    }
+
+    override func accessibilityNumberOfCharacters() -> Int {
+        visibleText().count
+    }
+
+    override func accessibilitySelectedText() -> String? {
+        let selected = getSelection() ?? ""
+        return selected.isEmpty ? nil : selected
+    }
+
+    /// VoiceOver otherwise announces "text area", which is true of every field on screen.
+    override func accessibilityRoleDescription() -> String? {
+        "terminal"
+    }
+
+    override func accessibilityInsertionPointLineNumber() -> Int {
+        getTerminal().getCursorLocation().y
+    }
+
+    private func visibleText() -> String {
+        let terminal = getTerminal()
+        return (0..<terminal.rows)
+            .compactMap { terminal.getLine(row: $0)?.translateToString(trimRight: true) }
+            .joined(separator: "\n")
+    }
+
     /// Middle-click pastes, the way it does everywhere else a terminal is used.
     ///
     /// The clipboard, not a primary selection — macOS has no such thing, so there is nothing else it

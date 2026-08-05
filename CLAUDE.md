@@ -580,6 +580,12 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   `send-keys` per character, which is the path that wedges the channel and cannot carry a newline
   safely. `allowsContextMenuPlugIns = false` keeps AppKit from adding AutoFill and Look Up, which it
   offers because the view takes text input and which mean nothing over a remote pane.
+- **A pane's accessibility value is the viewport, not the scrollback.** SwiftTerm's accessibility
+  service is an empty stub, so `PaneTerminalView` supplies the value itself, bounded by the grid — a
+  screen reader query must not cost more because a pane is holding a large history, and "read the
+  window" means the screen in any case. Not done: nothing posts `.valueChanged`, so output arriving
+  while VoiceOver is idle goes unannounced. Doing it right means diffing for new lines; re-reading
+  the whole screen on every chunk of a build log is worse than silence.
 - **Plain-text URLs are SwiftTerm's implicit matcher, not ours.** `linkReporting` defaults to
   `.implicit` and `linkHighlightMode` to `.hoverWithModifier`, so ⌘-click already activates a URL
   with no OSC 8 around it and arrives at `requestOpenLink` as a string. Nothing in tetmux would

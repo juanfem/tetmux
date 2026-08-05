@@ -22,8 +22,8 @@ What is left falls into three groups, and they are not equally blocked:
   tab reordering and `move-window`, window/session state restoration, listing a host's sessions
   without attaching (F4.4), and the §8 test infrastructure — a containerised sshd matrix, chaos
   tests, a full geometry suite, a rendering corpus.
-- **Small and unblocked.** `ssh -G` resolution, Increase Contrast, an accessibility *value* on a
-  pane, and a UI for `newSession`'s start directory.
+- **Small and unblocked.** `ssh -G` resolution, Increase Contrast, and a UI for `newSession`'s start
+  directory.
 
 ## Protocol correctness
 
@@ -233,9 +233,15 @@ What is left falls into three groups, and they are not equally blocked:
   stub and `makeNSView` adds no label, value, or role. The chrome around it is labelled thoroughly,
   which makes the hole sharper: everything is announced except the terminal.
   `Sources/tetmuxUI/TerminalSurface.swift:142-144`
-  *The pane is now an accessibility element with a `.textArea` role and a label. There is still no
-  `accessibilityValue` and no grid navigation, so the screen's **contents** remain unreadable —
-  which is the part that matters.*
+  *The screen's contents are readable now: `accessibilityValue` is the visible viewport — bounded by
+  the grid rather than by the scrollback, so the cost does not grow with history — alongside a
+  character count, the selection, the cursor's line, and a role description that says "terminal"
+  rather than "text area". Two things are still missing. Nothing posts `.valueChanged`, so output
+  arriving while VoiceOver is idle is not announced and the user has to go back and read; doing that
+  properly means diffing for the lines that are new, because re-reading the whole screen on every
+  chunk of a build log is worse than saying nothing. And there is still no grid navigation — no
+  per-line elements, no `accessibilityRange(forLine:)` — so a screen reader reads the pane as one
+  string.*
 
 - [x] **No URL detection for plain text, no right-click menu on a pane, no middle-click paste.**
   Only OSC 8 hyperlinks open, so the URL `git push` prints is not clickable. There is no

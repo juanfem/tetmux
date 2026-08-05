@@ -61,6 +61,53 @@ final class PaneLinkTests: XCTestCase {
     }
 }
 
+/// What a screen reader can get out of a pane.
+///
+/// The chrome around the terminal was labelled thoroughly and the terminal itself had a name, a role
+/// and no contents at all — SwiftTerm's accessibility service is an empty stub. These assert the part
+/// that matters: the text on screen is readable, and the role says what kind of thing it is.
+@MainActor
+final class PaneAccessibilityTests: XCTestCase {
+
+    private func makePane(feeding text: String) -> PaneTerminalView {
+        let view = PaneTerminalView(
+            frame: NSRect(x: 0, y: 0, width: 640, height: 240),
+            font: TerminalTheme.default.resolvedFont()
+        )
+        view.feed(text: text)
+        return view
+    }
+
+    func testTheScreenContentsAreTheAccessibilityValue() {
+        let pane = makePane(feeding: "first line\r\nsecond line\r\n")
+        let value = pane.accessibilityValue() as? String
+        XCTAssertNotNil(value)
+        XCTAssertTrue(value?.contains("first line") == true, "got \(value ?? "nil")")
+        XCTAssertTrue(value?.contains("second line") == true, "got \(value ?? "nil")")
+        XCTAssertEqual(pane.accessibilityNumberOfCharacters(), value?.count)
+    }
+
+    /// The viewport, not the scrollback: the cost of the value has to be bounded by the grid, or a
+    /// pane holding a large history makes every VoiceOver query expensive.
+    func testTheValueIsBoundedByTheGridRatherThanTheScrollback() {
+        let pane = makePane(feeding: (1...500).map { "line \($0)\r\n" }.joined())
+        let value = pane.accessibilityValue() as? String ?? ""
+        let rows = pane.getTerminal().rows
+        XCTAssertEqual(value.split(separator: "\n", omittingEmptySubsequences: false).count, rows)
+        XCTAssertFalse(value.contains("line 1\n"), "an old line must have scrolled out of the value")
+        XCTAssertTrue(value.contains("line 500"), "the newest line must be in it")
+    }
+
+    /// "text area" is what every field on screen announces as.
+    func testThePaneSaysWhatKindOfThingItIs() {
+        XCTAssertEqual(makePane(feeding: "").accessibilityRoleDescription(), "terminal")
+    }
+
+    func testNoSelectionMeansNoSelectedText() {
+        XCTAssertNil(makePane(feeding: "hello").accessibilitySelectedText())
+    }
+}
+
 /// SwiftTerm's `Terminal` requires a delegate; nothing here reacts to one.
 private final class NullTerminalDelegate: TerminalDelegate {
     func send(source: Terminal, data: ArraySlice<UInt8>) {}
