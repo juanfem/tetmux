@@ -1169,6 +1169,19 @@ window schedules a `workspace.json` save. A default-constructed one in a test th
 *user's* files, and did — running the app after the suite found `testOnlyEditedBindingsAreStored`'s
 keymap in it. Hence `AppModel(directory:)` and the per-test temporary directory in `setUpWithError`.
 
+**A test's deadline has to be inside the work, not wrapped around it.** Pane output is read by
+`collect(_:until:seconds:)`, which starts reading before the keystrokes that produce the output and
+stops on the marker *or* on a deadline of its own. It replaced a `withTimeout` helper that raced an
+arbitrary operation against a sleep in a task group — which cannot bound work it does not own. Its
+callers all passed `{ await someTask.value }`, and awaiting an **unstructured** task's value is not
+cancellable: when a marker never arrived, the timeout fired, `cancelAll()` could not stop that child,
+and the group's teardown waited on it for ever. Every bound in the test was bypassed by the mechanism
+meant to enforce them, and the suite stalled with no assertion, no output and no test name — which is
+the worst failure mode a test can have. Both of `collect`'s children are structured, so cancellation
+reaches them (`for await` on an `AsyncStream` returns nil, `Task.sleep` throws). It returns what
+arrived rather than throwing, so a missed marker **fails with the output it did get** instead of
+skipping — a skip being exactly as green as a pass.
+
 Flow-control decisions are asserted through the **diagnostic logger**, not `HostState`: pausing a pane
 is a property of the channel and deliberately invisible to the model, so `LogSink` is the only seam
 there is. The stalled-viewer test never reads its stream, on purpose — reading it would make the test

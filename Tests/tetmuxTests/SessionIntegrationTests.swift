@@ -155,19 +155,12 @@ final class SessionIntegrationTests: XCTestCase {
         // Output plane: subscribing repaints from tmux's scrollback (F4.16), then send-keys
         // round-trips through the command plane and comes back as %output.
         let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
-        let collected = Task { () -> String in
-            var text = ""
-            for await chunk in stream {
-                text += String(decoding: chunk, as: UTF8.self)
-                if text.contains("tetmux-echo-ok") { break }
-            }
-            return text
-        }
+        let collected = collect(stream, until: "tetmux-echo-ok")
 
         try await Task.sleep(for: .milliseconds(500))
         await service.sendKeys(hostId: "local", paneId: paneId, text: "echo tetmux-echo-ok\r")
 
-        let output = try await withTimeout(seconds: 10) { await collected.value }
+        let output = await collected.value
         XCTAssertTrue(output.contains("tetmux-echo-ok"), "never saw the echo; got:\n\(output)")
 
         await service.disconnectHost(hostId: "local")
@@ -194,19 +187,12 @@ final class SessionIntegrationTests: XCTestCase {
         // Two-byte, three-byte and four-byte UTF-8, plus a combining sequence.
         let payload = "héllo — 日本語 🎉 e\u{0301}"
         let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
-        let collected = Task { () -> String in
-            var text = ""
-            for await chunk in stream {
-                text += String(decoding: chunk, as: UTF8.self)
-                if text.contains("tetmux-utf8:\(payload)") { break }
-            }
-            return text
-        }
+        let collected = collect(stream, until: "tetmux-utf8:\(payload)")
 
         try await Task.sleep(for: .milliseconds(500))
         await service.sendKeys(hostId: "local", paneId: paneId, text: "echo tetmux-utf8:\(payload)\r")
 
-        let output = try await withTimeout(seconds: 10) { await collected.value }
+        let output = await collected.value
         XCTAssertTrue(
             output.contains("tetmux-utf8:\(payload)"),
             "non-ASCII did not survive send-keys -H; got:\n\(output)"
@@ -406,18 +392,11 @@ final class SessionIntegrationTests: XCTestCase {
 
         // And output for a pane in the newly attached session now flows.
         let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
-        let collected = Task { () -> String in
-            var text = ""
-            for await chunk in stream {
-                text += String(decoding: chunk, as: UTF8.self)
-                if text.contains("switched-ok") { break }
-            }
-            return text
-        }
+        let collected = collect(stream, until: "switched-ok")
         try await Task.sleep(for: .milliseconds(500))
         await service.sendKeys(hostId: "local", paneId: paneId, text: "echo switched-ok\r")
 
-        let output = try await withTimeout(seconds: 10) { await collected.value }
+        let output = await collected.value
         XCTAssertTrue(output.contains("switched-ok"), "no output after switching session; got:\n\(output)")
 
         await service.disconnectHost(hostId: "local")
@@ -455,15 +434,17 @@ final class SessionIntegrationTests: XCTestCase {
 
         let firstStream = await service.subscribeToPane(hostId: "local", paneId: firstPane).stream
         let secondStream = await service.subscribeToPane(hostId: "local", paneId: secondPane).stream
-        let firstText = collect(firstStream, until: "one-is-live")
-        let secondText = collect(secondStream, until: "two-is-live")
+        // Longer than the default: two sessions means two channels, and the second one is still
+        // handshaking when the reader starts.
+        let firstText = collect(firstStream, until: "one-is-live", seconds: 15)
+        let secondText = collect(secondStream, until: "two-is-live", seconds: 15)
 
         try await Task.sleep(for: .milliseconds(700))
         await service.sendKeys(hostId: "local", paneId: firstPane, text: "echo one-is-live\r")
         await service.sendKeys(hostId: "local", paneId: secondPane, text: "echo two-is-live\r")
 
-        let one = try await withTimeout(seconds: 15) { await firstText.value }
-        let two = try await withTimeout(seconds: 15) { await secondText.value }
+        let one = await firstText.value
+        let two = await secondText.value
         XCTAssertTrue(one.contains("one-is-live"), "the primary session stopped streaming; got:\n\(one)")
         XCTAssertTrue(two.contains("two-is-live"), "the second session never streamed; got:\n\(two)")
 
@@ -649,14 +630,42 @@ final class SessionIntegrationTests: XCTestCase {
     }
 
     /// Reading a stream until a marker appears, so two of them can be in flight at once.
-    private func collect(_ stream: AsyncStream<Data>, until marker: String) -> Task<String, Never> {
+    /// Starts reading a pane's output now, and stops on the marker or on a deadline of its own.
+    ///
+    /// Reading has to begin *before* the keystrokes that produce the output, so this hands back a
+    /// task rather than a string — and the deadline lives **inside** that task, which is the whole
+    /// point of the shape. The previous arrangement put it outside: an unstructured `Task` looping
+    /// over the stream forever, awaited through a `withTimeout` that raced it against a sleep. That
+    /// could not work, and hung the suite. Awaiting an unstructured task's `value` is not
+    /// cancellable, so when the marker never arrived the timeout fired, the group cancelled its
+    /// children, and then waited for the one child that could not be cancelled — for ever. Every
+    /// bound in the test was bypassed by the mechanism that was supposed to enforce them, and a
+    /// suite that hangs says nothing at all: no assertion, no output, no name.
+    ///
+    /// Both children here are *structured*, so `cancelAll` really ends them: `for await` on an
+    /// `AsyncStream` returns nil when its task is cancelled, and `Task.sleep` throws.
+    ///
+    /// It returns whatever arrived rather than throwing on the deadline, and that is deliberate too.
+    /// The caller asserts the marker is in the text, so a read that timed out fails *with the output
+    /// it did get* — where the old path threw `XCTSkip`, which this project's own rule says is
+    /// exactly as green as a pass.
+    private func collect(
+        _ stream: AsyncStream<Data>, until marker: String, seconds: TimeInterval = 10
+    ) -> Task<String, Never> {
         Task {
-            var text = ""
-            for await chunk in stream {
-                text += String(decoding: chunk, as: UTF8.self)
-                if text.contains(marker) { break }
+            let collector = Collector()
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    for await chunk in stream {
+                        await collector.append(chunk)
+                        if await collector.text.contains(marker) { return }
+                    }
+                }
+                group.addTask { try? await Task.sleep(for: .seconds(seconds)) }
+                await group.next()
+                group.cancelAll()
             }
-            return text
+            return await collector.text
         }
     }
 
@@ -675,14 +684,7 @@ final class SessionIntegrationTests: XCTestCase {
 
         // Subscribe once, as a pane view does, and hold the *same* stream across the drop.
         let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
-        let collected = Task { () -> String in
-            var text = ""
-            for await chunk in stream {
-                text += String(decoding: chunk, as: UTF8.self)
-                if text.contains("after-reconnect-ok") { break }
-            }
-            return text
-        }
+        let collected = collect(stream, until: "after-reconnect-ok")
 
         try await Task.sleep(for: .milliseconds(500))
 
@@ -696,7 +698,7 @@ final class SessionIntegrationTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(500))
         await service.sendKeys(hostId: "local", paneId: paneId, text: "echo after-reconnect-ok\r")
 
-        let output = try await withTimeout(seconds: 10) { await collected.value }
+        let output = await collected.value
         XCTAssertTrue(
             output.contains("after-reconnect-ok"),
             "the stream died with the channel; got:\n\(output)"
@@ -2775,17 +2777,10 @@ final class SessionIntegrationTests: XCTestCase {
         let paneId = try XCTUnwrap(connected.activeSession?.activeWindow?.preferredPaneId)
 
         let stream = await service.subscribeToPane(hostId: "pw-twice", paneId: paneId).stream
-        let collected = Task { () -> String in
-            var text = ""
-            for await chunk in stream {
-                text += String(decoding: chunk, as: UTF8.self)
-                if text.contains("marker-after-auth") { break }
-            }
-            return text
-        }
+        let collected = collect(stream, until: "marker-after-auth")
         try await Task.sleep(for: .milliseconds(500))
         await service.sendKeys(hostId: "pw-twice", paneId: paneId, text: "echo marker-after-auth\r")
-        let output = try await withTimeout(seconds: 10) { await collected.value }
+        let output = await collected.value
 
         XCTAssertFalse(output.contains("leaked-secret"), "the second answer reached the pane:\n\(output)")
 
@@ -2944,24 +2939,13 @@ final class SessionIntegrationTests: XCTestCase {
         throw XCTSkip("timed out waiting for host \(id); last state: \(String(describing: last))")
     }
 
-    private func withTimeout<T: Sendable>(
-        seconds: TimeInterval,
-        _ operation: @escaping @Sendable () async -> T
-    ) async throws -> T {
-        try await withThrowingTaskGroup(of: T?.self) { group in
-            group.addTask { await operation() }
-            group.addTask {
-                try await Task.sleep(for: .seconds(seconds))
-                return nil
-            }
-            let result = try await group.next()
-            group.cancelAll()
-            guard let value = result ?? nil else {
-                throw XCTSkip("operation timed out after \(seconds)s")
-            }
-            return value
-        }
-    }
+    // `withTimeout` used to live here, and it is deliberately gone rather than fixed. It raced an
+    // arbitrary operation against a sleep inside a task group, which cannot bound work it does not
+    // own: its only caller passed `{ await someTask.value }`, and awaiting an unstructured task's
+    // value is not cancellable, so `cancelAll` left a child the group then waited on for ever. A
+    // timeout helper that can hang is worse than none, because every caller stops looking for a
+    // bound once they can see one. The deadline now lives inside `collect`, where the work is
+    // structured and cancellation reaches it.
 }
 
 /// Accumulates a pane's output so a test can watch it arrive rather than block on it.

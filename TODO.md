@@ -8,10 +8,10 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**8 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
+**7 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
 integration matrix were closed on 2026-08-05; what they turned into is recorded in `CLAUDE.md`, not
-here. The matrix left two entries of its own behind — a hanging test and an untested fallback —
-because running the suite on five servers instead of one is what made them visible.
+here. The matrix left one entry of its own behind — the untested polling fallback below — because
+running the suite on five servers instead of one is what made that hole visible.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
@@ -32,24 +32,6 @@ References point into current `main`. Line numbers drift; the symbol names besid
   `insertText` — asserting nothing reaches the channel until commit and the committed string
   arrives as one `send-keys -H`; add a dead-key sequence (⌥e, e → é).
   `Sources/tetmuxUI/TerminalSurface.swift:133`, `Sources/tetmuxUI/KeyEventMonitor.swift`
-
-- [ ] **`testASecondAnswerOnTheSameChannelIsIgnored` hangs intermittently in a full run.** Not a
-  version bug: it passes alone on 3.0, 3.2a, 3.5 and 3.7b in well under a second, and a full-suite
-  run of 3.5 has passed 60/60 with it in. But a full run stops dead on it often enough to block
-  `Scripts/test-matrix.sh` from completing, with two live `tmux -CC` clients for its session and no
-  progress for minutes — so it is an unbounded wait somewhere, not a slow one. Every explicit wait
-  in the test is bounded (`waitForHost` 10 s and 15 s, `withTimeout` 10 s), which points at an
-  `await` against a wedged `SessionService` actor rather than at the test's own timeouts: a blocked
-  actor makes every one of them hang before its deadline can fire.
-  *Do:* reproduce under `sample`/`--diagnose` with the fake-password host to find which actor hop
-  never returns — the suspects are `subscribeToPane` and `sendKeys` after two answers on one
-  channel. The `answeredSecret` / `answersSent` bookkeeping (§4.8's one-secret rule) is the code
-  this test is about and the obvious place for a path that never resumes.
-  *Test:* it already exists; what it needs is to stop hanging. Whatever the cause, the fix belongs
-  with a bound, since an integration suite that can hang forever fails as a stall rather than as an
-  assertion.
-  `Tests/tetmuxTests/SessionIntegrationTests.swift:2755`,
-  `Sources/tetmuxCore/Session/SessionService.swift` (`answerAuthenticationPrompt`)
 
 - [ ] **A positive test for the pane-command polling fallback (§3.4).** The subscription path has
   one (`testACommandInABackgroundPaneIsReportedWithoutARefresh`) and it correctly skips below 3.2,
