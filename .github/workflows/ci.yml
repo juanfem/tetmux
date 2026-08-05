@@ -17,7 +17,7 @@ jobs:
     # arm64. The packaged binary is single-architecture, so the runner is also what it is built for.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # XCTest is absent from CommandLineTools, which is what `xcode-select -p` points at by default.
       # Every step below inherits DEVELOPER_DIR from here.
@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     container: swift:6.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build the portable core
         run: swift build --target tetmuxCore
 
@@ -80,7 +80,7 @@ jobs:
       # Only the tagged path uses this, to create the release the .dmg is attached to.
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Tags are what the version comes from, and actions/checkout does not fetch them by default.
           fetch-depth: 0
@@ -117,7 +117,7 @@ jobs:
             exit 1
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tetmux-dmg
           path: dist/*.dmg
