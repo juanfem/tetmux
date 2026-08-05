@@ -13,11 +13,18 @@ final class AppModelTests: XCTestCase {
     /// chord persists `settings.json`, selecting a session schedules a `workspace.json` save — so a
     /// default-constructed model in a test writes the *user's* files. It did, once: running the app
     /// after this suite found the keymap from `testOnlyEditedBindingsAreStored` in it.
-    private var directory: URL!
+    ///
+    /// It is a `nonisolated let` initialised in place rather than a `var` assigned in
+    /// `setUpWithError`, because `XCTestCase`'s setUp and tearDown are *nonisolated* under Swift
+    /// 6.1's XCTest — a `@MainActor` `var` cannot be touched from them, and the suite failed to
+    /// compile on CI while building fine on a newer toolchain, where they are inferred isolated.
+    /// The annotation is written out rather than left to the implicit rule for immutable `Sendable`
+    /// storage, since that rule is the part that moved between the two. XCTest builds one instance
+    /// per test method, so each test still gets a directory of its own.
+    private nonisolated let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tetmux-model-\(UUID().uuidString)")
 
     override func setUpWithError() throws {
-        directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tetmux-model-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
@@ -1330,8 +1337,11 @@ final class AppModelTests: XCTestCase {
     }
 
     func testDroppingATabOnItselfIsNotAMove() {
-        XCTAssertNil(AppModel.dropDestination(order: ["@1", "@2"], dragged: "@1", onto: "@1"))
-        XCTAssertNil(AppModel.dropDestination(order: ["@1", "@2"], dragged: "@9", onto: "@1"))
+        // Compared against a typed `.none` rather than asserted nil: the result is a *double*
+        // optional, and `XCTAssertNil` takes `Any?`, so the outer nil it is being asked about is the
+        // one the coercion flattens away.
+        XCTAssertEqual(AppModel.dropDestination(order: ["@1", "@2"], dragged: "@1", onto: "@1"), String??.none)
+        XCTAssertEqual(AppModel.dropDestination(order: ["@1", "@2"], dragged: "@9", onto: "@1"), String??.none)
     }
 
     /// Adjacent tabs swap, in both directions — the ordinary case, and the one where an off-by-one
