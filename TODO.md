@@ -8,7 +8,7 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**6 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
+**4 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
 integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on 2026-08-06; what
 they turned into is recorded in `CLAUDE.md`, not here.
 
@@ -17,20 +17,6 @@ References point into current `main`. Line numbers drift; the symbol names besid
 ---
 
 ## Features, sized like features
-
-- [ ] **Pin F4.23 (mouse modes) and F4.24 (IME) with tests.** Both are delegated wholesale to
-  SwiftTerm and asserted nowhere — the exact position the plain-text URL matcher sat in before a
-  test went under it: already true, believed rather than known, and free to stop being true on a
-  dependency bump with nothing to say so. The keystroke path (an event monitor ahead of dispatch,
-  per-frame coalescing) was not written with composition in mind, which makes F4.24 the likelier
-  silent break.
-  *Do:* two focused tests in the UI test target. Mouse: feed the pane's terminal
-  `ESC[?1006h`/`ESC[?1000h` through the emulator, synthesise a scroll event, assert bytes go to
-  the channel; reset the modes, assert the same event scrolls locally and sends nothing. IME:
-  drive `PaneTerminalView` through `NSTextInputClient` — `setMarkedText` twice, then
-  `insertText` — asserting nothing reaches the channel until commit and the committed string
-  arrives as one `send-keys -H`; add a dead-key sequence (⌥e, e → é).
-  `Sources/tetmuxUI/TerminalSurface.swift:133`, `Sources/tetmuxUI/KeyEventMonitor.swift`
 
 - [ ] **Chaos tests (§8).** None exist. Each scenario must end in a defined state and recover.
   *Do,* as integration tests where the machinery allows: (1) kill the spawned process mid-stream
@@ -41,17 +27,6 @@ References point into current `main`. Line numbers drift; the symbol names besid
   channel rebuilds it. Sleep/wake stays manual — `pmset sleepnow` on a test box is not a CI
   citizen — but scriptable as a documented manual pass alongside the P6 harness.
   `Tests/tetmuxTests/SessionIntegrationTests.swift`
-
-- [ ] **The resize storm (§8's geometry suite, second half).** `TerminalGeometryTests` covers the
-  scroller gutter and the font-derived cell round trip; the storm — 50 rapid size requests
-  including mid-flight contradictions, asserting convergence with tmux's final reported layout —
-  does not exist, and it is the test that would have caught the oscillation bugs this project
-  spent its hardest weeks on.
-  *Do:* integration test against local tmux: drive `requestSizes`-equivalent calls with 50
-  randomised (seeded) sizes without awaiting between them, then wait for quiescence and assert
-  the model's layout matches one final authoritative `list-windows`, and that no further
-  `%layout-change` arrives within a grace window — convergence, not a byte-for-byte transcript.
-  `Tests/tetmuxTests/TerminalGeometryTests.swift`
 
 - [ ] **Rendering acceptance corpus (T5.7, §8).** The only Unicode assertion in the tree is byte
   delivery through the paste path; width and grapheme handling are delegated to SwiftTerm and
