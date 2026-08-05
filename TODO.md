@@ -4,7 +4,7 @@ From the audit of 2026-08-04. Ordered by what actually breaks for a user, not by
 Each item names the evidence, because the ones that matter here are all silent failures — nothing
 in this list announces itself, which is why they survived this long.
 
-**32 done, 5 partial, 10 open.**
+**33 done, 5 partial, 9 open.**
 
 References on **done** items are as they were when the audit ran, so they point into the commit
 before each fix rather than into current `main` — they are kept because the evidence is the useful
@@ -22,8 +22,8 @@ What is left falls into three groups, and they are not equally blocked:
   tab reordering and `move-window`, window/session state restoration, listing a host's sessions
   without attaching (F4.4), and the §8 test infrastructure — a containerised sshd matrix, chaos
   tests, a full geometry suite, a rendering corpus.
-- **Small and unblocked.** `ssh -G` resolution, plain-text URL detection with a pane context menu,
-  Increase Contrast, an accessibility *value* on a pane, and a UI for `newSession`'s start directory.
+- **Small and unblocked.** `ssh -G` resolution, Increase Contrast, an accessibility *value* on a
+  pane, and a UI for `newSession`'s start directory.
 
 ## Protocol correctness
 
@@ -237,11 +237,20 @@ What is left falls into three groups, and they are not equally blocked:
   `accessibilityValue` and no grid navigation, so the screen's **contents** remain unreadable —
   which is the part that matters.*
 
-- [ ] **No URL detection for plain text, no right-click menu on a pane, no middle-click paste.**
+- [x] **No URL detection for plain text, no right-click menu on a pane, no middle-click paste.**
   Only OSC 8 hyperlinks open, so the URL `git push` prints is not clickable. There is no
   `rightMouseDown`, no `otherMouseDown`, and no `contextMenu` on a pane — the three context menus in
   the app are on sidebar rows and the tab.
   `Sources/tetmuxUI/TerminalSurface.swift:307-313`
+  *The plain-text half turned out to be **already true** — the pinned SwiftTerm detects implicit
+  links and activates them on ⌘-click, and our `requestOpenLink` was being reached all along. That
+  entry was stale rather than wrong when written, so it is now covered by a test that fails if a
+  SwiftTerm bump ever turns the matcher off. The two real gaps are done: `PaneTerminalView` is a
+  `TerminalView` subclass with a context menu (Open / Copy Link on whatever the click landed on, then
+  Copy, Paste, Select All) and middle-click paste. Both pastes go through `SessionService.paste`
+  rather than SwiftTerm's own, which inserts a clipboard as keystrokes. Verified against a live pane:
+  ⌘-click opened `https://example.com/from-a-pane` in the browser, the menu found the URL under the
+  pointer, and a middle click delivered its clipboard to the prompt.*
 
 - [~] Reduce Motion and Increase Contrast are not honoured; animations are unconditional.
   `Sources/tetmuxUI/LauncherOverlay.swift:36`, `:87`

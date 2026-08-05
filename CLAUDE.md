@@ -96,7 +96,7 @@ Where things are, since the invariants below name symbols without saying which f
 | `AppModel.swift` | App-wide model; the decisions that need no channel. |
 | `WindowState.swift` | Everything that belongs to one macOS window. |
 | `TerminalContainerView.swift` | The pane-tree renderer and `PaneDivider`. |
-| `TerminalSurface.swift` | `TerminalView` wrapper, `TerminalTheme`, bell, OSC handling. |
+| `TerminalSurface.swift` | `TerminalView` wrapper, `TerminalTheme`, bell, OSC handling, `PaneTerminalView`. |
 | `SidebarView.swift` · `StatusBarView.swift` | Host/session/window tree (drawn glyphs); F4.28 footer. |
 | `LauncherOverlay.swift` | ⌘K fuzzy launcher over hosts, sessions and windows (F4.25/F4.26). |
 | `SettingsView.swift` · `KeymapPolicy.swift` | The `Settings` scene; shortcut table. |
@@ -567,6 +567,25 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   from the cell size, so every pane on screen re-measures and re-asks tmux. Scrollback is applied to
   live panes with `changeScrollback` rather than only at creation — SwiftTerm's default is 500 lines,
   which is not a choice anyone made.
+- **The pane's mouse behaviour is an `NSView` subclass, and its Paste is never SwiftTerm's.**
+  `PaneTerminalView` overrides `menu(for:)` and `otherMouseDown` because a SwiftUI gesture over a
+  `TerminalView` never sees an event — the same reason `PaneDivider` is an `NSView`. Three things
+  there are load-bearing. The link under the click is captured when the menu is *built*, not when an
+  item fires: the pointer has moved and the pane may have scrolled by then, so re-deriving it opens
+  whatever is there now. The cell size for hit-testing comes from `getOptimalFrameSize() / grid`,
+  which is SwiftTerm's own `cellDimension` read back — mirroring the font arithmetic instead means
+  resolving the backing scale factor exactly as SwiftTerm does, and getting that wrong moves the cell
+  by a whole point and the hit column by several. And both the menu's Paste and middle-click go
+  through `SessionService.paste`: SwiftTerm's `paste(_:)` inserts the clipboard as *keystrokes*, one
+  `send-keys` per character, which is the path that wedges the channel and cannot carry a newline
+  safely. `allowsContextMenuPlugIns = false` keeps AppKit from adding AutoFill and Look Up, which it
+  offers because the view takes text input and which mean nothing over a remote pane.
+- **Plain-text URLs are SwiftTerm's implicit matcher, not ours.** `linkReporting` defaults to
+  `.implicit` and `linkHighlightMode` to `.hoverWithModifier`, so ⌘-click already activates a URL
+  with no OSC 8 around it and arrives at `requestOpenLink` as a string. Nothing in tetmux would
+  notice if a SwiftTerm bump turned that off, hence `PaneLinkTests`. Both routes are held to one
+  scheme allowlist — `http`, `https`, `mailto`, `ftp` — because pane contents are remote text and
+  `NSWorkspace.open` launches whatever application claimed a scheme.
 - **⌘F is SwiftTerm's find bar, reached through `performTextFinderAction`.** It works only because the
   Paste command replaces the `.pasteboard` menu group and *not* `.textEditing` — replacing the latter
   wholesale is what unplugged Find in the first place, since AppKit puts Find in that group.

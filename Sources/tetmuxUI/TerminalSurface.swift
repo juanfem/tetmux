@@ -123,7 +123,8 @@ struct TerminalPaneView: NSViewRepresentable {
     let onFocusRequest: () -> Void
 
     func makeNSView(context: Context) -> TerminalView {
-        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), font: theme.resolvedFont())
+        let view = PaneTerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), font: theme.resolvedFont())
+        view.coordinator = context.coordinator
         view.terminalDelegate = context.coordinator
         // SwiftTerm's macOS view has no options-taking initialiser, so the buffer is made with the
         // default 500 lines and resized here. `changeScrollback` is the supported way to do it after
@@ -269,6 +270,18 @@ struct TerminalPaneView: NSViewRepresentable {
             view = nil
         }
 
+        /// The pane's own paste, for the routes that do not go through the Edit menu — the context
+        /// menu and middle-click. It targets *this* pane rather than `activeScope`'s, because a
+        /// right-click is a statement about where the pointer is and need not have focused anything.
+        func pasteFromPasteboard() {
+            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
+            let hostId = parent.hostId
+            let paneId = parent.paneId
+            let service = parent.service
+            parent.onFocusRequest()
+            Task { await service.paste(hostId: hostId, paneId: paneId, text: text) }
+        }
+
         // MARK: TerminalViewDelegate
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
@@ -304,12 +317,13 @@ struct TerminalPaneView: NSViewRepresentable {
             BellNotifier.shared.post(paneId: parent.paneId)
         }
 
-        /// T5.5 — OSC 8 hyperlinks open in the default handler.
+        /// T5.5 — hyperlinks open in the default handler, ⌘-clicked.
+        ///
+        /// Reached for OSC 8 payloads *and* for URLs SwiftTerm found in plain text, which is what
+        /// makes the address `git push` prints clickable. Both arrive here as a string and are held
+        /// to the same scheme allowlist; nothing about the route they took gets them any more trust.
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            guard let url = URL(string: link), let scheme = url.scheme?.lowercased() else { return }
-            // Only schemes that cannot execute something locally.
-            guard ["http", "https", "mailto", "ftp"].contains(scheme) else { return }
-            NSWorkspace.shared.open(url)
+            TerminalPaneView.openExternalLink(link)
         }
 
         /// T5.6 — denied unless the host is explicitly trusted for it.
@@ -324,5 +338,149 @@ struct TerminalPaneView: NSViewRepresentable {
         func clipboardRead(source: TerminalView) -> Data? { nil }
 
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
+    }
+
+    /// The one place that decides a link off the wire is safe to hand to the system.
+    ///
+    /// A pane's contents are remote text, and `NSWorkspace.open` will happily launch whatever
+    /// application has claimed a scheme — `file:`, `ssh:`, or anything a third-party app registered.
+    /// So the allowlist is schemes that cannot start something locally, and it is applied to OSC 8
+    /// payloads and to plain-text matches alike.
+    @MainActor
+    static func openExternalLink(_ link: String) {
+        guard isOpenableExternally(link), let url = URL(string: link) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Split out from `openExternalLink` so the policy can be asserted without launching anything.
+    static func isOpenableExternally(_ link: String) -> Bool {
+        guard let url = URL(string: link), let scheme = url.scheme?.lowercased() else { return false }
+        return ["http", "https", "mailto", "ftp"].contains(scheme)
+    }
+}
+
+/// The pane surface, with the three things a terminal is expected to do with a mouse that SwiftTerm
+/// leaves to its host: a context menu, opening what is under the pointer, and middle-click paste.
+///
+/// A subclass rather than a gesture layered on top, for the same reason `PaneDivider` is an
+/// `NSView`: this view tracks the mouse for selection, and a SwiftUI gesture over it never sees an
+/// event whatever the z-order says.
+final class PaneTerminalView: TerminalView, NSMenuItemValidation {
+    weak var coordinator: TerminalPaneView.Coordinator?
+
+    /// SwiftTerm's own cell size, read back rather than recomputed.
+    ///
+    /// `getOptimalFrameSize()` is `cellDimension × grid + reservedScrollerWidth`, and the scroller is
+    /// hidden here so that last term is zero — which makes this the emulator's real `cellDimension`
+    /// with no second implementation to drift from it. Mirroring the font arithmetic instead would
+    /// mean resolving the backing scale factor the same way SwiftTerm does, and getting that wrong
+    /// moves the cell width by a whole point and the hit column by several.
+    private var cellDimension: CGSize? {
+        let terminal = getTerminal()
+        guard terminal.cols > 0, terminal.rows > 0 else { return nil }
+        let optimal = getOptimalFrameSize().size
+        guard optimal.width > 0, optimal.height > 0 else { return nil }
+        return CGSize(
+            width: optimal.width / CGFloat(terminal.cols),
+            height: optimal.height / CGFloat(terminal.rows)
+        )
+    }
+
+    /// The link under a point in view coordinates, explicit or found in plain text.
+    ///
+    /// `.screen` coordinates, so the lookup follows the viewport when the user has scrolled back —
+    /// the row is relative to what is displayed, and SwiftTerm adds `yDisp` itself.
+    private func link(at point: CGPoint) -> String? {
+        guard let cell = cellDimension else { return nil }
+        let terminal = getTerminal()
+        let col = Int(point.x / cell.width)
+        let row = Int((bounds.height - point.y) / cell.height)
+        guard col >= 0, col < terminal.cols, row >= 0, row < terminal.rows else { return nil }
+        return terminal.link(at: .screen(Position(col: col, row: row)), mode: .explicitAndImplicit)
+    }
+
+    /// What the right-click landed on, captured at menu-build time.
+    ///
+    /// The menu outlives the event, and by the time an item fires the pointer has moved and the pane
+    /// may have scrolled under it, so re-deriving the link from the cursor would open whatever
+    /// happens to be there now.
+    private var linkUnderCursor: String?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        linkUnderCursor = link(at: point)
+
+        let menu = NSMenu()
+        // AppKit adds Services and text plug-ins — AutoFill, Look Up — to a context menu on a view
+        // that accepts text input, which this one does because it is the keyboard's destination.
+        // They are aimed at an editable field and none of them means anything over a remote pane.
+        menu.allowsContextMenuPlugIns = false
+        if let link = linkUnderCursor {
+            menu.addItem(withTitle: "Open \(Self.abbreviate(link))", action: #selector(openLinkUnderCursor), keyEquivalent: "")
+                .target = self
+            menu.addItem(withTitle: "Copy Link", action: #selector(copyLinkUnderCursor), keyEquivalent: "")
+                .target = self
+            menu.addItem(.separator())
+        }
+        menu.addItem(withTitle: "Copy", action: #selector(copySelection), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Paste", action: #selector(pasteIntoPane), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Select All", action: #selector(selectAll(_:)), keyEquivalent: "").target = self
+        return menu
+    }
+
+    /// Enough of a URL to tell two apart, without a menu item as wide as the screen.
+    private static func abbreviate(_ link: String, limit: Int = 48) -> String {
+        link.count <= limit ? link : link.prefix(limit - 1) + "…"
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(copySelection):
+            return !(getSelection() ?? "").isEmpty
+        case #selector(copyLinkUnderCursor), #selector(openLinkUnderCursor):
+            return linkUnderCursor != nil
+        case #selector(pasteIntoPane):
+            return NSPasteboard.general.string(forType: .string) != nil
+        default:
+            return true
+        }
+    }
+
+    @objc private func openLinkUnderCursor() {
+        guard let link = linkUnderCursor else { return }
+        TerminalPaneView.openExternalLink(link)
+    }
+
+    @objc private func copyLinkUnderCursor() {
+        guard let link = linkUnderCursor else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(link, forType: .string)
+    }
+
+    @objc private func copySelection() {
+        copy(self)
+    }
+
+    /// Paste goes through `SessionService`, never through SwiftTerm's own `paste(_:)`.
+    ///
+    /// SwiftTerm's inserts the text as *keystrokes*, which here means one `send-keys` per character —
+    /// the path whose own comment says a megabyte of it wedges the channel, and which cannot carry a
+    /// newline safely. The service builds a tmux buffer instead, chunked and double-quoted.
+    @objc private func pasteIntoPane() {
+        coordinator?.pasteFromPasteboard()
+    }
+
+    /// Middle-click pastes, the way it does everywhere else a terminal is used.
+    ///
+    /// The clipboard, not a primary selection — macOS has no such thing, so there is nothing else it
+    /// could mean. It routes through the same chunked path as ⌘V rather than SwiftTerm's keystroke
+    /// paste, so a multi-line clipboard cannot arrive as tmux commands.
+    override func otherMouseDown(with event: NSEvent) {
+        guard event.buttonNumber == 2 else {
+            super.otherMouseDown(with: event)
+            return
+        }
+        coordinator?.pasteFromPasteboard()
     }
 }
