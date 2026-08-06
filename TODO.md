@@ -19,11 +19,13 @@ The launcher's half of that batch (F4.25/F4.26) closed the same day.
 `Scripts/measure-latency.sh`, `Scripts/measure-throughput.sh` and `Scripts/measure-idle.md` exist,
 and `docs/measurements.md` holds the numbers. P6.3 passed with 6.5× of room. P6.1 failed by 2× —
 p95 24.43 ms against 12 — which turned out to be an 8 ms timer of our own in the keystroke
-coalescer; flushing on the leading edge instead brought it to 11.54 ms and closed the entry that
-finding had opened. P6.7's launch half then missed by 2.5×, and P6.6 and P6.7's memory half were measured on
-2026-08-06 against 20 panes on four real hosts and missed too. All three have entries below, each
-with the measurement as its evidence. Every P6 requirement now has a number against it: P6.3 and
-P6.1 pass, P6.6 and both halves of P6.7 do not.
+coalescer; flushing on the leading edge instead took the round trip from 19.72 ms p95 to under 1,
+and the whole figure to 11.54 ms — on a 100 Hz external monitor. On the laptop's own panel it is
+14.28 ms and still missed, which is the entry that finding left behind. P6.7's launch half missed by
+2.5×, and P6.6 and P6.7's memory half were measured against 20 panes on four real hosts and missed
+too. Every P6 requirement now has a number against it, and **P6.3 is the only one that passes
+outright**: P6.1 passes on one display and fails on the built-in, P6.6 and both halves of P6.7 fail.
+Each has an entry below with its measurement as evidence.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
