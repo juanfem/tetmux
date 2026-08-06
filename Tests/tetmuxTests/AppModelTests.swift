@@ -1657,6 +1657,66 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(state.pendingRestore)
     }
 
+    /// A launcher result is reached without touching the tree, so the tree has to be moved to it: the
+    /// row would otherwise highlight inside a session that is still collapsed, which is the selection
+    /// being invisible in the one view whose job is to show it.
+    func testTheLauncherOpensTheTreeOntoWhatItPicked() throws {
+        let model = makeModel()
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "work", windows: [window("@1", name: "edit")]),
+        ])]
+        let state = WindowState()
+        model.registerWindow(state)
+
+        try XCTUnwrap(model.launcherItems(for: state).first { $0.title == "edit" }).action()
+
+        XCTAssertTrue(model.takeSessionExpansion(hostId: "local", sessionId: "$1"))
+    }
+
+    /// …and when the host has to be connected first, once there is a session to open. The id cannot
+    /// be the one the row was built from: a server restarted since that topology was read has
+    /// reissued it, which is what the name fallback is for.
+    func testTheTreeOpensOnceTheLauncherTargetLands() throws {
+        let model = makeModel()
+        model.hosts = [idleHost(id: "devbox", sessions: [
+            TmuxSession(id: "$2", name: "build", windows: [window("@3", name: "make")]),
+        ])]
+        let state = WindowState()
+        model.registerWindow(state)
+
+        try XCTUnwrap(model.launcherItems(for: state).first { $0.title == "make" }).action()
+        XCTAssertFalse(
+            model.takeSessionExpansion(hostId: "devbox", sessionId: "$2"),
+            "there is nothing to open yet, and $2 is an id from before the disconnection"
+        )
+
+        model.applyForTesting([HostState(
+            config: HostConfig(id: "devbox", name: "devbox"),
+            connectionState: .connected,
+            sessions: [TmuxSession(id: "$9", name: "build", windows: [window("@8", name: "make")])],
+            activeSessionId: "$9"
+        )])
+
+        XCTAssertEqual(state.selectedSessionId, "$9")
+        XCTAssertTrue(model.takeSessionExpansion(hostId: "devbox", sessionId: "$9"))
+    }
+
+    /// The workspace restore shares that field and must not share this: every launch would open a
+    /// node per restored window, which is not what anybody asked for by quitting the app.
+    func testAWorkspaceRestoreLandingOpensNothing() {
+        let model = makeModel()
+        let state = WindowState()
+        model.registerWindow(state)
+        state.beginRestore(WorkspaceWindow(hostId: "local", sessionId: "$1", sessionName: "work"))
+
+        model.applyForTesting([host(sessions: [
+            TmuxSession(id: "$1", name: "work", windows: [window("@1")]),
+        ])])
+
+        XCTAssertEqual(state.selectedSessionId, "$1", "it still lands")
+        XCTAssertFalse(model.takeSessionExpansion(hostId: "local", sessionId: "$1"))
+    }
+
     /// A window picked while its host was unreachable must not be re-asserted after the user has
     /// changed their mind — the pending target is what `select` clears, and this is why it does.
     func testPickingSomethingElseDropsAWaitingLauncherTarget() throws {

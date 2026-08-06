@@ -1120,6 +1120,17 @@ for is that the chord still *matches*, so that has its own test: `charactersIgno
   `LauncherItem.connectsFirst`, which used to be `isAvailable` and did not mean this — it was set on
   window rows alone, so the recession excused a row that did not work rather than stating a fact
   about the host, while a session row on the same host was drawn at full strength and did connect.
+- **…and picking one opens the tree onto it**, through `sessionsToExpand`, which is the same channel
+  a session created from the sidebar already used. A launcher result is reached without touching the
+  tree, so without this the row highlights inside a collapsed session — the selection invisible in
+  the one view whose job is to show it. It is deliberately *not* gated on the sidebar being open:
+  the flag is consumed whenever the tree next runs, so a collapsed one simply finds the session
+  already open when it is shown. When the pick had to connect first the expansion has to wait with
+  it, because the session id the row was built from is from before the disconnection and a restarted
+  server has reissued it — hence `expandWhenRestored`, which is keyed by *window* and lives on
+  `AppModel` rather than beside the target: `pendingRestore` is written to `workspace.json` verbatim,
+  and the workspace restore that shares that field must not expand anything, or every launch would
+  open a node per restored window.
 - **A window's label is its name only when the user chose it.** `#{automatic-rename}` is how tmux says
   which: `1` while it is naming the window after the running command, `0` once someone has renamed it.
   There is no `#{window_...}` variable for this — the option name itself is the format. Otherwise the

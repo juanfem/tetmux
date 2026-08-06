@@ -362,6 +362,9 @@ public final class AppModel {
         windowOrder.removeAll { $0 == id }
         focusOrder.removeAll { $0 == id }
         windowsById.removeValue(forKey: id)
+        // A launcher pick whose host never answered, on a window that has gone: there is nothing
+        // left to open a tree for.
+        expandWhenRestored.remove(id)
         if activeWindowState?.id == id { activeWindowState = nil }
         // The session that window was showing may now be on no screen at all, and its client is one
         // nobody needs.
@@ -493,6 +496,12 @@ public final class AppModel {
         // until something unrelated changed the topology again — panes on screen and frozen.
         for window in openWindows where window.pendingRestore != nil {
             window.resolveRestore(with: snapshot)
+            // It landed, and it was a launcher pick: open the tree onto it. Read after the resolve
+            // and never before, because the session id is only knowable from the snapshot that
+            // satisfied the target — a reissued one is exactly what the name fallback is for.
+            guard window.pendingRestore == nil, expandWhenRestored.remove(window.id) != nil else { continue }
+            guard let hostId = window.selectedHostId, let sessionId = window.selectedSessionId else { continue }
+            sessionsToExpand.insert("\(hostId)|\(sessionId)")
         }
         // A window can be pointed at a session before tmux has told us it exists — creating one, or
         // reconnecting — and a session can only be attached to by id once it does. Every snapshot is
@@ -558,7 +567,13 @@ public final class AppModel {
         guard notifications.activity else { return }
         // Only when the user is elsewhere. A window they are looking at needs no banner, and the
         // activity flag clears itself as soon as tmux sees it read.
-        guard !NSApp.isActive else { return }
+        //
+        // `NSApp` is an implicitly unwrapped global that is nil until an `NSApplication` exists,
+        // which in a test process is never — and this defaults on, so a snapshot pushed through
+        // `apply` crashed on the *user's* preference being switched on. Nobody is looking at
+        // anything without an application, and `BellNotifier` would be posting into a process with
+        // no bundle identifier, which traps.
+        guard let app = NSApp, !app.isActive else { return }
         for alert in Self.newlyActive(from: previous, to: current, watching: watchedWindows) {
             BellNotifier.shared.post(
                 title: "Activity in \(alert.label)",
@@ -1520,9 +1535,23 @@ public final class AppModel {
         sessionsToExpand.remove("\(hostId)|\(sessionId)") != nil
     }
 
+    /// Windows whose launcher pick is still waiting on a channel, so the tree can open onto its
+    /// session the moment there is one.
+    ///
+    /// Held here rather than beside the target on `WindowState`, for two reasons. `pendingRestore` is
+    /// a `WorkspaceWindow` and is written to `workspace.json` verbatim — a flag about the sidebar
+    /// does not belong in the file — and the workspace restore that shares that field must *not*
+    /// expand anything, or every launch would open a node per restored window. Only a launcher pick
+    /// asks for this, so only a launcher pick is recorded.
+    @ObservationIgnored private var expandWhenRestored: Set<UUID> = []
+
     /// The resolution step, reachable without a channel. Reveals are resolved from a topology snapshot
     /// and nothing else, which is exactly the part worth asserting.
     func resolveRevealsForTesting() { resolveReveals() }
+
+    /// A topology snapshot through the path the channel drives, for the decisions that live in
+    /// `apply` rather than in one of the steps it calls.
+    func applyForTesting(_ snapshot: [HostState]) { apply(snapshot) }
 
     private func resolveReveals() {
         guard !pendingReveals.isEmpty else { return }
@@ -1859,9 +1888,19 @@ public final class AppModel {
     ) {
         guard !host.connectionState.isActive else {
             select(in: state, host: host.id, session: session.id, window: window.id)
+            // The tree, if it is showing, opens onto what was just picked. A launcher result is
+            // reached without touching the sidebar, so without this the row highlights inside a
+            // session that is still collapsed — the one place in the app where the selection is
+            // invisible in the very view whose job is to show it. Not gated on the sidebar being
+            // open: the flag is consumed by the tree whenever it next runs, so a window whose tree
+            // is collapsed simply finds the session already open when it is shown again.
+            sessionsToExpand.insert("\(host.id)|\(session.id)")
             return
         }
         noteUsed(hostId: host.id, sessionName: session.name, windowId: window.id)
+        // The same, once there is a session to open. It cannot be inserted here: the id is from the
+        // topology this host answered with last time, and a server restarted since has reissued it.
+        expandWhenRestored.insert(state.id)
         state.showWhenAvailable(
             hostId: host.id,
             sessionId: session.id, sessionName: session.name,
