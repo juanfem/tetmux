@@ -37,8 +37,9 @@ Scripts/package-dmg.sh                 # .app bundle inside a .dmg, in dist/
 Scripts/package-dmg.sh --skip-build    # …from whatever is already in .build/release
 Scripts/package-dmg.sh --version 1.2.3 --output dist
 
-Scripts/measure-latency.sh             # P6.1 keypress→glyph p95, against a private tmux server
+Scripts/measure-latency.sh             # P6.1 keypress→glyph p95, and the panel's measured rate
 Scripts/measure-throughput.sh          # P6.3 %output parse rate, release build
+Scripts/measure-launch.sh 5 --untraced # P6.7 exec→first frame with no tracer in the number
 Scripts/measure-idle.md                # P6.6/P6.7 by hand — the procedure, not a program
 
 Scripts/capture-programs.py            # §8's program corpus: vim/htop/less/top/powerline, and the
@@ -239,6 +240,22 @@ modern tmux, where the accident holds.
 broadcasts only when it actually changed. Broadcasting on `%output` rebuilds the SwiftUI tree for
 every chunk of terminal output, tearing down the very terminal views the output is painting into.
 
+**…and a value that changes on a timer must not be in that diff — nor read above a leaf.** F4.29's
+round-trip reading is a field on `HostState`, so every probe answer was a real state change: once
+per host per ten seconds, `AppModel.hosts` was reassigned, which invalidates every view that reads
+it — the sidebar, the tab strip and every pane. That was the whole of P6.6's miss. On 12 panes it
+measured a mean of 0.45–0.71% of one core with spikes to 5.4%, against 0.04% and nothing above 0.8%
+once fixed, and an arm that kept *sending* `display-message` while suppressing only the write was
+flat — so the round trip costs nothing and the rebuild costs all of it. `differsBeyondRoundTrip`
+keeps it out of the broadcast decision by normalising it onto the later value, which is one
+comparison of two whole states rather than an allowlist a new field would fall out of, and
+`roundTripStream` carries it instead. **Both halves are load-bearing, and the first attempt shipped
+only one**: published narrowly but read in `AppMain`'s window body — the body that also builds the
+pane tree — the ten-second rebuild came straight back, with a channel change that looked like a fix.
+SwiftUI invalidates the views whose *body reads* the property, so `RoundTripIndicator` exists to be
+the only reader. Anything else that comes to depend on a timer-driven value wants the same shape,
+and wants it checked by measuring: the cost is a tree rebuild and no unit test can see one.
+
 **tmux owns geometry (§3.3).** Views measure themselves, ask, and then lay out whatever
 `%layout-change` returns. Nothing resizes a surface before tmux confirms. Pane surfaces are snapped to
 the cell size tmux reported; letting the emulator pick its own drifts by a cell and desynchronises the
@@ -288,6 +305,23 @@ tetmux attaches never sends a `%layout-change` at all**, which is why `windowsFo
 and the late joiner needs a repaint because control mode resends nothing for a pane that is merely
 sitting there; broadcasting it would wipe the history the other window is holding. Hence
 `Kind.capturePane(paneId:target:)` and `deliver(_:hostId:paneId:target:)`.
+
+**The byte handoff is batched per display frame, and the first one after a quiet moment is not
+(P6.4).** tmux emits ~22 000 `%output` chunks a second for a busy pane — 219 per frame at 100 Hz —
+and `Coordinator.hand` collapses them to one `feed` per frame behind an `NSView.displayLink`.
+Three things about it. The **edge is the design**: a chunk arriving into an empty buffer more than a
+frame after the last handoff is fed immediately, so an echoed keystroke never waits out a window it
+has nothing to share — the same fix the keystroke coalescer needed, and the reason P6.1 measured
+11.51 ms p95 before and 11.37 after. Order is preserved by the `isEmpty` half of that condition:
+once anything is buffered everything buffers, so nothing overtakes what is waiting. The link is
+**started on demand and stopped after 12 idle frames**, because a permanent per-frame callback in
+each of twenty panes is exactly the always-on timer P6.6 is about. And bytes are acknowledged where
+they are **fed**, not where they arrive, or P6.5's accounting would report a viewer as keeping up
+while a frame's worth sat unhanded — at 34 MB/s that is more than the high-water mark.
+**It bought no CPU** (108.2% of one core before, 106.9% after) and nobody should later think it did:
+SwiftTerm's per-byte work costs the same however few calls deliver the bytes. It is here because the
+requirement is met by it, cheaply, and because the feed rate was *counted* rather than assumed — a
+change that silently did nothing would have measured identically.
 
 **Pane output is bounded in bytes, and the viewer is what reports progress (P6.5).** A pane produces
 output whether or not anyone is painting it — `yes` is the one-word reproducer — and the producer side
@@ -1268,6 +1302,16 @@ order-of-magnitude tripwire that survives a slow runner while still catching the
 mistake above (which measured 2 MB/s in debug against 18 for the same bytes). Anything quoting a
 debug number as a performance figure is quoting the wrong program.
 
+**A tracer is inside every number it reports, and here it was a third of one.** P6.7's 711 ms warm
+launch was taken under Instruments' App Launch template. Its `Process Creation` phase is ~290 ms for
+tetmux — and **413 ms for Calculator**, with no main-thread samples in it at all, the first sample of
+any trace landing where that phase ends. So it is mostly `xctrace` launching a process under ktrace.
+`LaunchProbe` answers the other question — the kernel's `p_starttime` to the first frame, with
+nothing attached, closed from a 1×1 probe view added at `applicationDidFinishLaunching` — and reports
+268–288 ms, inside the floor. The trace is still what says *where* the time goes (`xctrace export` on
+the `time-profile` table, aggregated over a phase window, needs no Instruments UI); the untraced probe
+is what says how much of it a user pays. Neither replaces the other.
+
 **P6.1's two ends are in code we do not own, and neither could be an override.** SwiftTerm declares
 `TerminalView.keyDown` and `draw` `public` rather than `open`, which closes both to a subclass in
 another module. The keystroke end moved to `KeyEventMonitor` — a local `NSEvent` monitor runs before
@@ -1280,7 +1324,28 @@ the interval is the window server and the display — unreachable from the proce
 figure understates by up to a frame and the record says so.
 
 The probe is off unless asked (`TETMUX_MEASURE_LATENCY`, or a live signpost trace), which is what
-keeps the byte scan for the echo off the path P6.3 is a promise about.
+keeps the byte scan for the echo off the path P6.3 is a promise about. Same for
+`TETMUX_MEASURE_LAUNCH`: no variable, no probe view, no `sysctl`.
+
+**…and the bound P6.1 is judged against is the panel's rate, so the rate goes in the record.** The
+probe carries a `CADisplayLink` and every sample records `targetTimestamp - timestamp` at the moment
+of the draw; `measure-latency.sh` derives the bound from it instead of quoting a flat 12 ms the SRD
+no longer states. Checked against two known answers — 10.00 ms over 4500 callbacks on a monitor fixed
+at 100 Hz, 16.67 ms over 2610 on the built-in panel — which is what makes the numbers usable, and
+under which **P6.1 passes on both**.
+
+**The premise it was built on was wrong, which is the part worth remembering.** The justification was
+that `CGDisplayCopyDisplayMode` reads 0 on a ProMotion panel. It does not read 0 here — it reports
+60.0 for the built-in and 100.0 for the external, `NSScreen.maximumFramesPerSecond` agrees, and this
+machine has no ProMotion at all (a MacBook Air; all 18 of the built-in's modes are 60.0 Hz, so it was
+never idling down and the external monitor cannot have dropped it either). One line of `NSScreen`
+would have answered what four runs had left open, and the "adaptive panel" story explaining the
+slower built-in figures was explaining something that was not happening — a 60 Hz frame is simply
+16.7 ms. The instrument is still the right one, because measuring the rate at the draw is what would
+survive a display that really varies; but check the cheap API before building the instrument.
+One caveat does survive for such a display: a display link is content that is not static, so the rate
+it reports is an **upper bound** on what an unwatched panel would idle to — a run that passes would
+also pass without it, a run that fails proves nothing.
 
 **`HOME` does not isolate the app's state files, and assuming it did cost a real workspace.**
 `TMUX_TMPDIR` genuinely gives a measurement run its own tmux server, so keystrokes land in a

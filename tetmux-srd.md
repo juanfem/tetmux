@@ -607,8 +607,10 @@ Exact, testable commitments. Violations produce visible corruption under tmux.
   application on the hardware most of this one runs on: at 60 Hz a frame is 16.7 ms, so a 12 ms
   budget is spent before the compositor has had a chance to present anything. Measured across four
   configurations, the wait for a frame is the whole of the residual — 11.54 ms p95 on a fixed-rate
-  100 Hz external monitor, 14.28 ms on the built-in ProMotion panel, 17.84 ms on that panel on
-  battery, with the protocol under 2 ms in every one.
+  100 Hz external monitor, 14.28 ms on the built-in 60 Hz panel, 17.84 ms on that panel on
+  battery, with the protocol under 2 ms in every one. **Met on both displays as of 2026-08-06**,
+  once the rate was measured rather than assumed: the panel is a fixed 60 Hz (verified — every one
+  of its 18 modes is 60.0 Hz), so its bound is 18.67 ms and all three figures are inside it.
   So the number that judges a **change** is the part the application controls: **keypress → the
   echoed bytes reaching the emulator ≤ 3 ms at p95**, which is what `Scripts/measure-latency.sh`
   reports as the echo column and what caught the 8 ms coalescer. The end-to-end figure is recorded
@@ -620,7 +622,14 @@ Exact, testable commitments. Violations produce visible corruption under tmux.
   documented exception (§4.6): it has no repaint to owe, and a bounded replay buffer is the
   fallback.
 - **P6.4** Byte handoff from transport to surface is batched per display frame (ProMotion-aware).
-  Never one dispatch per read.
+  Never one dispatch per read. **Met 2026-08-06, and not amended although it bought nothing.** tmux
+  emits 21 934 `%output` chunks a second for a busy pane — 219 per display frame at 100 Hz — and the
+  surface now feeds the emulator exactly once a frame, verified by counting rather than assumed.
+  CPU was 108.2% of one core before and 106.9% after: the dispatch is not where the time goes, since
+  SwiftTerm's per-byte work costs the same however few calls deliver the bytes. The requirement was
+  achievable and cheap, so it was met rather than rewritten to match the tree — that distinction is
+  the one below. The first handoff after a quiet moment is **not** batched, which is what keeps P6.1
+  intact (11.51 ms p95 before, 11.37 after).
 - **P6.5** Backpressure enforced end to end, and *(amended)* the mechanism is specified because
   three parts of it are easy to get wrong. Output is bounded **in bytes per subscriber** — never
   delegated to a stream's element-count buffering, because chunk sizes vary by orders of
@@ -634,10 +643,15 @@ Exact, testable commitments. Violations produce visible corruption under tmux.
   pause, and the byte ceiling is the entire mechanism.
 - **P6.6** Idle CPU with 20 panes across 4 hosts: < 0.5% of one core. There is no polling except
   the menu-bar modifier display, which runs only while a menu is open. Verify with Instruments on
-  battery — sustained wakeups matter more than average CPU. **Not amended**: measured at 1.83% on
-  battery and 0.48% on AC, so it is missed, but the miss is a periodic spike whose cause has not
-  been established and nothing suggests the target itself is wrong (`TODO.md`). The wakeup half is
-  met with room — package idle exits are ~0/s.
+  battery — sustained wakeups matter more than average CPU. **Not amended, and the cause is now
+  known.** Measured at 1.83% on battery and 0.48% on AC, the miss was a spike every ten seconds:
+  F4.29's round-trip reading is a field on the diffed `HostState`, so every probe answer was a state
+  change and every state change rebuilt a SwiftUI tree holding every pane. Isolated by suppressing
+  only the write while still sending the probe, then fixed by publishing the reading on a channel of
+  its own with one leaf view reading it. On 12 panes: mean 0.45%/0.71% with spikes to 5.4% before,
+  **0.04% with nothing above 0.8%** after. The arrangement this requirement names — 20 panes,
+  4 hosts, on battery — has not been re-run (`TODO.md`). The wakeup half is met with room — package
+  idle exits are ~0/s.
 - **P6.7** Resident memory, *(amended 2026-08-06 against measurement)*, is bounded **per pane**
   rather than as a single total: **< 90 MB with one pane** at default scrollback (10 000
   lines/pane), and **< 30 MB for each additional pane**. Twenty panes therefore sit near 600 MB,
@@ -648,22 +662,37 @@ Exact, testable commitments. Violations produce visible corruption under tmux.
   could not both hold. The bound is restated in the form that can actually be checked and that
   fails for a reason somebody can act on: a base cost and a marginal cost. Anyone wanting the old
   total back is choosing a smaller default scrollback, and should say so by changing that number.
-  Cold launch to interactive: < 400 ms. **Not** amended — it is missed (711 ms warm, 985 ms with
-  the page cache purged) but nothing establishes that it is unachievable, and three quarters of it
-  is in two phases that have not been investigated yet (`TODO.md`).
+  Cold launch to interactive: < 400 ms. **Not** amended, and **still missed** — but the number moved
+  twice. A third of every traced figure was the instrument: under Instruments' App Launch template
+  `Process Creation` is ~290 ms for tetmux and 413 ms for Calculator, with no main-thread samples in
+  it at all. Timed by the application itself from the kernel's `p_starttime` to the first frame, a
+  **warm** launch is 268–288 ms, inside the floor. **Cold is 898 ms**, so the page cache is worth
+  ~630 ms and this is missed by ~2.2× — and cold is what the requirement says, so the warm pass does
+  not discharge it. The phases are investigated now: Scene Creation holds no hot spot and no tetmux
+  symbol, only framework first-use spread thin, and it is the only phase that grows when the cache is
+  emptied (`TODO.md`).
 
 Verification is **local and scripted**, not CI *(amended — §8)*: the R3.6 matrix set the
 precedent that a measurement worth trusting is a reproducible local artefact, and a hosted runner
 measures the runner. The harness exists — `Scripts/measure-latency.sh`,
 `Scripts/measure-throughput.sh`, `Scripts/measure-launch.sh` and the `Scripts/measure-idle.md`
 procedure — and every figure it has produced is in `docs/measurements.md` with the machine, the
-display and the power state beside it. As of 2026-08-06 **P6.3 is the only requirement here that
-passes outright**; P6.1 passes on a 100 Hz display and not on the built-in panel, and P6.6 and both
-halves of P6.7 are missed. Each has an entry in `TODO.md` carrying its measurement as evidence.
+display and the power state beside it. As of 2026-08-06, after a second pass, **every requirement in
+this section is met except one**: P6.1 passes on both displays, with the built-in panel's rate now
+measured at a fixed 60 Hz rather than assumed; P6.3 passes with 6.5× of room; P6.4 is met and
+verified by counting; P6.6 passes on the 20-pane, 4-host, on-battery arrangement it names; and
+P6.7's memory half passes the amended per-pane bound. The exception is **P6.7's launch half, which
+passes warm and fails cold** — 268 ms against 898 ms — and cold is what the requirement says, so it
+is a miss. It has the one remaining entry in `TODO.md`, carrying its measurement as evidence.
 
 Two of these numbers were amended *because* they were measured, which is the process working rather
 than a retreat: P6.1 named no display and was unachievable at 60 Hz by any application, and P6.7's
-total contradicted its own scrollback parenthesis. The two that are merely unmet were left alone.
+total contradicted its own scrollback parenthesis. The ones that were merely unmet were left alone
+and then met — P6.4 and P6.6 both — which is the distinction the two amendments were meant to
+protect. **And two of the four misses were the harness**: P6.7's launch figure was a third
+`xctrace`, and P6.6's rerun threw away an arm that had measured window occlusion. A performance
+harness gets something badly wrong before it is right, and the wrong answer looks exactly like a
+finding — the same lesson P6.3's first 23 MB/s taught.
 
 ---
 

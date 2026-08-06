@@ -8,7 +8,7 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**4 features, 1 blocked, 3 parked.** The six small items this file opened with, copy
+**1 feature, 1 blocked, 3 parked.** The six small items this file opened with, copy
 mode, and the integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on
 2026-08-06; what they turned into is recorded in `CLAUDE.md`, not here. The five entries added on
 2026-08-06 came out of an adherence review of the tree against SRD v2.1 — a review that mostly
@@ -38,7 +38,8 @@ compositor can present anything, so it was unmeetable by any application; and **
 contradicted its own scrollback parenthesis**, asking for two things that could not both hold. Both
 were amended against the measurements rather than chased, which is what having numbers is for.
 
-Where that leaves §6, and the honesty matters more than the tally. **P6.3 passes outright**, with
+Where that first pass left §6, and the honesty matters more than the tally. **P6.3 passes
+outright**, with
 6.5× of room. **P6.7's memory half passes the amended bound** — but that bound was drawn from these
 measurements with headroom, so it passes nearly by construction; what it buys is a regression check,
 not a validation. **P6.1's verdict is not yet knowable**: under the amended rule it passes on the
@@ -46,100 +47,93 @@ not a validation. **P6.1's verdict is not yet knowable**: under the amended rule
 if it is at 120 — and nobody has measured which. **P6.6 and P6.7's launch half fail**, by 3.7× and
 2.5×, each with an entry below carrying its measurement as evidence.
 
+**A second pass on 2026-08-06 answered three of the four, and two of the answers were about the
+harness rather than the product.** They are recorded in `docs/measurements.md` with the numbers.
+
+*P6.1 is met on both displays, and is closed.* Every sample records the frame interval the compositor
+was on at the moment of the draw, so the script applies the amended bound instead of a flat 12 ms:
+**100.0 Hz over 4500 callbacks** on the external monitor and **60.0 Hz over 2610** on the built-in
+panel, bounds of 12.00 and 18.67 ms against p95 of 11.37 and 11.28. The two earlier built-in runs
+pass under the same rule (14.28 ms on AC, 17.84 on battery, both inside 18.67).
+
+Two things the previous entry asserted turned out to be wrong, and they are why it stayed open. The
+built-in panel is **not ProMotion** — this is a MacBook Air (Mac15,13), and
+`CGDisplayCopyAllDisplayModes` offers 18 modes for it, every one 60.0 Hz, so it was never idling its
+rate down, and the external monitor cannot have dropped it to 60 either: there is no higher mode to
+drop from. And **`CGDisplayCopyDisplayMode` does not read 0 here** — it reports 60.0, with
+`NSScreen.maximumFramesPerSecond` agreeing. That claim was the whole justification for building the
+display link, and one line of `NSScreen` would have answered what four runs had left open. The
+instrument is still the right one, because it measures the rate at the draw rather than the mode the
+display is configured for, but it was built on a premise nobody checked first.
+
+*P6.4 is closed.* The handoff is batched per display frame now, verified by counting: tmux emits
+21 934 `%output` chunks a second for a busy pane — 219 per frame at 100 Hz — and the surface calls
+`feed` exactly 100 times a second. It bought **no CPU at all** (108.2% of one core before, 106.9%
+after), which is the finding: the dispatch is not where the time goes. It was kept because the
+requirement is achievable and now achieved, not because it paid — and it cost no latency, which was
+the risk.
+
+*P6.6 is fixed and closed.* The ten-second spike was F4.29's round-trip reading living on the diffed
+`HostState`: every probe answer was a state change, and every state change rebuilds a tree holding
+every pane. It now travels on `SessionService.roundTripStream` and is read by one leaf view. On the
+arrangement the requirement actually names — **20 panes, 4 hosts, on battery** — mean **1.83% of one
+core became 0.14%** and the maximum 13.9% became 2.10%, against a 0.5% bar: inside it, where it had
+been 3.7× over. The ten-second cadence is gone rather than reduced. Memory on the same arrangement is
+unchanged at 550 MB.
+
+*P6.7's launch half splits in two.* A third of every traced figure was `xctrace`: under the App
+Launch template `Process Creation` is ~290 ms for tetmux and **413 ms for Calculator**, with no
+main-thread samples in it at all. Untraced, the app times itself from the kernel's `p_starttime` to
+first frame and a warm launch is **268–288 ms, inside the 400 ms floor**. Cold is a different answer:
+purged and untraced the median is **897.8 ms**, so the page cache is worth ~630 ms and the
+requirement — which says *cold* — is **missed by ~2.2×**.
+
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
 ---
 
 ## Features, sized like features
 
-- [ ] **P6.1's application half is met; whether the whole of it is turns on a refresh rate nobody
-  has measured.**
-  Four runs (`docs/measurements.md`): p95 **11.54 ms** on a fixed-rate 100 Hz external monitor on
-  AC, **14.28 ms** on the built-in ProMotion panel on AC, **17.84 ms** on the built-in on battery,
-  against a 12 ms bar. Both variables matter and neither alone explains the gap.
-  The protocol half is **under 2 ms in all four**, and lowest in the two that fail, so this is not
-  the channel: it is the wait between the bytes reaching the emulator and the glyph being on
-  screen. The likely mechanism is that **ProMotion idles the refresh rate down when content is
-  static**, which a terminal at a prompt is, so a keystroke waits for a frame at whatever rate the
-  panel has drifted to — 17.8 ms is about one 60 Hz frame plus the draw.
-  *Do:* first establish the panel's actual refresh rate *during* a run rather than inferring it
-  from the arithmetic — `CGDisplayCopyDisplayMode`'s refresh rate reads 0 for ProMotion, so this
-  wants a `CADisplayLink`/`NSView.displayLink` sampling its own callback interval, which is a few
-  lines in the existing probe and would put the number in the record instead of a hypothesis.
-  If it confirms the panel idling, the fix is to ask for a higher rate while a pane is being typed
-  into: `NSView.preferredFrameRateRange` (or the display link's) is the supported way to tell the
-  compositor that this view wants frames now. That is a real change to how a pane schedules
-  drawing, so it needs P6.4's output half thought about at the same time — the two are the same
-  question from opposite ends.
-  **P6.1 was amended on 2026-08-06** to name a refresh rate — 12 ms at p95 on a 100 Hz-or-faster
-  display, one refresh interval + 2 ms below that — and to state the number a change is judged by:
-  keypress → echoed bytes at the emulator, ≤ 3 ms p95, currently 0.78–1.72 and comfortably met.
-  **That makes the refresh rate the thing that decides pass or fail, not a curiosity.** At 60 Hz the
-  bound is 18.7 ms and both built-in runs pass (14.28 and 17.84); at 120 Hz the bound is 12 ms and
-  both fail. So this entry cannot be closed *or* confirmed until the panel's actual rate during a
-  run is known — which is the first task below and is a few lines, not an investigation.
-  `Sources/tetmuxUI/LatencyProbe.swift`, `Sources/tetmuxUI/TerminalSurface.swift`
-
-- [ ] **P6.7's launch half misses by 2.5×, and the cold penalty lands where nobody would look.**
-  Measured 2026-08-06 on an M3 (`docs/measurements.md`): median **710.8 ms** warm and **985.3 ms**
-  after `sudo purge`, against a 400 ms floor — on the bare binary, which is the *faster* target,
-  and under tracing, which inflates but not by a factor. The phase breakdown is the useful part.
-  Emptying the page cache costs **AppKit Scene Creation 210 ms** (257 → 471) and process creation
-  **14 ms** (267 → 281). That is backwards from the obvious expectation: the launch is not
-  dominated by dyld mapping a framework graph, it is dominated by something in SwiftUI's scene
-  creation reading from disk on first use. Everything tetmux's own code does at launch —
-  `applicationWillFinishLaunching` through `didFinishLaunching`, where `bootstrap` reads the
-  workspace and connects the local host — is about 100 ms and does **not** grow when the cache is
-  emptied, so it is not the place to start.
+- [ ] **P6.7's launch half passes warm and misses cold by ~2.2× — and the old figure was partly the
+  tracer.**
+  The 711 ms and 985 ms in the table were taken under Instruments' App Launch template, and the
+  overhead that is inside every one of its phases was assumed small. It is not: `Process Creation`
+  is ~290 ms for tetmux and **413 ms for Calculator**, an application with no scene of ours in it,
+  and the time profiler records **no main-thread samples in that phase at all**. Roughly a third of
+  each traced number is `xctrace` launching a process under ktrace.
+  Untraced — `Scripts/measure-launch.sh --untraced`, where `LaunchProbe` times the kernel's
+  `p_starttime` to the first frame with nothing attached — the median is **268–288 ms across two
+  sets of runs, inside the 400 ms floor**. The packaged `.app` is also not slower than the bare
+  binary (699.8 ms against 710.8 traced), which removes that caveat too.
+  *Also answered:* the Scene Creation window holds no hot spot and no tetmux symbol. Read out of the
+  trace with `xctrace export` on the `time-profile` table, its 215 ms of main-thread samples are
+  AppKit 30, libobjc 27, CoreFoundation 24, libswiftCore 20, SwiftUI 14, CoreUI 14, dyld 10 — class
+  realization, category attachment, bundle localization scans, the font registry, asset lookups,
+  `NSWindow` init and SwiftUI graph construction. Framework first-use, spread thin. There is no
+  single change to make there, which is consistent with an empty page cache costing that phase
+  210 ms while costing tetmux's own launch code nothing.
   *Ruled out already:* SwiftTerm ships `Shaders.metal` as source rather than a compiled
   `.metallib` (see the packaging note in `CLAUDE.md`), and `makeLibrary(source:)` would be exactly
   the kind of disk-read-then-compile that fits this shape — but tetmux never enables SwiftTerm's
   Metal renderer, so it is never on the launch path. Do not chase it again.
-  *Do:* the traces `Scripts/measure-launch.sh` records already carry a time profile, so open one in
-  Instruments and read the samples inside the Scene Creation window rather than guessing. Then
-  re-measure with `--app` against a built bundle: an app bundle gets a dyld launch closure the bare
-  binary does not, so that number may be *better* and is in any case the one a user experiences.
-  `Scripts/measure-launch.sh`, `Sources/tetmuxUI/AppMain.swift`
-
-- [ ] **P6.6's idle CPU is missed on battery, and it is one timer's answer rebuilding the tree.**
-  Measured 2026-08-06 with 20 panes across 4 hosts: **mean 1.83% of one core on battery** against
-  a 0.5% bar, median 0.30%, max 13.9%. On AC the same arrangement means 0.48% and passes, so the
-  battery figure is the one P6.6 asks for and the gap may be nothing but clock scaling — a clean
-  rerun on battery, settled longer after the scrollback fill, should come first. Wakeups are
-  **fine** and should not be chased: package idle exits are ~0/s.
-  The shape is the finding. Baseline idle is ~0.25%; the whole miss is a spike **every 10
-  seconds**, which is `rttTask`'s cadence and the only 10 s timer in the app — and the cost scales
-  with pane count, since the one-pane arm shows the same probe at the same cadence for ~0.01%.
-  *Not* established: why work proportional to pane count follows an RTT answer. The obvious
-  candidate is that `rttMilliseconds` lives on `HostState`, so a probe answer diffs as a real state
-  change, broadcasts, and rebuilds a SwiftUI tree holding 20 panes — four `display-message` round
-  trips cannot cost 13.9% of a core by themselves. An attempt to confirm that in an isolated
-  harness was inconclusive and is not evidence: the harness ran the app against a scratch `HOME`
-  and behaved in ways that did not reproduce in an ordinary run.
-  *Do:* **confirm the mechanism first**, on a normal run under Instruments — the cadence and the
-  scaling are facts, the broadcast path is a guess, and it would be easy to "fix" the wrong thing.
-  If it is the broadcast: the RTT is a status-bar readout (F4.29) and nothing about a pane depends
-  on it, so it can be excluded from the diff that decides whether to broadcast and published on a
-  narrower channel, or coalesced so it cannot fire more often than the tree can afford. Verify by
-  re-running the arrangement, not by reasoning: the cost is in the rebuild, which no unit test sees.
-  `Sources/tetmuxCore/Session/SessionService.swift` (`rttTask`, `ingest`),
-  `Sources/tetmuxCore/Session/HostModel.swift` (`rttMilliseconds`)
-
-- [ ] **P6.4's output half: the byte handoff is per-chunk, not per display frame.** The input
-  direction complies — keystrokes coalesce into one `send-keys -H` per 8 ms flush, and
-  acknowledgements batch at 16 KiB — but the surface feeds the emulator once per `%output` chunk
-  and nothing in the tree is ProMotion-aware; there is no display link anywhere. SwiftTerm's own
-  redraw coalescing is what keeps the paint rate sane, which may make this a non-problem in
-  practice, but P6.4 as written asks for per-frame batching of the handoff itself.
-  *Do:* measure first — `Scripts/measure-latency.sh` is the tool, and the P6.1 entry above is the
-  other end of this question: with the protocol under 2 ms, everything left in keypress→glyph is
-  the draw side, so a change to how panes schedule drawing shows up in that measurement. If
-  per-chunk feeding shows up, coalesce
-  chunks in `TerminalSurface.Coordinator.attach` behind `NSView.displayLink(target:selector:)`
-  and flush once per frame; if it does not, amend P6.4 to record per-chunk feeding over
-  SwiftTerm's coalescing as the accepted design. Until one of those happens the requirement reads
-  as done while the tree does not do it.
-  `Sources/tetmuxUI/TerminalSurface.swift` (`Coordinator.attach`)
+  **Cold is measured now and it fails**: purged and untraced, median **897.8 ms** against 400 ms,
+  spread 579.7–1012.3 across five runs. The page cache is worth ~630 ms of that, and P6.7 says
+  *cold*, so the warm pass does not discharge it — the requirement is missed by ~2.2×. A first
+  launch of a freshly linked binary, which is the shape of a first launch after install, measured
+  1192 ms independently.
+  *Do:* the target is the **210 ms an empty page cache adds to AppKit Scene Creation** — the only
+  phase that grows when the cache is emptied. Nothing tetmux does at launch grows, and the window
+  holds no hot spot, so this is not about optimising our own code: the samples are class
+  realization, category attachment, bundle localization scans, the font registry and asset lookups,
+  each a first-use cost paid once per framework rather than per line of ours. What is worth trying is
+  whether the first frame can be built touching fewer distinct SwiftUI/AppKit subsystems — the
+  sidebar, the tab strip, the status bar and the menu-bar extra are all constructed before it — and
+  measuring after each, since none of this is predictable from reading.
+  Whoever runs it: **not under `sudo`**. The script escalates for `purge` itself and now refuses to
+  run as root, because as root the app reads root's Application Support and gets no dyld launch
+  closure; that produced 1100.7 ms, *above* the traced figure, which is backwards and is how the
+  confound was spotted.
+  `Scripts/measure-launch.sh`, `Sources/tetmuxUI/LaunchProbe.swift`
 
 ## Blocked on credentials
 
