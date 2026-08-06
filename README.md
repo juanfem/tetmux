@@ -9,11 +9,12 @@ The point is that a remote working set stops being a picture of a terminal. Pane
 `NSView`s, so selection, scrollback, and font rendering are native; the session lives on the server,
 so closing the lid, changing networks, or quitting the app leaves everything running.
 
-> **Status:** early, and honest about it. It connects, renders sessions and splits across as many
-> macOS windows as you like, survives dropped connections, and has a small settings pane. The keymap
-> is centralised in one policy type but is not editable at runtime; there is no copy mode, no tab
-> reordering, and no window-arrangement restore across launches. `TODO.md` is the working list, and
-> distinguishes what is done from what is merely started.
+> **Status:** usable, and honest about it. It connects, renders sessions and splits across as many
+> macOS windows as you like, survives dropped connections, restores your window arrangement across
+> launches, and has copy mode, drag-to-reorder tabs, an editable keymap and a settings pane. What it
+> does not have is a signed, notarised build (see the packaging note below) or an updater. `TODO.md`
+> is the working list; `docs/measurements.md` records where it meets its own performance targets and
+> where it does not.
 
 ## Requirements
 
@@ -107,6 +108,31 @@ every pane, with the focused pane's part in medium.
 keeps — 10,000 lines by default. Scrollback is held on this side rather than by tmux, because control
 mode streams output here, so that number is what `⌘F` and scrolling up actually search. Changing the
 font re-asks tmux for a new grid, so panes reflow.
+
+#### Scrollback is where the memory goes
+
+If tetmux is using more memory than you expect, this is almost certainly why, and it is the one
+setting that changes it. Each pane keeps its own history, and a terminal cell costs 24 bytes, so at
+the default depth an 80-column pane holds roughly **18 MB** — measured at about 25 MB in practice
+once per-line overhead is counted. Twenty panes at that depth is most of half a gigabyte, and the
+picker's largest option is ten times the default *per pane*:
+
+| Scrollback | Per pane (80 columns) | Twenty panes |
+|---|---|---|
+| 1,000 lines | ~2 MB | ~37 MB |
+| 5,000 lines | ~9 MB | ~180 MB |
+| **10,000 lines** (default) | ~18 MB | ~370 MB |
+| 50,000 lines | ~92 MB | ~1.8 GB |
+| 100,000 lines | ~183 MB | ~3.6 GB |
+
+The settings pane shows the per-pane figure beside the picker and updates it as you choose, so you
+need not come back here for the arithmetic. Lowering the depth takes effect on panes already open —
+it is applied live, not at the next launch — and costs you only history you had not scrolled back
+to. Nothing else in tetmux scales with pane count in a way you would notice: the connections, the
+tabs and the sidebar are all small next to this.
+
+The measurements behind those numbers, including what was counted and what was not, are in
+[`docs/measurements.md`](docs/measurements.md).
 
 ### Several windows
 

@@ -940,6 +940,17 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   one tmux client painting itself and a fallback in different colours would look like somebody else's
   application. The theme stores the scheme's *id*, not the scheme: an unknown id falls back to
   System, which is what a downgrade or a hand-edited preference produces.
+- **The scrollback setting shows what it costs, because the cost is the whole of the choice.**
+  Scrollback is the dominant term in this application's memory by a distance — a cell is
+  `MemoryLayout<CharData>.stride` bytes (24, read from SwiftTerm rather than written down, so a
+  dependency bump moves with it), so 10 000 lines of an 80-column pane is ~18 MB and the picker's
+  largest option is ten times that *per pane*. `TerminalTheme.estimatedScrollbackBytesPerPane`
+  feeds the figure beside the picker, and it is deliberately an estimate of cell data at a nominal
+  width: allocator rounding, the per-line object and the alternate buffer are real, unmodelled, and
+  why the measured figure is higher. Its job is to make 1 000 versus 100 000 legible at the moment
+  somebody chooses, not to predict a footprint. `PaneMemoryTests` pins the arithmetic *and* the
+  cell size, because P6.7's amended bound is derived from both and a struct layout in a dependency
+  changes without a compile error.
 - **The terminal's appearance is one `TerminalTheme` in `UserDefaults`, and changing it costs a round
   trip per pane.** The `Settings` scene sets font family, size, ligatures (T5.8) and scrollback; the
   theme lives on `AppModel` with a `didSet` that persists it, and reaches panes as a value passed down

@@ -13,6 +13,17 @@ struct SettingsView: View {
 
     private static let scrollbackChoices = [1_000, 5_000, 10_000, 50_000, 100_000]
 
+    /// The estimate, in the units somebody thinking about memory thinks in.
+    ///
+    /// `.memory` rather than a hand-rolled division: it is the formatter macOS uses everywhere else
+    /// for this, so "18 MB" here reads the same as it does in Activity Monitor, which is where
+    /// anybody checking this claim will go next.
+    private static func scrollbackFootprint(_ theme: TerminalTheme) -> String {
+        ByteCountFormatter.string(
+            fromByteCount: Int64(theme.estimatedScrollbackBytesPerPane()), countStyle: .memory
+        )
+    }
+
     var body: some View {
         TabView {
             terminal.tabItem { Label("Terminal", systemImage: "terminal") }
@@ -84,9 +95,16 @@ struct SettingsView: View {
                     }
                 }
             } footer: {
+                // The cost goes beside the choice, because it is the whole of what makes this a
+                // choice. The picker offers 100 000 lines, which is ten times the default and is
+                // paid *per pane*: at twenty panes that is gigabytes, and nothing else in the app
+                // tells anybody so. P6.7 is this number multiplied by the panes on screen.
                 Text(
                     "Held by tetmux, not by tmux: control mode streams output here, so this is what "
-                    + "scrolling up searches."
+                    + "scrolling up searches.\n\n"
+                    + "About \(Self.scrollbackFootprint(model.theme)) per pane at 80 columns, and "
+                    + "every pane on screen keeps its own. Lower this if you work with many panes "
+                    + "open."
                 )
                 .font(.callout)
                 .foregroundStyle(.secondary)

@@ -42,6 +42,35 @@ final class PaneMemoryTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<Attribute.Color>.stride, 4)
     }
 
+    /// The estimate the settings pane shows beside the scrollback picker.
+    ///
+    /// It exists so the choice is legible: the picker offers 100 000 lines, which is ten times the
+    /// default and is paid *per pane*. Asserted rather than eyeballed because it is the one place
+    /// the application makes a numeric claim to the user about memory, and a wrong one there is
+    /// worse than none — somebody would lower their scrollback for nothing, or raise it into
+    /// gigabytes trusting a figure that was out by an order of magnitude.
+    func testTheSettingsEstimateTracksTheChoice() {
+        var theme = TerminalTheme.default
+        let perCell = MemoryLayout<CharData>.stride
+
+        theme.scrollbackLines = 10_000
+        XCTAssertEqual(theme.estimatedScrollbackBytesPerPane(), 10_000 * 80 * perCell)
+        XCTAssertEqual(theme.estimatedScrollbackBytesPerPane() / 1_048_576, 18)
+
+        // The two ends of the picker, which are what the estimate is really for: the difference
+        // between them is 1.5 MB a pane and 183 MB a pane.
+        theme.scrollbackLines = 1_000
+        XCTAssertEqual(theme.estimatedScrollbackBytesPerPane() / 1_048_576, 1)
+        theme.scrollbackLines = 100_000
+        XCTAssertEqual(theme.estimatedScrollbackBytesPerPane() / 1_048_576, 183)
+
+        // …and it is proportional, so no choice in between can be surprising.
+        theme.scrollbackLines = 5_000
+        let half = theme.estimatedScrollbackBytesPerPane()
+        theme.scrollbackLines = 10_000
+        XCTAssertEqual(theme.estimatedScrollbackBytesPerPane(), half * 2)
+    }
+
     /// The consequence, stated in the units P6.7 is written in.
     ///
     /// This is the arithmetic that made the old "< 150 MB with 20 panes at 10 000 lines/pane"

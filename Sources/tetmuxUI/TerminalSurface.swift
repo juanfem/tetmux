@@ -42,6 +42,24 @@ public struct TerminalTheme: Equatable, Sendable {
     /// The bounds the settings pane offers, and what ⌘+/⌘− clamp to.
     public static let fontSizeRange: ClosedRange<CGFloat> = 8...32
 
+    /// Roughly what one pane's scrollback costs, for showing beside the setting that decides it.
+    ///
+    /// P6.7's memory bound is this multiplied by the number of panes, and it is the dominant term by
+    /// a distance: a cell is `MemoryLayout<CharData>.stride` bytes — 24 at the time of writing, and
+    /// read from SwiftTerm rather than written down here so a dependency bump moves this with it —
+    /// so 10 000 lines of an 80-column pane is about 18 MB before anything else exists. The setting
+    /// offers 100 000, which is ten times that, *per pane*.
+    ///
+    /// Deliberately an estimate and deliberately shown as one. It assumes a nominal width because
+    /// panes differ and the settings pane cannot know theirs, and it counts cell data only —
+    /// allocator rounding, the per-line object and the alternate screen buffer are all real and all
+    /// unmodelled, which is why the measured figure is somewhat higher (`docs/measurements.md`).
+    /// Its job is to make the difference between 1 000 and 100 000 lines legible at the moment
+    /// somebody chooses, not to predict a footprint.
+    public func estimatedScrollbackBytesPerPane(columns: Int = 80) -> Int {
+        scrollbackLines * columns * MemoryLayout<CharData>.stride
+    }
+
     // MARK: - Persistence
 
     /// `UserDefaults` rather than a file beside `hosts.json`: this is application preference data,
