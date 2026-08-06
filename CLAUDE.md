@@ -1188,6 +1188,16 @@ window schedules a `workspace.json` save. A default-constructed one in a test th
 *user's* files, and did — running the app after the suite found `testOnlyEditedBindingsAreStored`'s
 keymap in it. Hence `AppModel(directory:)` and the per-test temporary directory in `setUpWithError`.
 
+**Killing a channel is asynchronous, so a test has to watch the state *leave* `.connected` before
+waiting for it to come back.** `SIGKILL` returns the moment the signal is delivered; the pty EOF that
+turns a dead process into a dead channel arrives later. A test that kills and then waits for
+`.connected` matches the *stale* value instantly, and everything it does next happens in the window
+between teardown and the next spawn — where `connections[hostId]` is nil, `sendKeys` drops the
+keystroke, and the evidence reads exactly like a session that reconnects and then ignores its
+keyboard. That cost an evening and produced a TODO entry about a bug that did not exist. The dropped
+keystroke is correct behaviour, incidentally, and consistent with the outbox's age limit: keys typed
+at a host with no channel are not worth replaying.
+
 **A test's deadline has to be inside the work, not wrapped around it.** Pane output is read by
 `collect(_:until:seconds:)`, which starts reading before the keystrokes that produce the output and
 stops on the marker *or* on a deadline of its own. It replaced a `withTimeout` helper that raced an

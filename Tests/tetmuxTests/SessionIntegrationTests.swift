@@ -1087,6 +1087,110 @@ final class SessionIntegrationTests: XCTestCase {
 
     // MARK: - Chaos (§8)
 
+    /// The channel's process is killed underneath it, and the session comes back working.
+    ///
+    /// §8 asks for scenarios that end in a defined state, and this is the one the recovery machinery
+    /// exists for: a link that dies without warning. It is not simulated — a real `SIGKILL` reaches
+    /// the real process on the far end of the pty, which is what a dropped ssh connection looks like
+    /// from here, byte for byte: EOF and nothing else, with no `%exit` to say the session ended.
+    ///
+    /// The pid comes from a stand-in ssh script recording its own `$$`, which is exact rather than a
+    /// search through `ps`, and stays exact because everything after it `exec`s: the script becomes
+    /// the shell becomes tmux, one pid throughout.
+    ///
+    /// **Waiting for the drop to be noticed is a step, not a formality**, and leaving it out is what
+    /// made this look like a product bug for an evening. `SIGKILL` is asynchronous: the process is
+    /// gone, but the pty EOF has not propagated, so `connectionState` is still `.connected` from
+    /// before the kill and a wait for `.connected` matches instantly. The test then types into the
+    /// window between teardown and the next spawn, where there is no channel at all — `sendKeys`
+    /// drops it, correctly, and the evidence reads exactly like a session that reconnects and then
+    /// ignores its keyboard. The state has to be seen leaving `.connected` before it is waited for
+    /// again.
+    func testAChannelKilledMidStreamReconnectsAndRepaints() async throws {
+        let directory = URL(fileURLWithPath: "/tmp/tetmux-chaos-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("pid")
+        let script = directory.appendingPathComponent("ssh.sh")
+        try """
+        #!/bin/sh
+        echo $$ > \(pidFile.path)
+        \(matrixPathExport)exec /bin/sh -c "$1"
+        """.write(to: script, atomically: true, encoding: .utf8)
+
+        let service = SessionService()
+        await service.addHost(HostConfig(
+            id: "chaos", name: "chaos", isLocal: false, customCommand: "/bin/sh \(script.path)"
+        ))
+        try await service.connectHost(hostId: "chaos", targetSession: sessionName)
+
+        let host = try await waitForHost(service, id: "chaos", timeout: 20) { host in
+            host.connectionState == .connected && host.activeSession?.activeWindow?.layoutTree != nil
+        }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+        let attached = try XCTUnwrap(host.activeSession?.name)
+
+        // One subscriber, watching across the kill. Deliberately a single stream rather than a fresh
+        // one afterwards: `outputSubscribers` is a registry of what is on screen and not a property
+        // of the connection, so what is under test is that *this* subscription — made once, as a real
+        // view makes it — still delivers after the channel it was made on has died. Subscribing again
+        // would test something easier and quietly different.
+        let stream = await service.subscribeToPane(hostId: "chaos", paneId: paneId).stream
+        let painted = Collector()
+        let reader = Task { for await chunk in stream { await painted.append(chunk) } }
+        defer { reader.cancel() }
+
+        try await Task.sleep(for: .milliseconds(500))
+        await service.sendKeys(hostId: "chaos", paneId: paneId, text: "echo before-the-kill\r")
+        let liveBefore = try await waitFor(seconds: 10) { await painted.text.contains("before-the-kill") }
+        XCTAssertTrue(liveBefore, "the pane was not live before the kill")
+
+        // `SIGKILL` rather than `SIGTERM`: the point is a process that gets no chance to say
+        // anything, because a link that drops does not either.
+        let pidText = try String(contentsOf: pidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let pid = try XCTUnwrap(pid_t(pidText), "the stand-in ssh never recorded its pid")
+        XCTAssertEqual(kill(pid, SIGKILL), 0, "could not kill the channel's process")
+
+        // See the doc comment: the drop has to be *observed* before the recovery can be.
+        let noticed = try await waitFor(seconds: 30) {
+            await service.getHost("chaos")?.connectionState != .connected
+        }
+        XCTAssertTrue(noticed, "the dead channel was never noticed")
+
+        // A defined state: it comes back on its own. `waitFor` plus an assertion, never
+        // `waitForHost` — a skip on timeout would make "it never reconnected" look green.
+        let recovered = try await waitFor(seconds: 60) {
+            await service.getHost("chaos")?.connectionState == .connected
+        }
+        XCTAssertTrue(recovered, "the host never reconnected after its process was killed")
+
+        // …to the same session. F4.15: recovery attaches, it does not create.
+        let after = await service.getHost("chaos")
+        XCTAssertEqual(
+            after?.activeSession?.name, attached,
+            "the reconnect landed somewhere else, or invented a session"
+        )
+
+        // …and the pane both paints and *works* again, through the subscription made before the kill.
+        // Control mode resends nothing for a pane that is merely sitting there, so without the
+        // reattach repaint (F4.16) this pane would take keystrokes and show nothing for the rest of
+        // the process's life — silently, which is why it is worth a chaos test.
+        await painted.mark()
+        try await Task.sleep(for: .milliseconds(800))
+        await service.sendKeys(hostId: "chaos", paneId: paneId, text: "echo after-the-kill\r")
+        let liveAfter = try await waitFor(seconds: 25) {
+            await painted.textSinceMark.contains("after-the-kill")
+        }
+        let tail = await painted.textSinceMark
+        XCTAssertTrue(
+            liveAfter,
+            "the pane never moved again after the reconnect. Since the kill: \(tail.debugDescription)"
+        )
+
+        await service.disconnectHost(hostId: "chaos")
+    }
+
     /// The tmux server is stopped dead, and the actor keeps answering.
     ///
     /// A `SIGSTOP`ped server is the shape of failure that a timeout exists for and that a naive
