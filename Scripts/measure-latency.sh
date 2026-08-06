@@ -162,16 +162,24 @@ python3 - "$log" "$WARMUP" <<'PY'
 import sys
 
 log, warmup = sys.argv[1], int(sys.argv[2])
-total, echo, drops = [], [], 0
+total, echo, frame, drops = [], [], [], 0
+# Once-a-second summaries from the display link: ticks, mean nominal frame duration, mean measured
+# interval between callbacks. Kept whole rather than averaged, because an adaptive panel changing
+# rate mid-run is exactly what a single average would hide.
+windows = []
 for line in open(log, errors="replace"):
     if line.startswith("LATENCY-DROP"):
         drops += 1
     elif line.startswith("LATENCY "):
-        _, t, e = line.split()
+        _, t, e, f = line.split()
         total.append(float(t))
         echo.append(float(e))
+        frame.append(float(f))
+    elif line.startswith("FRAME "):
+        _, ticks, nominal, measured = line.split()
+        windows.append((int(ticks), float(nominal), float(measured)))
 
-total, echo = total[warmup:], echo[warmup:]
+total, echo, frame = total[warmup:], echo[warmup:], frame[warmup:]
 if len(total) < 20:
     print(f"FAILED: {len(total)} samples after discarding {warmup} warm-up — too few to quote a p95",
           file=sys.stderr)
@@ -188,13 +196,38 @@ def pct(values, p):
 print(f"samples        {len(total)} (+{warmup} warm-up discarded, {drops} overlapped and dropped)")
 print(f"keypress→glyph p50 {pct(total, 50):6.2f} ms   p95 {pct(total, 95):6.2f} ms   max {max(total):6.2f} ms")
 print(f"  of which echo p50 {pct(echo, 50):6.2f} ms   p95 {pct(echo, 95):6.2f} ms   max {max(echo):6.2f} ms")
+
+# The panel's rate, taken from the compositor at the moment each glyph was drawn rather than from
+# `CGDisplayCopyDisplayMode`, which answers what the display is *configured* for rather than what it
+# was on when the glyph landed. This is what chooses the bound below.
+interval = pct(frame, 50) if frame and max(frame) > 0 else 0
+if interval > 0:
+    rates = sorted({round(1000 / n, 1) for _, n, _ in windows if n > 0})
+    drift = f"   rates seen {rates}" if len(rates) > 1 else ""
+    print(f"frame interval p50 {interval:6.2f} ms   = {1000 / interval:.1f} Hz at the draw{drift}")
+    measured = sum(t * m for t, _, m in windows) / sum(t for t, _, _ in windows) if windows else 0
+    if measured:
+        print(f"  callbacks arrived every {measured:.2f} ms over {sum(t for t, _, _ in windows)} of them")
 print()
+
+# P6.1 as amended 2026-08-06: 12 ms at p95 on a 100 Hz-or-faster display, one refresh interval + 2 ms
+# below that. A flat 12 ms is not the requirement and quoting it as one is what made the first four
+# runs unable to say whether they had passed.
 p95 = pct(total, 95)
-if p95 <= 12:
-    print(f"PASS: p95 {p95:.2f} ms is within P6.1's 12 ms")
+if interval <= 0:
+    bound, basis = 12.0, "P6.1's 12 ms (no frame interval sampled — assuming ≥ 100 Hz)"
+elif interval <= 10:
+    bound, basis = 12.0, f"P6.1's 12 ms at {1000 / interval:.0f} Hz"
 else:
-    print(f"FAIL: p95 {p95:.2f} ms exceeds P6.1's 12 ms")
+    bound = interval + 2
+    basis = f"P6.1's one refresh interval + 2 ms at {1000 / interval:.0f} Hz"
+print(f"{'PASS' if p95 <= bound else 'FAIL'}: p95 {p95:.2f} ms against {bound:.2f} ms — {basis}")
+
+# The application-controlled half, which is the number a change is judged by (P6.1 as amended). The
+# end-to-end figure above is a claim about a display as much as about this program; this one is not.
+echo95 = pct(echo, 95)
+print(f"{'PASS' if echo95 <= 3 else 'FAIL'}: keypress→echo p95 {echo95:.2f} ms against P6.1's 3 ms")
 print()
-print("Record the above in docs/measurements.md, with the machine and the display.")
-sys.exit(0 if p95 <= 12 else 1)
+print("Record the above in docs/measurements.md, with the machine, the display and the rate.")
+sys.exit(0 if p95 <= bound and echo95 <= 3 else 1)
 PY

@@ -22,22 +22,48 @@
 # somebody double-clicks, and it launches through a different dyld path with a Gatekeeper assessment
 # in front of it. Without `--app` this measures `.build/release/tetmux`, which is the faster case.
 #
-# Tracing costs something and it is inside the number. The App Launch template samples context
-# switches, so every phase here is a little slower than an untraced launch. That is the trade for
-# having phases at all — and it is why a *pass* this close to the floor would need checking against
-# a stopwatch, while a miss by a factor is a miss.
+# **Tracing is inside every number this produces, and it is not a rounding error.** The App Launch
+# template samples context switches, and measured against a control it costs more than the phase
+# breakdown makes it look: under this harness `Initializing - Process Creation` is ~290 ms for tetmux
+# and **413 ms for Calculator**, an application with no scene of ours in it — so that phase is mostly
+# `xctrace` getting a process launched under ktrace rather than the program being launched. What the
+# trace is *for* is where the time goes, and it answered that: the cost is in AppKit Scene Creation,
+# diffuse across framework first-use, with no tetmux symbol in it.
+#
+#     Scripts/measure-launch.sh 5 --untraced       # no Instruments; the app times itself
+#
+# `--untraced` is the number a user would actually experience: `LaunchProbe` reports `exec` (the
+# kernel's `p_starttime`) to the first frame, with no tracer in the process at all. It has no phase
+# breakdown — that is the trade, and it is why both modes exist rather than one replacing the other.
 
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# `--purge` escalates on its own, one `sudo purge` per run, so this script must **not** be run under
+# `sudo` itself — and refusing is worth more than a warning, because what it produces is a plausible
+# number measuring something else. As root the app resolves *root's* Application Support (see the
+# `HOME` note above: that path comes from the password database and ignores the environment), so it
+# launches with no `hosts.json` and no workspace to restore, and root has no dyld launch closure for
+# the binary. Both make the figure incomparable with every other row in the table. It happened:
+# `sudo Scripts/measure-launch.sh 5 --untraced --purge` returned a median of 1100.7 ms against
+# 985.3 ms for the *traced* purged run, which is backwards and was the clue.
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "Run this as yourself, not under sudo — it escalates for 'purge' on its own." >&2
+    echo "As root the app reads root's Application Support and gets no launch closure, so the" >&2
+    echo "number is not comparable with anything else in docs/measurements.md." >&2
+    exit 2
+fi
+
 RUNS=3
 PURGE=0
 APP=""
+UNTRACED=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --purge) PURGE=1; shift ;;
         --app) APP="$2"; shift 2 ;;
+        --untraced) UNTRACED=1; shift ;;
         [0-9]*) RUNS="$1"; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -86,8 +112,30 @@ echo "== hardware"
 sysctl -n machdep.cpu.brand_string 2>/dev/null || true
 sw_vers -productVersion | sed 's/^/macOS /'
 echo "target   $what"
-echo "mode     $([[ $PURGE -eq 1 ]] && echo 'purged (approximating cold)' || echo 'warm')"
+echo "mode     $([[ $PURGE -eq 1 ]] && echo 'purged (approximating cold)' || echo 'warm')$([[ $UNTRACED -eq 1 ]] && echo ', untraced')"
 echo
+
+if [[ $UNTRACED -eq 1 ]]; then
+    for ((run = 1; run <= RUNS; run++)); do
+        if [[ $PURGE -eq 1 ]]; then sudo purge; sleep 5; fi
+        HOME="$scratch/home" TMUX_TMPDIR="$scratch/home/tmux" TETMUX_MEASURE_LAUNCH=1 \
+            "$target" >"$scratch/run-$run.log" 2>&1 &
+        launched=$!
+        # Long enough for the window to be on screen and the probe to have drawn; the app is killed
+        # rather than quit, because `applicationShouldTerminate` waits on a round trip per host and
+        # that is not part of what is being measured.
+        sleep 5
+        kill "$launched" 2>/dev/null || true
+        wait "$launched" 2>/dev/null || true
+        if ! grep -qE '^LAUNCH ' "$scratch/run-$run.log"; then
+            echo "FAILED: run $run reported no first frame" >&2
+            sed -n '1,20p' "$scratch/run-$run.log" >&2
+            exit 1
+        fi
+        awk '/^LAUNCH /{ printf "run '"$run"': %7.1f ms to first frame\nTOTAL %s\n", $2, $2 }' \
+            "$scratch/run-$run.log"
+    done | tee "$scratch/report.txt"
+else
 
 for ((run = 1; run <= RUNS; run++)); do
     if [[ $PURGE -eq 1 ]]; then
@@ -179,6 +227,7 @@ for period, start, duration in phases:
 print(f"TOTAL {total:.1f}")
 PY
 done | tee "$scratch/report.txt"
+fi
 
 echo
 echo "== P6.7 (launch)"

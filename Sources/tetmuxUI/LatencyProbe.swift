@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import QuartzCore
 import os
 
 /// P6.1 — keypress → glyph, instrumented where the two ends actually are.
@@ -28,6 +29,28 @@ import os
 ///     lands — AppKit draws a view's own content before its subviews, so the overlay's `draw` runs
 ///     in the same cycle, after the terminal has painted. Closing it from `viewWillDraw` on the pane
 ///     itself was the alternative and would understate every sample by one full-screen draw.
+///
+/// Alongside the three points, every sample carries **the frame interval the compositor was on when
+/// the glyph was drawn**. P6.1's amended bound is 12 ms at p95 on a 100 Hz-or-faster display and one
+/// refresh interval + 2 ms below that, so the panel's rate is what decides pass or fail and it has to
+/// be in the record beside the number. A `CADisplayLink` is how it is asked for: each callback
+/// carries `targetTimestamp - timestamp`, which is the compositor's own answer for how long the frame
+/// it is about to present will last — the rate **at the moment of the draw**, which is the one that
+/// matters and the one a static query cannot give on a panel that varies.
+///
+/// **The premise this was built on was wrong, and the record says so.** It was justified by
+/// `CGDisplayCopyDisplayMode`'s refresh rate reading 0 on the built-in display. It does not: on this
+/// machine it reports 60.0, and `NSScreen.maximumFramesPerSecond` agrees — one line would have
+/// answered the question that four runs had left open. The panel was also not ProMotion (a MacBook
+/// Air has none), so it was never idling its rate down either. What the link is still good for is
+/// that it measures rather than asks, and it has now been checked against two known answers: 10.00 ms
+/// over 4500 callbacks on a monitor fixed at 100 Hz, and 16.67 ms over 2610 on the 60 Hz panel.
+///
+/// One caveat survives the correction, for a display that genuinely is adaptive: a display link is
+/// content that is not static, so a rate measured with one running is an *upper bound* on the rate an
+/// unwatched panel would drift to. A higher rate is a shorter interval is a stricter bound, so a run
+/// that passes with the link running would also pass without it; a run that fails would not be
+/// conclusive.
 ///
 /// Matching is by *byte*: the character the user typed is looked for in the chunks that follow.
 /// A shell or `cat` echoes it, so on a quiet pane the first occurrence is the echo of that
@@ -103,6 +126,19 @@ final class LatencyProbe {
     private var pending: Pending?
     private let clock = ContinuousClock()
 
+    /// The compositor's frame interval, in milliseconds, as of the last display-link callback.
+    /// Zero until the first one lands, which is what a sample taken before the link started reports —
+    /// distinguishable from a real reading, since no display has a zero-length frame.
+    private var frameMilliseconds: Double = 0
+    private var displayLink: CADisplayLink?
+    /// Accumulated between the once-a-second summary lines. The link fires 60–120 times a second and
+    /// a line per callback would be more output than the run has samples, so what goes to the script
+    /// is the count and the two averages over each second — enough to see the rate change mid-run,
+    /// which is the thing an adaptive panel does.
+    private var frameWindowStart: CFTimeInterval = 0
+    private var frameTicks = 0
+    private var frameNominalTotal: Double = 0
+
     /// Samples that were abandoned because the next keystroke arrived first. Reported with the rest:
     /// a run where half the keystrokes overlapped is a run whose p95 means something else.
     private(set) var abandoned = 0
@@ -133,10 +169,46 @@ final class LatencyProbe {
     /// pane at all — and so the overlay lands on the pane actually being typed into rather than on
     /// whichever was created last.
     private func overlay(on pane: NSView) -> DrawProbeView {
+        startDisplayLink(on: pane)
         if let existing = pane.subviews.compactMap({ $0 as? DrawProbeView }).first { return existing }
         let probe = DrawProbeView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
         pane.addSubview(probe)
         return probe
+    }
+
+    /// Starts sampling the compositor's frame interval, from the pane being typed into.
+    ///
+    /// `NSView.displayLink(target:selector:)` rather than a `CVDisplayLink` or a display id, because
+    /// it follows the view: a window dragged to another screen keeps reporting the rate of the panel
+    /// it is actually on, which is the same reason `@Environment(\.displayScale)` is what the cell
+    /// size snaps to. It is started at the first keystroke, alongside the overlay and for the same
+    /// reason — a build nobody is measuring runs no timer at all.
+    private func startDisplayLink(on pane: NSView) {
+        guard displayLink == nil else { return }
+        let link = pane.displayLink(target: self, selector: #selector(frameTick(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    @objc private func frameTick(_ link: CADisplayLink) {
+        // The compositor's own answer, not a wall-clock interval between callbacks: a dropped
+        // callback would make the second read as half the rate, and the panel's rate is precisely
+        // what must not be inferred here. The measured interval goes in the summary beside it, so a
+        // run where they disagree says so instead of quietly reporting one as the other.
+        frameMilliseconds = (link.targetTimestamp - link.timestamp) * 1000
+        guard printsSamples else { return }
+        guard frameWindowStart != 0 else { frameWindowStart = link.timestamp; return }
+        frameTicks += 1
+        frameNominalTotal += frameMilliseconds
+        let elapsed = link.timestamp - frameWindowStart
+        guard elapsed >= 1 else { return }
+        FileHandle.standardError.write(Data(String(
+            format: "FRAME %d %.3f %.3f\n",
+            frameTicks, frameNominalTotal / Double(frameTicks), elapsed * 1000 / Double(frameTicks)
+        ).utf8))
+        frameWindowStart = link.timestamp
+        frameTicks = 0
+        frameNominalTotal = 0
     }
 
     /// A chunk of `%output` for a pane, before it is fed to the emulator.
@@ -167,7 +239,8 @@ final class LatencyProbe {
         // computed in here — puts the part that can be quietly wrong inside the thing being
         // measured, where nobody can check it against the raw samples.
         FileHandle.standardError.write(Data(
-            String(format: "LATENCY %.3f %.3f\n", total.milliseconds, echoed.milliseconds).utf8
+            String(format: "LATENCY %.3f %.3f %.3f\n",
+                   total.milliseconds, echoed.milliseconds, frameMilliseconds).utf8
         ))
     }
 }

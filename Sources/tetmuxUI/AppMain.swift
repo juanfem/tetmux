@@ -231,6 +231,10 @@ public final class TetmuxAppDelegate: NSObject, NSApplicationDelegate {
            let icon = NSImage(contentsOf: url) {
             NSApp.applicationIconImage = icon
         }
+
+        // P6.7, and only when a measurement asked: the window exists by now and has not drawn, which
+        // is the one moment a probe can close the interval on the frame that puts it on screen.
+        LaunchProbe.installIfRequested()
     }
 
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
