@@ -301,40 +301,121 @@ struct TerminalPaneView: NSViewRepresentable {
         /// anything.
         private let acknowledgeAfterBytes = 16 * 1024
 
+        /// P6.4's batching: bytes that have arrived within the current display frame and have not
+        /// been handed to the emulator yet. Never a hole in the stream — everything here is fed, in
+        /// order, on the next frame.
+        private var pendingOutput: [UInt8] = []
+        private var frameLink: CADisplayLink?
+        private var lastHandoff: CFTimeInterval = 0
+        /// The compositor's answer, once the link is running; 1/60 until then, which is the
+        /// conservative guess — a longer assumed frame means *more* immediate handoffs, never a
+        /// keystroke held back.
+        private var frameInterval: CFTimeInterval = 1.0 / 60
+        /// Consecutive frames with nothing to flush. The link is stopped after a few, because a pane
+        /// is usually idle and twenty panes each holding a permanent per-frame callback is the shape
+        /// of problem P6.6 exists to prevent.
+        private var idleFrames = 0
+        private var unacknowledged = 0
+        private var flowControl: (hostId: String, paneId: String, subscriber: UUID, service: SessionService)?
+
         func attach(view: TerminalView, hostId: String, paneId: String, service: SessionService) {
             self.view = view
             subscription?.cancel()
-            subscription = Task { [weak view, acknowledgeAfterBytes] in
+            subscription = Task { [weak self] in
                 let subscription = await service.subscribeToPane(hostId: hostId, paneId: paneId)
-                // Feeding happens here, on the main actor, so this loop *is* the paint rate. Reporting
-                // what it has consumed is what lets the service see a viewer falling behind and pause
-                // the pane (P6.5) — the producer side of an `AsyncStream` cannot observe that itself.
-                var unacknowledged = 0
+                self?.flowControl = (hostId, paneId, subscription.id, service)
+                // Feeding happens here, on the main actor, so this loop *is* the paint rate.
                 for await data in subscription.stream {
                     if Task.isCancelled { break }
-                    guard let view else { break }
+                    guard let self, let view = self.view else { break }
                     let bytes = [UInt8](data)
                     // P6.1's middle point, before the emulator sees the bytes: this is the round
                     // trip landing. Guarded inside the probe, which is off unless a measurement
                     // asked for it — the scan would otherwise be on the path P6.3 measures.
                     LatencyProbe.shared.observeOutput(bytes)
-                    view.feed(byteArray: bytes[...])
-
-                    unacknowledged += data.count
-                    if unacknowledged >= acknowledgeAfterBytes {
-                        await service.acknowledge(
-                            hostId: hostId, paneId: paneId,
-                            subscriber: subscription.id, bytes: unacknowledged
-                        )
-                        unacknowledged = 0
-                    }
+                    self.hand(bytes, to: view)
                 }
             }
+        }
+
+        /// P6.4 — one handoff per display frame, and the first one after a quiet moment immediately.
+        ///
+        /// The edge is the whole design, and it is the lesson the keystroke coalescer already paid
+        /// for: batching on the *trailing* edge makes every event with nothing to share wait out a
+        /// window, which at typing speed is every event. So a chunk arriving into an empty buffer
+        /// more than a frame after the last handoff is fed at once — an echoed keystroke never waits
+        /// — and everything that arrives during the frame that follows is coalesced into one feed on
+        /// the next one. Under continuous output that is one handoff per frame, which is what the
+        /// requirement asks for; at a prompt it is one per keystroke, which is what P6.1 needs.
+        ///
+        /// Order is preserved by the `isEmpty` half of the condition: once anything is buffered,
+        /// everything after it buffers too, so nothing overtakes what is waiting.
+        private func hand(_ bytes: [UInt8], to view: TerminalView) {
+            let now = CACurrentMediaTime()
+            if pendingOutput.isEmpty, now - lastHandoff >= frameInterval {
+                lastHandoff = now
+                feed(bytes, to: view)
+                return
+            }
+            pendingOutput.append(contentsOf: bytes)
+            startFrameLink(on: view)
+        }
+
+        private func feed(_ bytes: [UInt8], to view: TerminalView) {
+            view.feed(byteArray: bytes[...])
+            // Acknowledged where it is *fed* rather than where it arrives, which is what P6.5's
+            // accounting means by it: the service is asking whether this viewer is keeping up, and
+            // bytes sitting in `pendingOutput` have not been drawn by anybody.
+            unacknowledged += bytes.count
+            guard unacknowledged >= acknowledgeAfterBytes, let flow = flowControl else { return }
+            let bytesToReport = unacknowledged
+            unacknowledged = 0
+            Task { await flow.service.acknowledge(
+                hostId: flow.hostId, paneId: flow.paneId,
+                subscriber: flow.subscriber, bytes: bytesToReport
+            ) }
+        }
+
+        /// A scheduled `CADisplayLink` **retains its target**, so while this is running the run loop
+        /// is holding the coordinator alive. `detach` is what normally ends it — `dismantleNSView`
+        /// calls it — and the idle stop is the backstop: a pane that goes quiet drops the link, and
+        /// with it the retain, within a couple of hundred milliseconds. It cannot be undone from
+        /// `deinit`, which is nonisolated and cannot reach any of this.
+        private func startFrameLink(on view: TerminalView) {
+            idleFrames = 0
+            guard frameLink == nil else { return }
+            let link = view.displayLink(target: self, selector: #selector(flushFrame(_:)))
+            link.add(to: .main, forMode: .common)
+            frameLink = link
+        }
+
+        @objc private func flushFrame(_ link: CADisplayLink) {
+            frameInterval = link.targetTimestamp - link.timestamp
+            guard let view, !pendingOutput.isEmpty else {
+                idleFrames += 1
+                if idleFrames > 12 { stopFrameLink() }
+                return
+            }
+            idleFrames = 0
+            let batch = pendingOutput
+            pendingOutput.removeAll(keepingCapacity: true)
+            lastHandoff = CACurrentMediaTime()
+            feed(batch, to: view)
+        }
+
+        private func stopFrameLink() {
+            frameLink?.invalidate()
+            frameLink = nil
         }
 
         func detach() {
             subscription?.cancel()
             subscription = nil
+            stopFrameLink()
+            // Anything still buffered is dropped, and that is safe for the one reason it is ever
+            // safe here: the view is going away, and whatever replaces it repaints from
+            // `capture-pane`. A pane that stays on screen never reaches this.
+            pendingOutput.removeAll()
             view = nil
         }
 
