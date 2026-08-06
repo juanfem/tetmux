@@ -1091,6 +1091,35 @@ for is that the chord still *matches*, so that has its own test: `charactersIgno
   the offered fallback — the clicked window for a sidebar double-click, the last-used one for the menu
   bar extra — then a new window because nothing was open. Retargeting some other window to a session
   that is already on screen both surprises the user and discards what that window was showing.
+- **The launcher's list is ranked by use, and the key is what makes that safe.** F4.25's recency is
+  an *order* in `workspace.json` — most recent first, capped at 50 — rather than timestamps, because
+  ranking needs to know which came first and nothing else, and a wall clock in a file that outlives
+  sleep and a timezone change buys nothing. A `RecentTarget` is host-qualified for the usual reason
+  (tmux numbers per server, so `@1` is on every host at once), and it keys a **session by name and a
+  window by id**, which is not an inconsistency: a session found by discovery has no id at all — the
+  probe answers names — while a window's *name* is whatever is running in it whenever
+  `automatic-rename` is on. Both go stale on a server restart, and that is accepted here where it
+  would not be in `WorkspaceWindow`: a stale entry costs one row its place in a list, not a window
+  its session. Uses are recorded in `select` — every deliberate navigation, not only the launcher's
+  own rows, or the thing you left thirty seconds ago by any other route sits at the bottom — and
+  deliberately **not** in `connect`, which the local host calls on itself at launch. Once a query is
+  typed the fuzzy score decides and recency is only the tie-break, which has to be written out:
+  `sorted(by:)` is not stable, so equal scores are otherwise not merely unranked but unrepeatable.
+- **…and its window row on an unreachable host connects first, through `pendingRestore`.** That row
+  has always been subtitled "(will connect)" and always called a plain `select`, which connects
+  nothing — the one row whose words and click disagreed. The selection cannot be made at the click:
+  the window is a fact from the last time that host answered and there is no channel to select it
+  on. So `showWhenAvailable` parks the target and `connect` runs, and the ordinary restore path
+  lands it. Two things there are load-bearing. It is **not** a `RevealRequest`, which expires after
+  15 s — the handshake watchdog allows 45 — so a slow ssh would drop the pick silently; `pendingRestore`
+  has no expiry for exactly this reason, and resolves by id and then by name, which is the right rule
+  for a topology as old as the disconnection. And it connects **targetlessly** rather than attaching
+  by the remembered session name the way `attachDiscoveredSession` does: that name may be gone, and
+  `attach-session -t <gone>` is `%error`, `%exit`, which the exit handler reads as "this server has
+  nothing left" and leaves the host disconnected saying nothing. The row's mark is
+  `LauncherItem.connectsFirst`, which used to be `isAvailable` and did not mean this — it was set on
+  window rows alone, so the recession excused a row that did not work rather than stating a fact
+  about the host, while a session row on the same host was drawn at full strength and did connect.
 - **A window's label is its name only when the user chose it.** `#{automatic-rename}` is how tmux says
   which: `1` while it is naming the window after the running command, `0` once someone has renamed it.
   There is no `#{window_...}` variable for this — the option name itself is the format. Otherwise the
@@ -1324,7 +1353,8 @@ rather than fixed.
   vanished on relaunch, while the Keychain flag it wrote survived and the two then disagreed.
 - `~/Library/Application Support/tetmux/workspace.json` — `windows`, one entry per macOS window: host,
   session (id *and* name), tmux window, whether the tree was showing, and the frame; plus
-  `watchedWindows`, F4.31's watches, which belong to no window and so had nowhere else to go. §4.3's
+  `watchedWindows`, F4.31's watches, and `recents`, F4.25's ranking — both of which belong to no
+  window and so had nowhere else to go. §4.3's
   view state and nothing else — tmux is the persistence layer for everything in a pane. Written
   debounced, on window close, and synchronously from `applicationShouldTerminate`, which is the usual
   way this app is closed. An empty window list is never written: the app outlives its last window, so

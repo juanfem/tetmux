@@ -1,25 +1,34 @@
 import SwiftUI
 
+/// F4.26 — every row acts, and the ones that cannot act *yet* say so twice: recessed, and "(will
+/// connect)" in the subtitle.
+///
+/// The flag used to be `isAvailable`, and it did not mean this. It was set on window rows alone —
+/// the one kind whose action was a plain `select`, which connects nothing — so the recession was an
+/// excuse for a row that did not work rather than a fact about the host. A session row on the same
+/// unreachable host was drawn at full strength and *did* connect. Now that every row connects, the
+/// mark can carry F4.26's actual sentence: picking this costs a connection first. A host row never
+/// takes it, because connecting is the whole of what a host row is for.
 public struct LauncherItem: Identifiable {
     public let id = UUID()
     public let title: String
     public let subtitle: String
     public let iconName: String
-    /// F4.26 — items for unreachable hosts stay listed, greyed, and connect on selection.
-    public let isAvailable: Bool
+    /// Whether picking this row has to connect its host before it can show anything.
+    public let connectsFirst: Bool
     public let action: () -> Void
 
     public init(
         title: String,
         subtitle: String,
         iconName: String,
-        isAvailable: Bool = true,
+        connectsFirst: Bool = false,
         action: @escaping () -> Void
     ) {
         self.title = title
         self.subtitle = subtitle
         self.iconName = iconName
-        self.isAvailable = isAvailable
+        self.connectsFirst = connectsFirst
         self.action = action
     }
 }
@@ -36,15 +45,25 @@ struct LauncherOverlay: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
 
-    private var matches: [LauncherItem] {
+    private var matches: [LauncherItem] { Self.matches(query, in: items) }
+
+    /// What the list shows for a query, given items already ranked by recency (F4.25).
+    ///
+    /// An empty query is the ranking as handed over. A typed one is scored, and the score decides
+    /// first — but the tie-break is the incoming order, so two rows that score the same come back
+    /// most-recent-first. Without it they come back in whatever order the sort left them: Swift's
+    /// `sorted(by:)` is not stable, so ties are not merely unranked, they are unrepeatable.
+    ///
+    /// Static so the rule can be asserted without a view.
+    static func matches(_ query: String, in items: [LauncherItem]) -> [LauncherItem] {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return items }
-        return items
-            .compactMap { item -> (LauncherItem, Int)? in
+        return items.enumerated()
+            .compactMap { rank, item -> (LauncherItem, Int, Int)? in
                 guard let score = Self.score(trimmed, in: "\(item.title) \(item.subtitle)") else { return nil }
-                return (item, score)
+                return (item, score, rank)
             }
-            .sorted { $0.1 > $1.1 }
+            .sorted { $0.1 == $1.1 ? $0.2 < $1.2 : $0.1 > $1.1 }
             .map(\.0)
     }
 
@@ -119,14 +138,14 @@ struct LauncherOverlay: View {
         HStack(spacing: 10) {
             Image(systemName: item.iconName)
                 .frame(width: 20)
-                .foregroundStyle(item.isAvailable ? Color.accentColor : Color.secondary)
+                .foregroundStyle(item.connectsFirst ? Color.secondary : Color.accentColor)
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.title).fontWeight(.medium)
                 Text(item.subtitle).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
         }
-        .opacity(item.isAvailable ? 1 : ContrastPolicy.recessedOpacity(contrast, standard: 0.55))
+        .opacity(item.connectsFirst ? ContrastPolicy.recessedOpacity(contrast, standard: 0.55) : 1)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? ContrastPolicy.selectionFill(contrast) : .clear))

@@ -131,14 +131,19 @@ public final class WindowState: Identifiable {
     /// window, because another window's panes are not the ones moving.
     @ObservationIgnored public let liveResize = LiveResizeGate()
 
-    /// What this window was showing when the app last quit, until the topology can satisfy it.
+    /// Where this window belongs, as soon as tmux can say where that is.
     ///
-    /// Held rather than applied, because at the moment a window appears its host is not connected —
-    /// the local one is still handshaking and a remote one is waiting to be asked — so there is no
-    /// session to select yet. `reconcile` retries it on every snapshot and clears it once it lands.
-    /// There is deliberately **no expiry**: a remote host is restored the moment the user connects
-    /// it, which may be minutes later, and a timeout would silently turn that into "the window came
-    /// back on the wrong session" with nothing to explain why.
+    /// Held rather than applied, because at the moment it is set the host is not connected — at
+    /// launch the local one is still handshaking and a remote one is waiting to be asked — so there
+    /// is no session to select yet. `reconcile` retries it on every snapshot and clears it once it
+    /// lands. There is deliberately **no expiry**: a remote host resolves the moment the user
+    /// connects it, which may be minutes later, and a timeout would silently turn that into "the
+    /// window came back on the wrong session" with nothing to explain why.
+    ///
+    /// Named for the workspace restore it was written for, which is still the common case, but the
+    /// launcher sets it too (`showWhenAvailable`): picking a window on a host nobody is attached to
+    /// is the same problem — a selection that cannot be made until a channel exists — and the
+    /// no-expiry rule above is what makes an ssh round trip behind it safe.
     @ObservationIgnored public var pendingRestore: WorkspaceWindow?
 
     /// The saved frame, applied once the `NSWindow` exists. Cleared when it does, so a window later
@@ -168,6 +173,50 @@ public final class WindowState: Identifiable {
         nsWindow.setFrame(restoredFrame, display: false)
     }
 
+    /// Points this window at something no channel can select yet (F4.26).
+    ///
+    /// The launcher's window row on an unreachable host: the window is a fact from the last time
+    /// that host answered, so there is nothing to select until it answers again. The target waits
+    /// in `pendingRestore` and lands by the ordinary restore path, which resolves by id and then by
+    /// name — the right rule here too, since a server restarted since that topology was read has
+    /// reissued every id.
+    ///
+    /// It builds the entry from this window's own frame and tree rather than taking one, because an
+    /// unresolved entry is what `workspaceEntry` writes to the file: assembled anywhere else, a
+    /// quit between the click and the connection would save the window with no frame and put it
+    /// somewhere else on the next launch.
+    public func showWhenAvailable(
+        hostId: String,
+        sessionId: String?,
+        sessionName: String?,
+        windowId: String?,
+        windowName: String?
+    ) {
+        selectedHostId = hostId
+        // The ids this window was showing belong to the host it is leaving, and tmux numbers per
+        // server — left in place they are a *different* session on the new host as far as
+        // `displayedSessions` is concerned, which would ask the service for a client on a session
+        // that does not exist. Nothing is lost on screen: the detail column resolves against the new
+        // host, finds nothing, and shows its connect placeholder either way.
+        selectedSessionId = nil
+        selectedWindowId = nil
+        focusedPaneId = nil
+        pendingRestore = WorkspaceWindow(
+            hostId: hostId,
+            sessionId: sessionId,
+            sessionName: sessionName,
+            windowId: windowId,
+            windowName: windowName,
+            sidebarShown: sidebarVisibility != .detailOnly,
+            frame: currentFrame
+        )
+    }
+
+    /// This window's frame in the flat form the file keeps, or `nil` if it has no `NSWindow` yet.
+    private var currentFrame: [Double]? {
+        nsWindow.map { [$0.frame.minX, $0.frame.minY, $0.frame.width, $0.frame.height] }
+    }
+
     /// This window, in the form the workspace file keeps.
     public func workspaceEntry(in hosts: [HostState]) -> WorkspaceWindow {
         // An unresolved restore is written back unchanged rather than overwritten with where the
@@ -183,7 +232,7 @@ public final class WindowState: Identifiable {
             windowId: window?.id,
             windowName: window?.name,
             sidebarShown: sidebarVisibility != .detailOnly,
-            frame: nsWindow.map { [$0.frame.minX, $0.frame.minY, $0.frame.width, $0.frame.height] }
+            frame: currentFrame
         )
     }
 

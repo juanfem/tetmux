@@ -45,6 +45,14 @@ public final class AppModel {
     /// Written through `toggleWatch`, which persists.
     public private(set) var watchedWindows: Set<WatchedWindow> = []
 
+    /// F4.25 — what the launcher's list is ranked by, most recently used first.
+    ///
+    /// Written through `noteUsed`, which persists. Recorded wherever the *user* picked a target and
+    /// nowhere else: `connect` is left alone deliberately, because the local host connects itself at
+    /// launch and stamping that would put it at the top of everyone's list before they had touched
+    /// anything.
+    public private(set) var recents: [RecentTarget] = []
+
     /// F4.19/F4.22 — the one policy every surface consults, now loaded from `settings.json` rather
     /// than fixed at compile time.
     ///
@@ -348,7 +356,8 @@ public final class AppModel {
         // hear about it; the guard in `workspaceEntries` covers the case where it was the last one.
         let remaining = Workspace(
             windows: openWindows.filter { $0.id != id }.map { $0.workspaceEntry(in: hosts) },
-            watchedWindows: watchedWindows.sorted { ($0.hostId, $0.windowId) < ($1.hostId, $1.windowId) }
+            watchedWindows: watchedWindows.sorted { ($0.hostId, $0.windowId) < ($1.hostId, $1.windowId) },
+            recents: recents
         )
         windowOrder.removeAll { $0 == id }
         focusOrder.removeAll { $0 == id }
@@ -433,6 +442,7 @@ public final class AppModel {
         let saved = await workspace.load()
         restoreQueue = saved.windows
         watchedWindows = Set(saved.watchedWindows)
+        recents = saved.recents
         // The window that ran `bootstrap` appeared before the file had been read, so its `onAppear`
         // found an empty queue and claimed nothing. Give it the first entry here and start the chain
         // that opens the rest. If it somehow has not registered yet, this does nothing and its own
@@ -627,7 +637,9 @@ public final class AppModel {
             windows: workspaceEntries(),
             watchedWindows: watchedWindows.sorted {
                 ($0.hostId, $0.windowId) < ($1.hostId, $1.windowId)
-            }
+            },
+            // Not sorted: this one's order *is* its content.
+            recents: recents
         )
     }
 
@@ -769,6 +781,7 @@ public final class AppModel {
     ) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
+        noteUsed(hostId: hostId, sessionName: trimmed, windowId: nil)
         if let state, !preferNewWindow { state.selectedHostId = hostId }
         // Same rule as New Session: ⌥ means somewhere else, and nothing open at all means the reveal
         // has to bring its own window or the session is attached and never shown.
@@ -834,6 +847,10 @@ public final class AppModel {
         session sessionId: String?,
         window windowId: String?
     ) {
+        // F4.25 — every deliberate navigation is a use, however the user got here. Ranking only what
+        // the launcher itself opened would leave the thing they were in five minutes ago, by any
+        // other route, sitting at the bottom of the list.
+        noteUsed(hostId: hostId, sessionId: sessionId, windowId: windowId)
         state.selectedHostId = hostId
         state.selectedSessionId = sessionId
         state.selectedWindowId = windowId
@@ -1782,24 +1799,100 @@ public final class AppModel {
     }
 
 
+    // MARK: - Recency (F4.25)
+
+    /// Records what the user just picked, by id, resolving the session's name from the topology.
+    ///
+    /// The name is what is stored — see `RecentTarget` for why — and a session that has no name yet
+    /// simply does not rank, which is right: it was created a moment ago and tmux has not answered.
+    func noteUsed(hostId: String, sessionId: String?, windowId: String?) {
+        let name = sessionId.flatMap { id in
+            hosts.first { $0.id == hostId }?.sessions.first { $0.id == id }?.name
+        }
+        noteUsed(hostId: hostId, sessionName: name, windowId: windowId)
+    }
+
+    /// The same, for the rows that know a session by name and never had an id — F4.4's discoveries.
+    func noteUsed(hostId: String, sessionName: String?, windowId: String?) {
+        // The tab strip selects with `selectedHostId ?? ""`, so an unhosted click is reachable. It
+        // can only ever rank nothing, and this file is meant to be readable by a person.
+        guard !hostId.isEmpty else { return }
+        let target = RecentTarget(
+            hostId: hostId,
+            sessionName: sessionName,
+            // A window with no session under it is a shape no row has, so it could only ever rank
+            // nothing. Dropping it keeps the file to the three keys the list is actually built from.
+            windowId: sessionName == nil ? nil : windowId
+        )
+        // ⌥⌘] cycles windows through `select`, and a topology snapshot can re-select what is already
+        // selected. Neither is a new use, and each would otherwise be a file write.
+        guard recents.first != target else { return }
+        recents = Workspace.promoting(target, in: recents)
+        scheduleWorkspaceSave()
+    }
+
+    /// The recents as the file handed them over, which is the only way an ill-formed one gets in.
+    func applyRecentsForTesting(_ targets: [RecentTarget]) { recents = targets }
+
+    /// The launcher's window row, which has to mean something on a host nobody is attached to
+    /// (F4.26).
+    ///
+    /// A reachable host is an ordinary `select`. An unreachable one cannot be: the window is a fact
+    /// from the last time that host answered, and there is no channel on which to select it. So the
+    /// window is pointed at the target and the host is connected, and the selection lands by the
+    /// ordinary restore path once the topology arrives — the same mechanism, and the same absence of
+    /// an expiry, that a window restored onto a remote host at launch waits on. This is what the row
+    /// promised in words and did not do: its subtitle has always said "(will connect)" while its
+    /// action was a plain `select`, which connects nothing.
+    ///
+    /// `connect` rather than an attach by the remembered session name, which is the shape
+    /// `attachDiscoveredSession` uses and the wrong one here. That topology is as old as the
+    /// disconnection, so the named session may be gone — and attaching to a session that has ended
+    /// is `can't find session`, `%error`, `%exit`, which the exit handler reads as "this server has
+    /// nothing left" and leaves the host disconnected with nothing said. A targetless attach lands
+    /// on whatever is really there, and the restore resolves the window against that.
+    public func showWindowFromLauncher(
+        in state: WindowState,
+        host: HostState,
+        session: TmuxSession,
+        window: TmuxWindow
+    ) {
+        guard !host.connectionState.isActive else {
+            select(in: state, host: host.id, session: session.id, window: window.id)
+            return
+        }
+        noteUsed(hostId: host.id, sessionName: session.name, windowId: window.id)
+        state.showWhenAvailable(
+            hostId: host.id,
+            sessionId: session.id, sessionName: session.name,
+            windowId: window.id, windowName: window.name
+        )
+        connect(host.id)
+    }
+
     /// F4.25 — one ranked list over hosts, sessions, and windows.
     ///
     /// Takes the window that opened the launcher, so picking a result navigates *that* window rather
     /// than every open one.
+    ///
+    /// Ranked by recency, with the tree's own order behind it for everything never used. That order
+    /// survives a typed query as the tie-break rather than being replaced by it: the fuzzy score
+    /// decides first, and two rows that score the same come back most-recent-first instead of in
+    /// whatever order the sort happened to leave them.
     public func launcherItems(for state: WindowState) -> [LauncherItem] {
-        var items: [LauncherItem] = []
+        var items: [(target: RecentTarget, item: LauncherItem)] = []
         for host in hosts {
             let reachable = host.connectionState.isActive
-            items.append(LauncherItem(
+            items.append((RecentTarget(hostId: host.id), LauncherItem(
                 title: host.config.name,
                 subtitle: host.config.isLocal ? "Local tmux" : "SSH host",
-                iconName: host.config.isLocal ? "laptopcomputer" : "server.rack",
-                isAvailable: true
+                iconName: host.config.isLocal ? "laptopcomputer" : "server.rack"
             ) { [weak self, weak state] in
                 guard let self, let state else { return }
+                self.noteUsed(hostId: host.id, sessionName: nil, windowId: nil)
                 state.selectedHostId = host.id
                 self.connect(host.id)
-            })
+            }))
 
             for session in host.browsableSessions {
                 // F4.26 — a session found by discovery (F4.4) has no windows to list, because a probe
@@ -1807,30 +1900,53 @@ public final class AppModel {
                 // host nobody is attached to: picking it attaches to *that* session, which is the
                 // choice the user otherwise never gets before `new-session -A` makes one for them.
                 if session.windows.isEmpty {
-                    items.append(LauncherItem(
-                        title: session.name,
-                        subtitle: "\(host.config.name)\(reachable ? "" : " (will connect)")",
-                        iconName: "rectangle.stack",
-                        isAvailable: true
-                    ) { [weak self, weak state] in
-                        guard let self else { return }
-                        self.attachDiscoveredSession(hostId: host.id, named: session.name, in: state)
-                    })
+                    items.append((
+                        RecentTarget(hostId: host.id, sessionName: session.name),
+                        LauncherItem(
+                            title: session.name,
+                            subtitle: "\(host.config.name)\(reachable ? "" : " (will connect)")",
+                            iconName: "rectangle.stack",
+                            connectsFirst: !reachable
+                        ) { [weak self, weak state] in
+                            guard let self else { return }
+                            self.attachDiscoveredSession(hostId: host.id, named: session.name, in: state)
+                        }
+                    ))
                     continue
                 }
                 for window in session.windows {
-                    items.append(LauncherItem(
-                        title: "\(window.name)",
-                        subtitle: "\(host.config.name) › \(session.name)\(reachable ? "" : " (will connect)")",
-                        iconName: "square.split.2x1",
-                        isAvailable: reachable
-                    ) { [weak self, weak state] in
-                        guard let self, let state else { return }
-                        self.select(in: state, host: host.id, session: session.id, window: window.id)
-                    })
+                    items.append((
+                        RecentTarget(hostId: host.id, sessionName: session.name, windowId: window.id),
+                        LauncherItem(
+                            title: "\(window.name)",
+                            subtitle: "\(host.config.name) › \(session.name)\(reachable ? "" : " (will connect)")",
+                            iconName: "square.split.2x1",
+                            connectsFirst: !reachable
+                        ) { [weak self, weak state] in
+                            guard let self, let state else { return }
+                            self.showWindowFromLauncher(
+                                in: state, host: host, session: session, window: window
+                            )
+                        }
+                    ))
                 }
             }
         }
-        return items
+
+        // `uniquingKeysWith` rather than `uniqueKeysWithValues`, which traps on a repeated key.
+        // `promoting` cannot produce one, but `workspace.json` is documented as a file a person may
+        // edit, and a hand-written duplicate must not take the application down.
+        let rank = Dictionary(
+            recents.enumerated().map { ($0.element, $0.offset) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return items.enumerated()
+            .sorted { left, right in
+                let leftRank = rank[left.element.target] ?? Int.max
+                let rightRank = rank[right.element.target] ?? Int.max
+                if leftRank != rightRank { return leftRank < rightRank }
+                return left.offset < right.offset
+            }
+            .map(\.element.item)
     }
 }

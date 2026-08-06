@@ -8,11 +8,12 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**3 features, 3 tests owed, 1 blocked, 2 parked.** The six small items this file opened with, copy
+**2 features, 3 tests owed, 1 blocked, 2 parked.** The six small items this file opened with, copy
 mode, and the integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on
 2026-08-06; what they turned into is recorded in `CLAUDE.md`, not here. The five entries added on
 2026-08-06 came out of an adherence review of the tree against SRD v2.1 — a review that mostly
 found the *documents* behind the code, and amended the SRD's stale status notes in the same pass.
+The launcher's half of that batch (F4.25/F4.26) closed the same day.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
@@ -31,24 +32,6 @@ References point into current `main`. Line numbers drift; the symbol names besid
   (3) P6.6/P6.7: a documented `Scripts/measure-idle.md` procedure (Instruments template, what to
   open, what number to record). Record results in the repo the way fixture provenance is
   recorded.
-
-- [ ] **The launcher neither ranks by recency nor connects from a window row (F4.25/F4.26).**
-  F4.25 says "ranked by recency"; `AppModel.launcherItems` emits hosts in config order and
-  `LauncherOverlay` sorts matches by fuzzy score alone — nothing anywhere records when an item
-  was last used. And a window row on an unreachable host is subtitled "(will connect)" while its
-  action is `select`, which never connects a host: host rows call `connect` and discovered-session
-  rows go through `attachDiscoveredSession`, so window rows are the one kind whose words and click
-  disagree — today they are also not `isAvailable`, so the promise is merely never kept rather
-  than broken.
-  *Do:* (1) stamp last-used per host/session/window at `select`/`connect` time — `workspace.json`
-  is the natural home, since recency of use is §4.3 view state — and order the empty-query list
-  by it, fuzzy score still winning once a query is typed. (2) Make the window row connect first
-  when its host is inactive: `attachDiscoveredSession` already shows the shape (connect, then
-  resolve when the topology arrives), and a reveal request is the existing mechanism for "show it
-  when it exists". Or decide the row stays inert and drop the subtitle — either way the words and
-  the click must agree.
-  `Sources/tetmuxUI/AppModel.swift` (`launcherItems`, `select`),
-  `Sources/tetmuxUI/LauncherOverlay.swift`
 
 - [ ] **P6.4's output half: the byte handoff is per-chunk, not per display frame.** The input
   direction complies — keystrokes coalesce into one `send-keys -H` per 8 ms flush, and

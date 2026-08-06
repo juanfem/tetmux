@@ -1344,7 +1344,11 @@ final class AppModelTests: XCTestCase {
         ]
         let saved = Workspace(
             windows: entries,
-            watchedWindows: [WatchedWindow(hostId: "remote", windowId: "@9")]
+            watchedWindows: [WatchedWindow(hostId: "remote", windowId: "@9")],
+            recents: [
+                RecentTarget(hostId: "remote", sessionName: "build", windowId: "@9"),
+                RecentTarget(hostId: "local"),
+            ]
         )
         await WorkspaceStore(directory: directory).save(saved)
         let reloaded = await WorkspaceStore(directory: directory).load()
@@ -1368,6 +1372,7 @@ final class AppModelTests: XCTestCase {
         let workspace = WorkspaceStore.decode(Data(#"{"windows": []}"#.utf8))
         XCTAssertTrue(workspace.windows.isEmpty)
         XCTAssertTrue(workspace.watchedWindows.isEmpty)
+        XCTAssertTrue(workspace.recents.isEmpty)
     }
 
     /// A file written before a field existed, and one a person has edited down to the essentials,
@@ -1478,8 +1483,9 @@ final class AppModelTests: XCTestCase {
     /// F4.26 — a session found on an idle host is offered by the launcher, as a session rather than
     /// as the windows it has not been asked about.
     ///
-    /// The row is `isAvailable` even though the host is not: F4.26's whole point is that the launcher
-    /// works while a host is unreachable, and this row is the one that *makes* it reachable.
+    /// The row acts even though the host is unreachable: F4.26's whole point is that the launcher
+    /// works while a host is unreachable, and this row is the one that *makes* it reachable. It is
+    /// marked as costing a connection, which is what the recession means now that no row is inert.
     func testTheLauncherOffersSessionsFoundWithoutAttaching() {
         let model = makeModel()
         var idle = HostState(
@@ -1495,9 +1501,212 @@ final class AppModelTests: XCTestCase {
 
         let row = try? XCTUnwrap(items.first { $0.title == "deploy" })
         XCTAssertEqual(row?.subtitle, "devbox (will connect)")
-        XCTAssertEqual(row?.isAvailable, true, "this row is what connects the host")
+        XCTAssertEqual(row?.connectsFirst, true, "the words and the mark have to say the same thing")
         // …and it is one row, not one per window: the probe never asked about windows.
         XCTAssertEqual(items.filter { $0.title == "deploy" }.count, 1)
+    }
+
+    // MARK: - The launcher's ranking and its window row (F4.25/F4.26)
+
+    /// A host with sessions that are known but out of reach: the shape the window row exists for.
+    /// tmux's own topology survives a dropped link — those sessions are unreachable, not gone — which
+    /// is exactly when somebody reaches for ⌘K to get back to what they were doing.
+    private func idleHost(id: String, sessions: [TmuxSession]) -> HostState {
+        HostState(
+            config: HostConfig(id: id, name: id),
+            connectionState: .disconnected,
+            sessions: sessions
+        )
+    }
+
+    /// F4.25 — "ranked by recency". Nothing recorded when anything was used, so the empty-query list
+    /// was config order: the window somebody left thirty seconds ago sat wherever its host happened
+    /// to be in `hosts.json`.
+    func testTheLauncherRanksTheMostRecentlyUsedFirst() {
+        let model = makeModel()
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "work", windows: [window("@1", name: "edit"), window("@2", name: "logs")]),
+        ])]
+        let state = WindowState()
+        model.registerWindow(state)
+
+        // Config order to begin with: the host row, then its windows as the session lists them.
+        XCTAssertEqual(model.launcherItems(for: state).map(\.title), ["local", "edit", "logs"])
+
+        model.select(in: state, host: "local", session: "$1", window: "@2")
+        XCTAssertEqual(model.launcherItems(for: state).map(\.title), ["logs", "local", "edit"])
+
+        // …and the *second* use of something moves it rather than leaving a copy behind, which would
+        // rank it lower the more it was used.
+        model.select(in: state, host: "local", session: "$1", window: "@1")
+        XCTAssertEqual(model.launcherItems(for: state).map(\.title), ["edit", "logs", "local"])
+        XCTAssertEqual(model.recents.count, 2)
+    }
+
+    /// tmux numbers windows per *server*, so `@1` exists on every host at once — and two hosts is the
+    /// ordinary case, not the odd one. A key without the host in it would have opening `@1` here
+    /// promote `@1` on the other machine.
+    func testRecencyIsHostQualified() {
+        let model = makeModel()
+        model.hosts = [
+            host(sessions: [TmuxSession(id: "$1", name: "work", windows: [window("@1", name: "here")])]),
+            remoteHost(id: "devbox", sessions: [
+                TmuxSession(id: "$1", name: "work", windows: [window("@1", name: "there")]),
+            ]),
+        ]
+        let state = WindowState()
+        model.registerWindow(state)
+
+        model.select(in: state, host: "devbox", session: "$1", window: "@1")
+
+        let titles = model.launcherItems(for: state).map(\.title)
+        XCTAssertEqual(titles.first, "there")
+        XCTAssertEqual(
+            model.recents, [RecentTarget(hostId: "devbox", sessionName: "work", windowId: "@1")],
+            "the entry has to name the host, or it ranks the other machine's window too"
+        )
+    }
+
+    /// The local host connects itself at launch (it is always reachable and cannot prompt), which is
+    /// not the user using it. Stamping that would put it at the top of the list before anybody had
+    /// touched anything.
+    func testConnectingWithoutBeingAskedRanksNothing() {
+        let model = makeModel()
+        model.hosts = [host(sessions: [])]
+        model.connect("local")
+        XCTAssertTrue(model.recents.isEmpty)
+    }
+
+    /// Once a query is typed the score decides — but a tie keeps the recency order rather than
+    /// whatever `sorted(by:)` left behind, which is not even repeatable: Swift's sort is not stable.
+    func testATypedQueryOutranksRecencyAndTiesKeepIt() {
+        let items = ["beta", "alpha", "alpine"].map {
+            LauncherItem(title: $0, subtitle: "devbox", iconName: "square") {}
+        }
+        // Two rows scoring identically on "alp" come back in the order they were handed over.
+        XCTAssertEqual(
+            LauncherOverlay.matches("alp", in: items).map(\.title), ["alpha", "alpine"]
+        )
+        // …and a better match beats a more recent one: "beta" contains an "a" and is ranked first,
+        // but the two that *start* with one score higher and go ahead of it.
+        XCTAssertEqual(
+            LauncherOverlay.matches("a", in: items).map(\.title), ["alpha", "alpine", "beta"]
+        )
+        XCTAssertEqual(LauncherOverlay.matches("", in: items).map(\.title), items.map(\.title))
+    }
+
+    /// F4.26 — the window row on an unreachable host connects first.
+    ///
+    /// It subtitled itself "(will connect)" while its action was a plain `select`, which connects
+    /// nothing: the one row in the launcher whose words and click disagreed. The selection cannot be
+    /// made at the moment of the click — there is no channel to make it on — so it waits, and lands
+    /// when the topology arrives.
+    func testTheLauncherWindowRowConnectsAnUnreachableHostAndThenLands() throws {
+        let model = makeModel()
+        model.hosts = [idleHost(id: "devbox", sessions: [
+            TmuxSession(id: "$2", name: "build", windows: [window("@3", name: "make")]),
+        ])]
+        let state = WindowState()
+        model.registerWindow(state)
+
+        let row = try XCTUnwrap(model.launcherItems(for: state).first { $0.title == "make" })
+        XCTAssertEqual(row.subtitle, "devbox › build (will connect)")
+        XCTAssertTrue(row.connectsFirst)
+        row.action()
+
+        // The host is claimed immediately, so the window shows that host connecting rather than
+        // sitting on whichever host the reconciler would otherwise pull it to.
+        XCTAssertEqual(state.selectedHostId, "devbox")
+        let pending = try XCTUnwrap(state.pendingRestore, "the target has to wait for a channel")
+        XCTAssertEqual(pending.sessionId, "$2")
+        XCTAssertEqual(pending.windowId, "@3")
+        XCTAssertEqual(pending.sessionName, "build", "and by name, for a server restarted in between")
+        XCTAssertEqual(pending.windowName, "make")
+
+        // The connection lands, reissuing every id the way a restarted server does. The name is what
+        // survives, and it is what the window comes back onto.
+        let reconnected = HostState(
+            config: HostConfig(id: "devbox", name: "devbox"),
+            connectionState: .connected,
+            sessions: [TmuxSession(id: "$9", name: "build", windows: [window("@8", name: "make")])],
+            activeSessionId: "$9"
+        )
+        state.reconcile(with: [reconnected])
+
+        XCTAssertEqual(state.selectedSessionId, "$9")
+        XCTAssertEqual(state.selectedWindowId, "@8")
+        XCTAssertNil(state.pendingRestore)
+    }
+
+    /// The same row on a host that *is* connected is an ordinary selection, with nothing left pending.
+    func testTheLauncherWindowRowOnAReachableHostJustSelects() throws {
+        let model = makeModel()
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "work", windows: [window("@1", name: "edit"), window("@2", name: "logs")]),
+        ])]
+        let state = WindowState()
+        model.registerWindow(state)
+
+        let row = try XCTUnwrap(model.launcherItems(for: state).first { $0.title == "logs" })
+        XCTAssertEqual(row.subtitle, "local › work", "nothing to promise: this one is reachable")
+        XCTAssertFalse(row.connectsFirst)
+        row.action()
+
+        XCTAssertEqual(state.selectedSessionId, "$1")
+        XCTAssertEqual(state.selectedWindowId, "@2")
+        XCTAssertNil(state.pendingRestore)
+    }
+
+    /// A window picked while its host was unreachable must not be re-asserted after the user has
+    /// changed their mind — the pending target is what `select` clears, and this is why it does.
+    func testPickingSomethingElseDropsAWaitingLauncherTarget() throws {
+        let model = makeModel()
+        model.hosts = [
+            idleHost(id: "devbox", sessions: [
+                TmuxSession(id: "$2", name: "build", windows: [window("@3", name: "make")]),
+            ]),
+            host(sessions: [TmuxSession(id: "$1", name: "work", windows: [window("@1")])]),
+        ]
+        let state = WindowState()
+        model.registerWindow(state)
+
+        try XCTUnwrap(model.launcherItems(for: state).first { $0.title == "make" }).action()
+        XCTAssertNotNil(state.pendingRestore)
+
+        model.select(in: state, host: "local", session: "$1", window: "@1")
+        XCTAssertNil(state.pendingRestore, "the user has said where this window belongs")
+        XCTAssertEqual(state.selectedHostId, "local")
+    }
+
+    /// The file is documented as one a person may open and edit. A duplicated entry must rank
+    /// something, not take the application down — `Dictionary(uniqueKeysWithValues:)` traps.
+    func testAHandEditedDuplicateInTheRecentsIsHarmless() {
+        let model = makeModel()
+        model.hosts = [host(sessions: [TmuxSession(id: "$1", name: "work", windows: [window("@1", name: "edit")])])]
+        let state = WindowState()
+        model.registerWindow(state)
+
+        let duplicate = RecentTarget(hostId: "local", sessionName: "work", windowId: "@1")
+        model.applyRecentsForTesting([duplicate, duplicate])
+
+        XCTAssertEqual(model.launcherItems(for: state).map(\.title).first, "edit")
+    }
+
+    /// Promotion is the half that is silently wrong: leave the old copy behind and the second use of
+    /// anything ranks it lower than the first.
+    func testPromotingMovesAnEntryAndBoundsTheList() {
+        let a = RecentTarget(hostId: "local", sessionName: "work", windowId: "@1")
+        let b = RecentTarget(hostId: "local", sessionName: "work", windowId: "@2")
+
+        XCTAssertEqual(Workspace.promoting(a, in: [b, a]), [a, b])
+        XCTAssertEqual(Workspace.promoting(a, in: [a]), [a])
+
+        let many = (0..<Workspace.recentsLimit + 10).map {
+            RecentTarget(hostId: "local", sessionName: "work", windowId: "@\($0)")
+        }
+        let bounded = many.reduce([RecentTarget]()) { Workspace.promoting($1, in: $0) }
+        XCTAssertEqual(bounded.count, Workspace.recentsLimit)
+        XCTAssertEqual(bounded.first, many.last, "most recently used first")
     }
 
     /// §4.6 — a restore onto a passthrough host lands rather than waiting, because what it is

@@ -74,21 +74,65 @@ public struct WorkspaceWindow: Codable, Equatable, Sendable {
     }
 }
 
-/// Everything `workspace.json` holds: the windows, and the watches that belong to no window.
+/// One thing the user has picked out of the launcher, for F4.25's "ranked by recency".
+///
+/// Host-qualified, because tmux numbers and names sessions and windows **per server**: `work` and
+/// `@1` exist on every host at once, and that is the common case rather than the odd one — the
+/// ordinary way to reach a second host is to ssh into it, where tmux starts numbering from zero
+/// exactly like the first one's. Without the host in the key, opening a window on this machine
+/// would promote a stranger's window on another.
+///
+/// A session is keyed by **name** and a window by **id**, and neither is an oversight. A session
+/// found by discovery (F4.4) has no id at all — the probe answers names — so the name is the only
+/// key that fits both kinds of session row. A window's name is the opposite case: with
+/// `automatic-rename` on it is whatever is *running* there and changes under the user's hands,
+/// while `@3` is stable for as long as the server is. What both give up is a server restart, which
+/// reissues every id, and that is why this is deliberately not `WorkspaceWindow`'s id-*and*-name
+/// pair: a stale entry here costs one row's place in a list, where a stale one there would put a
+/// window on a stranger's session.
+public struct RecentTarget: Codable, Equatable, Hashable, Sendable {
+    public var hostId: String
+    /// The session's name, or `nil` when the row names a host and nothing under it.
+    public var sessionName: String?
+    /// `@id`, or `nil` when the row names no window.
+    public var windowId: String?
+
+    public init(hostId: String, sessionName: String? = nil, windowId: String? = nil) {
+        self.hostId = hostId
+        self.sessionName = sessionName
+        self.windowId = windowId
+    }
+}
+
+/// Everything `workspace.json` holds: the windows, the watches that belong to no window, and what
+/// was used recently.
 ///
 /// The file used to *be* the array of windows. It grew an envelope because F4.31's watched windows
 /// are view state by the same definition — nothing in tmux records that somebody wants to be told
 /// when `@7` prints something — but they are not a property of any one macOS window, so there was no
-/// entry to put them in. The legacy shape is still read (see `WorkspaceStore.load`): a workspace is
-/// cheap to rebuild but not free, and silently discarding one on the upgrade would be a worse
-/// introduction to the feature than not having it.
+/// entry to put them in. F4.25's recency is the second thing of that shape. The legacy shape is
+/// still read (see `WorkspaceStore.load`): a workspace is cheap to rebuild but not free, and
+/// silently discarding one on the upgrade would be a worse introduction to the feature than not
+/// having it.
 public struct Workspace: Codable, Equatable, Sendable {
     public var windows: [WorkspaceWindow]
     public var watchedWindows: [WatchedWindow]
+    /// Most recently used first.
+    ///
+    /// An order rather than a set of timestamps, because ranking needs to know which came first and
+    /// nothing else: a stamp would be a wall clock in a file that outlives sleep, a timezone change
+    /// and a clock correction, all to answer a question the array position already answers. It also
+    /// keeps the file readable, which is §2.3's whole argument for JSON over a database.
+    public var recents: [RecentTarget]
 
-    public init(windows: [WorkspaceWindow] = [], watchedWindows: [WatchedWindow] = []) {
+    public init(
+        windows: [WorkspaceWindow] = [],
+        watchedWindows: [WatchedWindow] = [],
+        recents: [RecentTarget] = []
+    ) {
         self.windows = windows
         self.watchedWindows = watchedWindows
+        self.recents = recents
     }
 
     /// Field by field, for the same reason `WorkspaceWindow` decodes that way: one missing key must
@@ -97,6 +141,23 @@ public struct Workspace: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         windows = try container.decodeIfPresent([WorkspaceWindow].self, forKey: .windows) ?? []
         watchedWindows = try container.decodeIfPresent([WatchedWindow].self, forKey: .watchedWindows) ?? []
+        recents = try container.decodeIfPresent([RecentTarget].self, forKey: .recents) ?? []
+    }
+
+    /// How many uses the file remembers. Enough that a day's work is all in it, small enough that
+    /// nothing here grows without bound: a window opened and closed every few minutes would
+    /// otherwise leave an entry per window for the life of the install.
+    public static let recentsLimit = 50
+
+    /// The list with one target moved to the front, and no duplicate of it left behind.
+    ///
+    /// Static and pure because it is the half that can be silently wrong: leave the old copy in
+    /// place and the second use of anything ranks it *lower* than the first, which reads as the
+    /// list being random rather than as a bug.
+    public static func promoting(_ target: RecentTarget, in recents: [RecentTarget]) -> [RecentTarget] {
+        var promoted = recents.filter { $0 != target }
+        promoted.insert(target, at: 0)
+        return Array(promoted.prefix(recentsLimit))
     }
 }
 
