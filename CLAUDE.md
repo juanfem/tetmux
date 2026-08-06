@@ -1246,9 +1246,25 @@ them the fixtures are one person's word about what they once saw.
 what each version *says*; `Scripts/test-matrix.sh` pins what tetmux *does* about it. It is a CI job
 (`matrix` in `ci.yml`) rather than a per-push one: **weekly, plus `workflow_dispatch`** — press the
 button after touching a version-conditional path. Not on pushes or pull requests, because building
-five tmuxen from pinned tarballs is minutes of `./configure && make` each; `actions/cache` keyed on
-the build script pays that once. Running it locally is the same one command, and worth it before
-pushing a change to any fallback. It is where the version branches live — per-window sizing off below 2.9, tab reordering as `move-window -b` on
+tmux from a pinned tarball is minutes of `./configure && make`; `actions/cache`, keyed per version,
+pays that once.
+
+**The CI job is a `strategy.matrix`, one parallel runner per version, and the script is still the
+single implementation** — it takes a version list, and each job passes it one. Sequential is right on
+a laptop, where five versions share one build of the test bundle; in CI it turns five ~90-second runs
+into one eight-minute job with a single pass/fail at the end. Split, the wall clock is the slowest
+version rather than the sum, each version has its own cache entry and its own line in the checks
+list, and `fail-fast: false` means a 3.0 regression does not cancel the other four — which version
+disagrees is the whole information the matrix exists to produce. It costs more machine-minutes than
+it saves in wall clock, deliberately: the value of on-demand is an answer while you are still looking
+at it.
+
+**And "no tests ran" is never a pass.** `swift test` writes its summary two ways — `Executed 60
+tests, with 0 failures`, and once anything skips, `Executed 60 tests, with 2 tests skipped and 0
+failures` — so the script takes the count on its own rather than matching the sentence. Matching the
+sentence is what it did first, and the day a test started skipping it printed "no tests ran" with a
+tick beside it. A run that reports no count, or a count of zero, now fails: exit status zero having
+run nothing is the same green-check-that-means-nothing this whole area exists to prevent. It is where the version branches live — per-window sizing off below 2.9, tab reordering as `move-window -b` on
 3.2 and a run of `swap-window`s below it, pane commands subscribed on 3.2 and polled below, no flow
 control at all before 3.2. `PtyTransport.resolveTmux` reads `TETMUX_TMUX` to pick the binary, and it
 is **local-only by design**: a remote host runs whatever its own login shell finds, so a path on this

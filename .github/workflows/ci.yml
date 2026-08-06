@@ -87,20 +87,33 @@ jobs:
   # what tetmux *does* about it, which is where the version branches are — per-window sizing below
   # 2.9, `swap-window` reorders below 3.2, pane commands polled below 3.2, no flow control before 3.2.
   #
-  # Deliberately **not** on every push. Building five tmuxen from pinned tarballs is minutes of
-  # `./configure && make` per version, and the answer only changes when the code under those branches
-  # does. It runs weekly, and on demand — which is what a version matrix is actually for: a routine
-  # sweep, plus a button to press when you have touched a fallback.
+  # One job per version, in parallel. `Scripts/test-matrix.sh` loops the versions itself and that is
+  # right for a laptop, where they share one toolchain build and run one after another; in CI it
+  # turns five ~90-second runs into one eight-minute job with a single pass/fail at the end. Here
+  # each version gets its own runner, its own cache entry, and its own line in the checks list — so a
+  # 3.0 regression says "tmux 3.0" rather than needing the log read. The script is still the single
+  # implementation: it takes a version list, and each job passes it one.
   #
-  # The cache is keyed on the version list and the build script, so the tarball fetch and the five
-  # builds are paid once. A miss costs the full build; a hit costs a download of the binaries.
+  # It costs more machine-minutes than it saves in wall clock, because every job rebuilds the test
+  # bundle. That is the trade being made deliberately: this runs weekly and on demand, and the value
+  # of on-demand is an answer while you are still looking at it.
+  #
+  # Deliberately **not** on every push. Building tmux from a pinned tarball is minutes of
+  # `./configure && make`, and the answer only changes when the code under those branches does.
   matrix:
-    name: Integration suite across the tmux matrix
+    name: tmux ${{ matrix.tmux }}
     # Only the two triggers that mean "sweep now": the weekly cron, and a person pressing the button
     # after touching a version-conditional path. Not pushes, and not pull requests — a PR that waits
-    # ten minutes on five tmux builds is a PR nobody runs CI on twice.
+    # on five tmux builds is a PR nobody runs CI on twice.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
+    strategy:
+      # Every version reports. The point of the matrix is *which* versions disagree with the code, and
+      # cancelling the other four the moment one fails throws that away — the failure on 3.0 tells you
+      # nothing about whether 3.2a is also broken.
+      fail-fast: false
+      matrix:
+        tmux: ["3.0", "3.2a", "3.3a", "3.4", "3.5"]
     steps:
       - uses: actions/checkout@v7
 
@@ -115,17 +128,19 @@ jobs:
       - name: Install tmux build dependencies
         run: brew install libevent ncurses utf8proc
 
-      - name: Cache the built tmuxen
+      # Per version rather than one entry for all five, so a new version in the list does not
+      # invalidate the four that were already built.
+      - name: Cache tmux ${{ matrix.tmux }}
         uses: actions/cache@v4
         with:
-          path: .tmux-matrix/bin
-          key: tmux-matrix-${{ runner.os }}-${{ hashFiles('Scripts/build-tmux-matrix.sh') }}
+          path: .tmux-matrix/bin/${{ matrix.tmux }}
+          key: tmux-${{ matrix.tmux }}-${{ runner.os }}-${{ hashFiles('Scripts/build-tmux-matrix.sh') }}
 
-      # Builds only what the cache did not restore, then runs the suite once per version, each on a
-      # private socket. Fails on the first version that fails, and prints how many tests each one
-      # actually ran — a skip is exactly as green as a pass, and old versions are where tests skip.
-      - name: Run the matrix
-        run: Scripts/test-matrix.sh
+      # Builds this version if the cache missed, then runs the suite against it on a private socket.
+      # The script prints how many tests ran *and* how many skipped, which matters most here: a skip
+      # is exactly as green as a pass, and the old versions are where tests decide they do not apply.
+      - name: Run the suite against tmux ${{ matrix.tmux }}
+        run: Scripts/test-matrix.sh ${{ matrix.tmux }}
 
   package:
     name: Package .dmg

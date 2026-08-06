@@ -19,9 +19,13 @@
 # the same assertion, run under 3.0, is the only thing that has ever executed the `swap-window`
 # fallback end to end.
 #
-# **Local and scripted, not a CI job**, for the same reason the capture pipeline is: CI's tmux is one
-# version, and the point of this is the versions it is not. Building five tmuxen from source on every
-# push would cost minutes for a signal that only changes when this script is run deliberately.
+# It is both a local command and the body of a CI job, and the two use it differently. Run here with
+# no arguments it does all five in sequence, sharing one build of the test bundle — right on a laptop,
+# where the alternative is five toolchain builds. In CI each version is its own parallel job passing
+# one version, so a failure names the version in the checks list rather than in a log, and the wall
+# clock is the slowest version instead of the sum. It runs weekly and on demand, never on a push:
+# building tmux from a pinned tarball is minutes of `./configure && make`, and the answer only
+# changes when the code under those branches does.
 #
 # Each version gets a TMUX_TMPDIR of its own, which is not tidiness. tmux's client and server speak a
 # private protocol that is not compatible across versions, so a 3.0 client finding the 3.7b server
@@ -108,16 +112,28 @@ for version in "${wanted[@]}"; do
     # A skip is exactly as green as a pass, and the versions this script exists for are precisely the
     # ones where a test may decide it does not apply. Both numbers are printed, so a run that quietly
     # tested nothing cannot read as a run that tested everything.
-    skipped="$(grep -c "was skipped" "$log" || true)"
-    executed="$(grep -oE "Executed [0-9]+ tests, with [0-9]+ failure" "$log" | tail -1 || true)"
+    #
+    # The summary line has two shapes — `Executed 60 tests, with 0 failures` and, once anything
+    # skips, `Executed 60 tests, with 2 tests skipped and 0 failures` — so the count is taken on its
+    # own rather than by matching the whole sentence. Matching the sentence is what this did first,
+    # and the moment a test started skipping it printed "no tests ran" and a tick beside it.
+    skipped="$(grep -cE "^Test Case .* skipped" "$log" || true)"
+    summary="$(grep -oE "Executed [0-9]+ tests?, with .*" "$log" | tail -1 || true)"
+    count="$(printf '%s' "$summary" | grep -oE "^Executed [0-9]+" | grep -oE "[0-9]+" || true)"
 
     if [ "$status" -ne 0 ]; then
-        echo "✗ ${executed:-no tests ran} — $skipped skipped"
+        echo "✗ ${summary:-the suite did not report a summary} — $skipped skipped"
         grep -E "error: -\[|error: " "$log" | head -20 || true
         echo "  full log: $log"
         failed+=("$version")
+    elif [ -z "$count" ] || [ "$count" -eq 0 ]; then
+        # Exit status zero having run nothing is the failure this whole script exists to prevent one
+        # version of: a green tick that means the tests did not happen. It is never a pass.
+        echo "✗ no tests ran at all against $reported — that is not a pass"
+        echo "  full log: $log"
+        failed+=("$version")
     else
-        echo "✓ ${executed:-no tests ran} — $skipped skipped"
+        echo "✓ $summary — $skipped skipped"
         rm -rf "$tmpdir"
     fi
 done
