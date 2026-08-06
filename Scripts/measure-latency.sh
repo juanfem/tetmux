@@ -87,6 +87,31 @@ osascript -e "tell application \"System Events\" to set frontmost of (first proc
     >/dev/null 2>&1 || true
 sleep 1
 
+# Focus the window that has a *pane* in it, which is not reliably the frontmost one.
+#
+# The app discovers hosts from `~/.ssh/config` (F4.2), which is symlinked into the scratch home so
+# ssh keys still work — so a machine with saved hosts launches with a window per host, and the one
+# in front may be an unconnected host showing a Connect placeholder. That window has no terminal
+# view, so nothing takes the keystrokes and the run records zero samples while every check above
+# still passes: the app is up, it is frontmost, and `osascript` reports no error because posting the
+# key succeeded. Only the *local* host is connected at this point, so its window is the target, and
+# it is found by title rather than by position.
+window=$(osascript -e "tell application \"System Events\" to tell (first process whose unix id is $app_pid) to get {position, size} of (first window whose name contains \"localhost\")" 2>/dev/null || true)
+if [[ -z "$window" ]]; then
+    echo "FAILED: no window for the local host — it may not have connected" >&2
+    sed -n '1,40p' "$log" >&2
+    exit 1
+fi
+wx=$(echo "$window" | cut -d, -f1 | tr -d ' ')
+wy=$(echo "$window" | cut -d, -f2 | tr -d ' ')
+ww=$(echo "$window" | cut -d, -f3 | tr -d ' ')
+wh=$(echo "$window" | cut -d, -f4 | tr -d ' ')
+osascript -e "tell application \"System Events\" to tell (first process whose unix id is $app_pid) to perform action \"AXRaise\" of (first window whose name contains \"localhost\")" >/dev/null 2>&1 || true
+sleep 1
+# The click is what makes the pane first responder; raising alone leaves the keyboard elsewhere.
+osascript -e "tell application \"System Events\" to click at {$((wx + ww / 2)), $((wy + wh / 2))}" >/dev/null 2>&1 || true
+sleep 1
+
 type_keys() {
     local count=$1
     for ((i = 0; i < count; i++)); do

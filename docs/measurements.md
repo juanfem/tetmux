@@ -20,10 +20,13 @@ because the point of the table is the trend.
 **Script:** `Scripts/measure-latency.sh` (release build, private tmux server, synthetic keystrokes).
 **Instrumentation:** `Sources/tetmuxUI/LatencyProbe.swift`.
 
-| Date | Machine | Display | Samples | p50 | **p95** | max | |
+| Date | Display | Power | Samples | p50 | **p95** | max | |
 |---|---|---|---|---|---|---|---|
-| 2026-08-06 | Apple M3, macOS 26.5.1 | 3440×1440 @ 100 Hz | 38 | 13.50 ms | **24.43 ms** | 24.88 ms | trailing-edge flush |
-| 2026-08-06 | Apple M3, macOS 26.5.1 | 3440×1440 @ 100 Hz | 148 | 11.11 ms | **11.54 ms** | 11.84 ms | leading-edge flush |
+| 2026-08-06 | external 3440×1440 @ 100 Hz | AC | 38 | 13.50 ms | **24.43 ms** | 24.88 ms | trailing-edge flush |
+| 2026-08-06 | external 3440×1440 @ 100 Hz | AC | 148 | 11.11 ms | **11.54 ms** | 11.84 ms | leading-edge flush |
+| 2026-08-06 | built-in 2880×1864 (ProMotion) | battery | 148 | 12.07 ms | **17.84 ms** | 17.94 ms | leading-edge flush |
+
+All on an Apple M3, macOS 26.5.1.
 
 **Missed by 2×, then met.** The split is what found it:
 
@@ -43,18 +46,32 @@ arrives during the window that follows leaves P6.4's batching exactly where it i
 sustained typing the command rate is unchanged, one per interval — and takes the timer off the
 keystroke somebody is waiting on. **19.72 ms p95 of round trip became 1.72.**
 
-### What is left is the display, and it is most of the budget now
+### What is left is the display, and the third run proves it
 
-After the fix the round trip is under 2 ms and the remaining ~10 ms is between the bytes reaching
-the emulator and AppKit having drawn — which at 100 Hz is one frame. tetmux is frame-bound here, not
-protocol-bound, and that reframes P6.1's 12 ms:
+After the fix the round trip is under 2 ms everywhere, and the remainder is between the bytes
+reaching the emulator and AppKit having drawn — which is one display frame. The echo column is what
+makes this checkable, and across the two leading-edge runs it moves the *wrong* way for any
+protocol-side explanation:
 
-* At **100 Hz** a frame is 10 ms, leaving about 2 ms of slack. The measured p95 of 11.54 ms fits,
-  but not with room to spare — a p95 that drifts past 12 on this hardware is a frame being missed,
-  not the protocol slowing down, and the echo column is how to tell.
-* At **60 Hz** a frame is 16.7 ms and P6.1 cannot be met by *any* application, this one included.
-  A future run on a 60 Hz panel that reports ~18 ms is not a regression. This is why the display is
-  recorded beside the machine.
+| | echo p50 | echo p95 | total p95 |
+|---|---|---|---|
+| external 100 Hz, AC | 0.92 ms | 1.72 ms | 11.54 ms |
+| built-in ProMotion, battery | 0.64 ms | **0.78 ms** | **17.84 ms** |
+
+The round trip got **faster** and the total got 6 ms **slower**. Whatever the second run is measuring
+extra, it is not tetmux talking to tmux — it is the wait for a frame. tetmux is frame-bound here, and
+that reframes what P6.1's 12 ms can mean:
+
+* At **100 Hz** a frame is 10 ms, leaving about 2 ms of slack, and the measurement passes at 11.54.
+* On the **built-in ProMotion panel** it fails at 17.84. ProMotion is adaptive and drops its refresh
+  rate when content is static, which a terminal at a prompt is — a 17.8 ms p95 is one frame at
+  ~60 Hz plus the draw, and at 16.7 ms per frame **no application can meet a 12 ms budget**.
+
+**The two runs changed two variables at once** — display *and* power — so the split between them is
+not established. The evidence points at the display (the protocol half improved on battery, and
+16.7 ms is exactly a 60 Hz frame), but a run on the built-in panel while plugged in is what would
+settle it, and it has not been done. Until it is, "P6.1 passes" is a claim about the 100 Hz external
+monitor and nothing broader.
 
 Two things the measurement still does not include, both of which make the real figure worse rather
 than better. The interval closes when AppKit has drawn the view, **not** when the window server has
