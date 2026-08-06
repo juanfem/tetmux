@@ -1,6 +1,6 @@
 # System Requirements Document — tetmux, a tmux Control-Mode Session Manager (macOS)
 
-**Version:** 2.1 — amended 2026-08-05 against the shipped implementation
+**Version:** 2.1 — amended 2026-08-06 against the shipped implementation
 **Status:** Requirements baseline. Requirement IDs (`R3.x`, `F4.x`, `T5.x`, `P6.x`) are cited
 throughout the source; existing IDs are frozen and amendments change their text, never their number.
 **Platform:** macOS 14+, Apple Silicon (arm64) **only** — by decision, not omission. See §2.5.
@@ -176,8 +176,8 @@ compile on Linux Swift, and CI must build that target on Linux even though nothi
 future Linux shell without a rewrite. Its immediate payoff is that the interesting logic stays
 headlessly testable. A hedge that is never exercised has already stopped being a hedge — the Ubuntu
 CI job is the other half of the requirement, not an optional extra. The codec's fixture suite
-should additionally *run* on Linux, which requires a test target that links `tetmuxCore` alone
-(tracked in `TODO.md`).
+*runs* on Linux as well: `tetmuxCoreTests` links `tetmuxCore` alone, and the Ubuntu job runs it
+(`swift test --filter tetmuxCoreTests`).
 
 ### 2.5 Distribution
 
@@ -279,7 +279,8 @@ Under control mode the channel's input side carries **tmux commands, not pane ke
 
 Any implementation that resizes a surface before tmux confirms will drift and corrupt output.
 Resize requests are debounced ~100 ms and coalesced. During AppKit live-resize, channel traffic is
-suppressed entirely and one request issues on completion *(still unimplemented — `TODO.md`)*.
+suppressed entirely and one request issues on completion, at the size the user let go of
+(`LiveResizeGate` — one per macOS window, its held requests keyed by tmux window).
 
 Two derivation rules keep the loop from feeding on itself:
 
@@ -314,8 +315,8 @@ and none of the control-mode policies run (§4.6).
 | Version | Behaviour |
 |---|---|
 | ≥ 3.2 | Full control mode: `refresh-client -B` subscriptions, `%pause` flow control, `move-window -a/-b` |
-| 3.0 – 3.1 | Full control mode; subscriptions and pause unavailable — byte ceiling is the whole flow-control mechanism, pane commands polled, reorders built from `swap-window` |
-| 2.4 – 2.9 | Control mode with reduced features (no per-window sizing); warn once per host |
+| 2.9 – 3.1 | Full control mode; subscriptions and pause unavailable — byte ceiling is the whole flow-control mechanism, pane commands polled, reorders built from `swap-window` |
+| 2.4 – 2.8 | Control mode with reduced features (no per-window sizing); warn once per host |
 | < 2.4 | **Passthrough fallback** (§4.6) |
 | tmux absent | Clear error offering a plain login shell to that host — offered, never started |
 
@@ -454,9 +455,9 @@ session contents.
   manufacture an empty session under the remembered name and present it as the user's. A click
   goes through targetless `attach-session` (which cannot create) and only creates when the server
   has nothing at all. When the attached session is *gone* (its `%exit` observed), the window
-  enters a "session gone" state offering recreation by name on explicit user action — the name is
-  in `workspace.json` — distinct from "not connected" *(the offer surface is still unbuilt —
-  `TODO.md`)*.
+  enters a "session gone" state offering recreation by name on explicit user action — the ended
+  name is carried on host state and gated per window, so a second window on another session of
+  the same host gets no offer to recreate somebody else's — distinct from "not connected".
 - **F4.16** On reattach, visible panes repaint via `capture-pane -p -e -J -S -<N>`, N bounded
   (default 2000 lines). Non-visible panes repaint lazily on first display. Pane subscriptions are
   a registry of what is on screen, not a property of the connection — they survive teardown, and
@@ -535,8 +536,10 @@ tmux's prefix.
 - **F4.31** Notification Center alerts for configurable pane events: bell, or `%window-activity`
   on a watched window — the useful half for a long remote job that prints and does not ring.
   Coalesced (one banner per 10 s with an "and N more" body); authorisation asked on first use, a
-  refusal not retried. *(Bell half shipped; configurability and the watched-window half are open —
-  `TODO.md`.)*
+  refusal not retried. Both halves are shipped: watches are per-window view state in
+  `workspace.json`, the on/off pair beside the bell toggle in `NotificationPolicy`. Activity is
+  derived from `#{window_activity_flag}` re-read on topology refreshes — nothing announces it, so
+  detection may lag until an unrelated refresh fires.
 
 ### 4.8 Authentication and interactive prompts *(new in v2.1)*
 
@@ -585,8 +588,9 @@ Exact, testable commitments. Violations produce visible corruption under tmux.
   are never permitted.
 - **T5.7** Correct Unicode 15+ width and grapheme cluster handling, including emoji ZWJ sequences
   and CJK. Under control mode a desynchronised grid corrupts pane geometry rather than merely
-  looking wrong. *(Delegated to SwiftTerm; the §8 rendering corpus is what would pin it, and is
-  open.)*
+  looking wrong. *(Delegated to SwiftTerm; pinned by the §8 width corpus — real-byte
+  CJK/combining/ZWJ fixtures replayed against the grid. §8's program-level half is still open —
+  `TODO.md`.)*
 - **T5.8** Font ligatures off by default, behind a setting.
 
 ---
@@ -656,8 +660,8 @@ sentence to put in front of somebody.
 ## 8. Testing strategy *(revised in v2.1)*
 
 - **Fixture replay** for `ControlCodec` across the tmux version matrix (R3.6), CI-enforced on
-  macOS. The fixture suite should also run on Linux, which requires a core-only test target
-  (`TODO.md`); today Linux CI builds `tetmuxCore` and runs nothing.
+  macOS. The fixture suite runs on Linux too: the Ubuntu job builds `tetmuxCore` and runs
+  `tetmuxCoreTests`, which is the §2.4 hedge being exercised.
 - **Version-matrix integration**, *replacing v2.0's Docker prescription*: the matrix build already
   produces real 3.0–3.5 binaries locally in about a minute each; pointing the existing
   integration suite at each of them covers old-version *behaviour* with no container and no sshd
@@ -668,12 +672,15 @@ sentence to put in front of somebody.
   children concurrently (the fork-safety regression fails as a hang). The password path runs end
   to end against a fake-ssh script that prompts on a pty and then execs tmux, so
   detect → publish → answer → handshake is exercised without a password-accepting host.
-- **Chaos tests** *(open)*: kill `ssh` mid-stream; `SIGSTOP` the server; sever the control socket;
-  sleep/wake. Each must leave the app in a defined state and recover.
-- **Geometry regression suite** *(partially built)*: layout strings with expected trees exist;
-  the 50-resize storm asserting convergence does not.
-- **Rendering acceptance** *(open)*: `vim`, `htop`, `less`, a Powerline prompt, and a CJK/emoji
-  corpus against a reference terminal — this is what would make T5.7 asserted rather than assumed.
+- **Chaos tests** *(three of four built)*: killing the channel mid-stream and `SIGSTOP`ping the
+  server run in the integration suite; severing the ControlMaster socket runs opt-in behind
+  `TETMUX_SSH_HOST`. Sleep/wake is still open (`TODO.md`). Each must leave the app in a defined
+  state and recover.
+- **Geometry regression suite** *(built)*: layout strings with expected trees, and a seeded
+  50-resize storm asserting convergence on tmux's final layout.
+- **Rendering acceptance** *(half built)*: the CJK/emoji width corpus exists and is what makes
+  T5.7 asserted rather than assumed; `vim`, `htop`, `less`, and a Powerline prompt against a
+  reference terminal are still open (`TODO.md`).
 - **Latency and throughput measurement** *(amended)*: local, scripted, reproducible — not CI.
   Assert P6.1 and P6.3 with a harness a human runs on real hardware and records, the same
   provenance model as the fixture matrix.
@@ -706,11 +713,11 @@ as designed and is the recommended shape for any comparable effort.
 | Risk | Status |
 |---|---|
 | libghostty integration effort | Resolved: SwiftTerm chosen (Spike 1); risk retired |
-| Control-mode protocol edge cases across versions | Mitigated: five-version fixture corpus, replayed in CI; behavioural matrix still open (§8) |
-| Geometry desync between GUI and tmux | Mitigated architecturally (§3.3); live-resize suppression still open |
+| Control-mode protocol edge cases across versions | Mitigated: five-version fixture corpus replayed in CI; integration suite runs across the built 3.0–3.5 binaries, weekly in CI and on demand |
+| Geometry desync between GUI and tmux | Mitigated architecturally (§3.3); live-resize suppression shipped (`LiveResizeGate`) |
 | Orphaned clients clamping window size | Mitigated (F4.17), with tests; known blast radius documented |
 | `send-keys` round-trip latency under fast typing | Mitigated: per-frame batching; buffer-based paste |
 | Old tmux in institutional environments | Mitigated: passthrough shipped as a distinct channel (§4.6) |
-| **SwiftTerm dependency drift** *(new)* | Behaviour tetmux relies on but does not implement is pinned by tests; F4.23/F4.24 pins still owed |
+| **SwiftTerm dependency drift** *(new)* | Behaviour tetmux relies on but does not implement is pinned by tests, the F4.23/F4.24 pins included |
 | **Unsigned distribution** *(new)* | Every user fights Gatekeeper; blocked on an Apple Developer account (`TODO.md`) |
 | macOS-only limits reach | Accepted deliberately; §2.4 hedge CI-enforced |

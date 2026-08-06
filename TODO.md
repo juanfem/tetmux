@@ -8,9 +8,11 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**1 feature, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
-integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on 2026-08-06; what
-they turned into is recorded in `CLAUDE.md`, not here.
+**3 features, 3 tests owed, 1 blocked, 2 parked.** The six small items this file opened with, copy
+mode, and the integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on
+2026-08-06; what they turned into is recorded in `CLAUDE.md`, not here. The five entries added on
+2026-08-06 came out of an adherence review of the tree against SRD v2.1 — a review that mostly
+found the *documents* behind the code, and amended the SRD's stale status notes in the same pass.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
@@ -29,6 +31,65 @@ References point into current `main`. Line numbers drift; the symbol names besid
   (3) P6.6/P6.7: a documented `Scripts/measure-idle.md` procedure (Instruments template, what to
   open, what number to record). Record results in the repo the way fixture provenance is
   recorded.
+
+- [ ] **The launcher neither ranks by recency nor connects from a window row (F4.25/F4.26).**
+  F4.25 says "ranked by recency"; `AppModel.launcherItems` emits hosts in config order and
+  `LauncherOverlay` sorts matches by fuzzy score alone — nothing anywhere records when an item
+  was last used. And a window row on an unreachable host is subtitled "(will connect)" while its
+  action is `select`, which never connects a host: host rows call `connect` and discovered-session
+  rows go through `attachDiscoveredSession`, so window rows are the one kind whose words and click
+  disagree — today they are also not `isAvailable`, so the promise is merely never kept rather
+  than broken.
+  *Do:* (1) stamp last-used per host/session/window at `select`/`connect` time — `workspace.json`
+  is the natural home, since recency of use is §4.3 view state — and order the empty-query list
+  by it, fuzzy score still winning once a query is typed. (2) Make the window row connect first
+  when its host is inactive: `attachDiscoveredSession` already shows the shape (connect, then
+  resolve when the topology arrives), and a reveal request is the existing mechanism for "show it
+  when it exists". Or decide the row stays inert and drop the subtitle — either way the words and
+  the click must agree.
+  `Sources/tetmuxUI/AppModel.swift` (`launcherItems`, `select`),
+  `Sources/tetmuxUI/LauncherOverlay.swift`
+
+- [ ] **P6.4's output half: the byte handoff is per-chunk, not per display frame.** The input
+  direction complies — keystrokes coalesce into one `send-keys -H` per 8 ms flush, and
+  acknowledgements batch at 16 KiB — but the surface feeds the emulator once per `%output` chunk
+  and nothing in the tree is ProMotion-aware; there is no display link anywhere. SwiftTerm's own
+  redraw coalescing is what keeps the paint rate sane, which may make this a non-problem in
+  practice, but P6.4 as written asks for per-frame batching of the handoff itself.
+  *Do:* measure first — the P6 harness above is the tool. If per-chunk feeding shows up, coalesce
+  chunks in `TerminalSurface.Coordinator.attach` behind `NSView.displayLink(target:selector:)`
+  and flush once per frame; if it does not, amend P6.4 to record per-chunk feeding over
+  SwiftTerm's coalescing as the accepted design. Until one of those happens the requirement reads
+  as done while the tree does not do it.
+  `Sources/tetmuxUI/TerminalSurface.swift` (`Coordinator.attach`)
+
+## Tests owed by the SRD
+
+- [ ] **The sleep/wake chaos scenario (§8's fourth).** Killing the channel mid-stream and
+  `SIGSTOP`ping the server run in `SessionIntegrationTests`; the ControlMaster scenario runs
+  behind `TETMUX_SSH_HOST`; nothing exercises the sleep/wake boundary. A test cannot sleep the
+  machine, so test the seam instead: the wake path is `NSWorkspace.didWakeNotification` →
+  `probeAllConnections`, so an integration test that kills the link while "asleep", calls
+  `probeAllConnections()`, and asserts reconnect plus repaint covers the core's half — watching
+  the state *leave* `.connected` first, per the kill-test rule. The outbox age rule across the
+  boundary is already covered via the injected clock.
+  `Tests/tetmuxTests/SessionIntegrationTests.swift`,
+  `Sources/tetmuxUI/NetworkStateMonitor.swift`
+
+- [ ] **Rendering acceptance, the program-level half (§8, T5.7).** The CJK/emoji width corpus
+  exists (`RenderingCorpusTests`); `vim`, `htop`, `less`, and a Powerline prompt against a
+  reference terminal exist nowhere. Same provenance discipline as every other fixture: capture
+  each program's real byte stream once under a pty (the `capture-fixtures.py` pattern), commit
+  it, replay it into the emulator, and assert the grid against a reference terminal's rendering
+  of the same bytes — recorded, never regenerated.
+  `Tests/tetmuxTests/RenderingCorpusTests.swift` is the pattern to extend.
+
+- [ ] **T5.2 has no assertion.** Truecolor works by architecture — `%output` carries raw pane
+  bytes and SwiftTerm renders 24-bit SGR — but no test or line of code anywhere mentions it, and
+  §5's preamble promises "exact, testable commitments". One pane test feeding `ESC[38;2;R;G;Bm`
+  through the same replay path as the width corpus and asserting the colour survives to the
+  buffer closes it, beside the existing invocation assertions that pin `-2`.
+  `Tests/tetmuxTests/RenderingCorpusTests.swift`
 
 ## Blocked on credentials
 
