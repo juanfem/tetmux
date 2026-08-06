@@ -43,13 +43,16 @@ Scripts/test-matrix.sh 3.0 --filter testDraggingATabReordersTheSession
 ```
 
 `.github/workflows/ci.yml` runs **three** jobs on every push, and a fourth — the tmux version matrix
-below — weekly and on demand. `swift test` on macOS with tmux
+below — weekly, on demand, and on a `v*` tag. `swift test` on macOS with tmux
 installed — otherwise the integration suite silently skips itself and a green check means nothing, so
 the run fails if the skip fires. On Ubuntu, `swift build --target tetmuxCore` **and**
 `swift test --filter tetmuxCoreTests`, which is what exercises the §2.4 portability hedge; every job
 used to be macOS, and a core-only regression on glibc went uncaught. Then the packaging script, whose
 result is mounted and launched before it is uploaded. A `v*` tag also publishes the image as a
-release.
+release — and that is the one path where the matrix **gates** rather than reports, since a .dmg is
+what somebody installs. `package` therefore needs `matrix` under an explicit
+`success || skipped` condition: a skipped dependency skips its dependents by default, so the bare
+`needs:` would stop producing a .dmg on every ordinary push and say nothing about why.
 
 **The manifest declares the AppKit half of the package only on macOS**, and that is what makes the
 Linux test job possible at all. `--filter` chooses which tests *run*, never which targets are built:
@@ -1284,10 +1287,15 @@ them the fixtures are one person's word about what they once saw.
 
 **…and the integration suite runs across it too, which is a different property.** The fixtures pin
 what each version *says*; `Scripts/test-matrix.sh` pins what tetmux *does* about it. It is a CI job
-(`matrix` in `ci.yml`) rather than a per-push one: **weekly, plus `workflow_dispatch`** — press the
-button after touching a version-conditional path. Not on pushes or pull requests, because building
-tmux from a pinned tarball is minutes of `./configure && make`; `actions/cache`, keyed per version,
-pays that once.
+(`matrix` in `ci.yml`) rather than a per-push one: **weekly, plus `workflow_dispatch`, plus a `v*`
+tag** — press the button after touching a version-conditional path. Not on pushes or pull requests,
+because building tmux from a pinned tarball is minutes of `./configure && make`; `actions/cache`,
+keyed per version, pays that once. The tag is the exception because a tag is the only event that
+produces something a user installs, and a tag can be cut from a commit the cron has never swept — so
+that is where R3.6's compatibility claim stops being a note and becomes a promise, and where the
+matrix blocks the release rather than going red beside a published one. Two costs are accepted with
+it: a 7-day cache eviction against a 7-day cron means a tag build usually rebuilds all five from
+source, and a tarball fetch is now a network dependency in the release path.
 
 **The CI job is a `strategy.matrix`, one parallel runner per version, and the script is still the
 single implementation** — it takes a version list, and each job passes it one. Sequential is right on

@@ -102,10 +102,18 @@ jobs:
   # `./configure && make`, and the answer only changes when the code under those branches does.
   matrix:
     name: tmux ${{ matrix.tmux }}
-    # Only the two triggers that mean "sweep now": the weekly cron, and a person pressing the button
-    # after touching a version-conditional path. Not pushes, and not pull requests — a PR that waits
-    # on five tmux builds is a PR nobody runs CI on twice.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Three triggers that mean "sweep now": the weekly cron, a person pressing the button after
+    # touching a version-conditional path, and a tag — which is the only event that produces
+    # something a user installs, and so the one where R3.6's compatibility claim is a promise rather
+    # than a note. A tag can be cut from a commit the cron has never seen. Not pushes, and not pull
+    # requests — a PR that waits on five tmux builds is a PR nobody runs CI on twice.
+    #
+    # The cache is a 7-day eviction and the cron a 7-day interval, so a tag build will often miss all
+    # five entries and pay `./configure && make` for each. Parallel, so that is minutes; accepted.
+    if: >-
+      github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-15
     strategy:
       # Every version reports. The point of the matrix is *which* versions disagree with the code, and
@@ -144,7 +152,19 @@ jobs:
 
   package:
     name: Package .dmg
-    needs: test
+    needs: [test, matrix]
+    # The matrix gates the release rather than merely reporting beside it: publishing a .dmg and
+    # *then* going red says the versions disagree after the artifact is already downloadable.
+    #
+    # The explicit condition is what makes that safe. `matrix` is skipped on an ordinary push, and a
+    # skipped dependency skips its dependents by default — so `needs: matrix` alone would stop
+    # producing a .dmg everywhere except on tags, silently, since a skipped job is not a failed one
+    # and nothing would say why. `success()` is no good either: it is false when anything needed was
+    # skipped. Hence naming the two acceptable results outright.
+    if: >-
+      !cancelled()
+      && needs.test.result == 'success'
+      && (needs.matrix.result == 'success' || needs.matrix.result == 'skipped')
     runs-on: macos-15
     permissions:
       # Only the tagged path uses this, to create the release the .dmg is attached to.

@@ -713,7 +713,7 @@ as designed and is the recommended shape for any comparable effort.
 | Risk | Status |
 |---|---|
 | libghostty integration effort | Resolved: SwiftTerm chosen (Spike 1); risk retired |
-| Control-mode protocol edge cases across versions | Mitigated: five-version fixture corpus replayed in CI; integration suite runs across the built 3.0–3.5 binaries, weekly in CI and on demand |
+| Control-mode protocol edge cases across versions | Mitigated: five-version fixture corpus replayed in CI; integration suite runs across the built 3.0–3.5 binaries, weekly in CI, on demand, and on every release tag, where it blocks the .dmg |
 | Geometry desync between GUI and tmux | Mitigated architecturally (§3.3); live-resize suppression shipped (`LiveResizeGate`) |
 | Orphaned clients clamping window size | Mitigated (F4.17), with tests; known blast radius documented |
 | `send-keys` round-trip latency under fast typing | Mitigated: per-frame batching; buffer-based paste |
