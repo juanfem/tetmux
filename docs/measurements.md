@@ -202,12 +202,22 @@ is a decaying average over about a minute, so residue is plausible. The AC/batte
 nothing but clock scaling — the same work on a slower core is a larger share of "one core".
 
 **The shape is the finding, not the mean.** Idle baseline is ~0.25% in both conditions. The entire
-miss is a spike **every 10 seconds**, reaching 13.9% on battery and 1.8% on AC. That cadence is the
-RTT probe: `SessionService`'s `rttTask` sleeps 10 s and sends `display-message -p ''` per host, and
-it is the only 10 s timer in the application. Four tiny commands cannot cost that; what fits is what
-the *answer* does — `rttMilliseconds` is a field on `HostState`, so every probe changes the state,
-`ingest` diffs it as a real change and broadcasts, and the broadcast rebuilds a SwiftUI tree holding
-20 panes. The single-pane arm is the evidence: same probe, same cadence, ~0.01%.
+miss is a spike **every 10 seconds**, reaching 13.9% on battery and 1.8% on AC.
+
+Two things about that spike are measured, and the third is not. Measured: the **cadence** is 10 s,
+which is `rttTask`'s — it sleeps 10 s and sends `display-message -p ''` per host, and it is the only
+10 s timer in the application. Measured: the cost **scales with pane count**, since the single-pane
+arm shows the same probe at the same cadence for ~0.01%.
+
+Not measured: *why* work proportional to pane count happens when an RTT answer lands. The obvious
+candidate is that `rttMilliseconds` is a field on `HostState`, so a probe answer diffs as a real
+state change, broadcasts, and rebuilds a SwiftUI tree holding 20 panes — four `display-message`
+round trips certainly cannot cost 13.9% of a core on their own. But an attempt to confirm that path
+in an isolated harness was **inconclusive**: the harness ran the app against a scratch `HOME`, and
+in that configuration it behaved anomalously in ways that did not reproduce in an ordinary run, so
+nothing it showed about the broadcast path can be trusted. The mechanism is a hypothesis with the
+cadence and the scaling behind it, and no more than that. Anybody acting on it should confirm it
+first — on a normal run, with Instruments, not with a scratch `HOME`.
 
 ### Wakeups: fine, and worth saying so
 

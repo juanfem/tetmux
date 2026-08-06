@@ -73,14 +73,20 @@ References point into current `main`. Line numbers drift; the symbol names besid
   rerun on battery, settled longer after the scrollback fill, should come first. Wakeups are
   **fine** and should not be chased: package idle exits are ~0/s.
   The shape is the finding. Baseline idle is ~0.25%; the whole miss is a spike **every 10
-  seconds**, which is `rttTask`'s cadence — and `rttMilliseconds` is a field on `HostState`, so
-  every probe answer diffs as a real state change, broadcasts, and rebuilds a SwiftUI tree holding
-  20 panes. The one-pane arm settles it: same probe, same cadence, ~0.01%.
-  *Do:* keep the RTT out of the broadcast that rebuilds panes. It is a status-bar readout (F4.29)
-  and nothing about a pane depends on it, so the options are to exclude it from the diff that
-  decides whether to broadcast and publish it on its own narrower channel, or to coalesce it so it
-  cannot fire more often than the tree can afford. Verify by re-running the arrangement, not by
-  reasoning: the cost is in the rebuild, which no unit test sees.
+  seconds**, which is `rttTask`'s cadence and the only 10 s timer in the app — and the cost scales
+  with pane count, since the one-pane arm shows the same probe at the same cadence for ~0.01%.
+  *Not* established: why work proportional to pane count follows an RTT answer. The obvious
+  candidate is that `rttMilliseconds` lives on `HostState`, so a probe answer diffs as a real state
+  change, broadcasts, and rebuilds a SwiftUI tree holding 20 panes — four `display-message` round
+  trips cannot cost 13.9% of a core by themselves. An attempt to confirm that in an isolated
+  harness was inconclusive and is not evidence: the harness ran the app against a scratch `HOME`
+  and behaved in ways that did not reproduce in an ordinary run.
+  *Do:* **confirm the mechanism first**, on a normal run under Instruments — the cadence and the
+  scaling are facts, the broadcast path is a guess, and it would be easy to "fix" the wrong thing.
+  If it is the broadcast: the RTT is a status-bar readout (F4.29) and nothing about a pane depends
+  on it, so it can be excluded from the diff that decides whether to broadcast and published on a
+  narrower channel, or coalesced so it cannot fire more often than the tree can afford. Verify by
+  re-running the arrangement, not by reasoning: the cost is in the rebuild, which no unit test sees.
   `Sources/tetmuxCore/Session/SessionService.swift` (`rttTask`, `ingest`),
   `Sources/tetmuxCore/Session/HostModel.swift` (`rttMilliseconds`)
 
