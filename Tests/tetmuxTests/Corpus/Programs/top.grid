@@ -1,0 +1,14 @@
+# top — recorded by Scripts/capture-programs.py
+# program: printf(1)
+# reference: tmux 3.7b rendering the bytes in top.stream at 80x24
+Processes: 616 total, 2 running, 1 stuck, 613 sleeping, 4765 threads   14:20:52
+Load Avg: 4.26, 6.25, 5.95  CPU usage: 9.6% user, 5.26% sys, 85.66% idle
+SharedLibs: 506M resident, 114M data, 92M linkedit.
+MemRegions: 0 total, 0B resident, 189M private, 1340M shared.
+PhysMem: 15G used (2197M wired, 5844M compressor), 108M unused.
+VM: 365T vsize, 6144M framework vsize, 3997730(4) swapins, 5371457(0) swapouts.
+Networks: packets: 969648/1173M in, 9733055/7831M out.
+Disks: 37330702/710G read, 9490189/333G written.
+
+PID    COMMAND      %CPU TIME     #TH  #WQ  #POR MEM  PURG CMPR PGRP  PPID
+37108  sleep        0.0  00:00.00 1    0    11   816K 0B   0B   37107 37107

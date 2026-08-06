@@ -1,0 +1,27 @@
+# less — recorded by Scripts/capture-programs.py
+# program: less 668 (POSIX regular expressions)
+# reference: tmux 3.7b rendering the bytes in less.stream at 80x24
+178  the quick brown fox jumps over the lazy dog — line 178
+179  the quick brown fox jumps over the lazy dog — line 179
+180  the quick brown fox jumps over the lazy dog — line 180
+181  the quick brown fox jumps over the lazy dog — line 181
+182  the quick brown fox jumps over the lazy dog — line 182
+183  the quick brown fox jumps over the lazy dog — line 183
+184  the quick brown fox jumps over the lazy dog — line 184
+185  the quick brown fox jumps over the lazy dog — line 185
+186  the quick brown fox jumps over the lazy dog — line 186
+187  the quick brown fox jumps over the lazy dog — line 187
+188  the quick brown fox jumps over the lazy dog — line 188
+189  the quick brown fox jumps over the lazy dog — line 189
+190  the quick brown fox jumps over the lazy dog — line 190
+191  the quick brown fox jumps over the lazy dog — line 191
+192  the quick brown fox jumps over the lazy dog — line 192
+193  the quick brown fox jumps over the lazy dog — line 193
+194  the quick brown fox jumps over the lazy dog — line 194
+195  the quick brown fox jumps over the lazy dog — line 195
+196  the quick brown fox jumps over the lazy dog — line 196
+197  the quick brown fox jumps over the lazy dog — line 197
+198  the quick brown fox jumps over the lazy dog — line 198
+199  the quick brown fox jumps over the lazy dog — line 199
+200  the quick brown fox jumps over the lazy dog — line 200
+(END)

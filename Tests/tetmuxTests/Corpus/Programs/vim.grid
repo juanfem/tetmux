@@ -1,0 +1,27 @@
+# vim — recorded by Scripts/capture-programs.py
+# program: VIM - Vi IMproved 9.1 (2024 Jan 02, compiled Apr 18 2026 20:29:32)
+# reference: tmux 3.7b rendering the bytes in vim.stream at 80x24
+  1 001  the quick brown fox jumps over the lazy dog — line 1
+  2 002  the quick brown fox jumps over the lazy dog — line 2
+  3 003  the quick brown fox jumps over the lazy dog — line 3
+  4 004  the quick brown fox jumps over the lazy dog — line 4
+  5 005  the quick brown fox jumps over the lazy dog — line 5
+  6 006  the quick brown fox jumps over the lazy dog — line 6
+  7 007  the quick brown fox jumps over the lazy dog — line 7
+  8 008  the quick brown fox jumps over the lazy dog — line 8
+  9 009  the quick brown fox jumps over the lazy dog — line 9
+ 10 010  the quick brown fox jumps over the lazy dog — line 10
+ 11 011  the quick brown fox jumps over the lazy dog — line 11
+ 12 012  the quick brown fox jumps over the lazy dog — line 12
+ 13 013  the quick brown fox jumps over the lazy dog — line 13
+ 14 014  the quick brown fox jumps over the lazy dog — line 14
+ 15 015  the quick brown fox jumps over the lazy dog — line 15
+ 16 016  the quick brown fox jumps over the lazy dog — line 16
+ 17 017  the quick brown fox jumps over the lazy dog — line 17
+ 18 018  the quick brown fox jumps over the lazy dog — line 18
+ 19 019  the quick brown fox jumps over the lazy dog — line 19
+ 20 020  the quick brown fox jumps over the lazy dog — line 20
+ 21 021  the quick brown fox jumps over the lazy dog — line 21
+ 22 022  the quick brown fox jumps over the lazy dog — line 22
+ 23 023  the quick brown fox jumps over the lazy dog — line 23
+:set number

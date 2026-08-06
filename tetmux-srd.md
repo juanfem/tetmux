@@ -574,7 +574,10 @@ tmux's prefix.
 Exact, testable commitments. Violations produce visible corruption under tmux.
 
 - **T5.1** `TERM` advertised to panes: `xterm-256color`; `tmux -CC` invoked with `-2 -u`.
-- **T5.2** Truecolor (24-bit SGR) supported end to end.
+- **T5.2** Truecolor (24-bit SGR) supported end to end. *(Asserted on both paths a pane's bytes
+  arrive by — `%output`, where tmux's octal escaping is what turns `\033` back into an introducer,
+  and `capture-pane -e`'s raw result lines, which is how a reattached pane is repainted. On the
+  cell's colour, so a downsample to the 256-colour palette fails rather than looking plausible.)*
 - **T5.3** SGR-1006 mouse reporting forwarded correctly so mouse-driven TUIs work inside panes.
 - **T5.4** Bracketed paste honoured.
 - **T5.5** OSC 8 hyperlinks rendered and clickable — and plain-text URLs too, via the emulator's
@@ -589,8 +592,9 @@ Exact, testable commitments. Violations produce visible corruption under tmux.
 - **T5.7** Correct Unicode 15+ width and grapheme cluster handling, including emoji ZWJ sequences
   and CJK. Under control mode a desynchronised grid corrupts pane geometry rather than merely
   looking wrong. *(Delegated to SwiftTerm; pinned by the §8 width corpus — real-byte
-  CJK/combining/ZWJ fixtures replayed against the grid. §8's program-level half is still open —
-  `TODO.md`.)*
+  CJK/combining/ZWJ fixtures replayed against the grid — and by the program-level half beside it,
+  where `vim`, `less`, a timed repaint and a Powerline prompt are replayed and compared cell for
+  cell with tmux's own rendering of the same bytes.)*
 - **T5.8** Font ligatures off by default, behind a setting.
 
 ---
@@ -706,15 +710,27 @@ sentence to put in front of somebody.
   children concurrently (the fork-safety regression fails as a hang). The password path runs end
   to end against a fake-ssh script that prompts on a pty and then execs tmux, so
   detect → publish → answer → handshake is exercised without a password-accepting host.
-- **Chaos tests** *(three of four built)*: killing the channel mid-stream and `SIGSTOP`ping the
-  server run in the integration suite; severing the ControlMaster socket runs opt-in behind
-  `TETMUX_SSH_HOST`. Sleep/wake is still open (`TODO.md`). Each must leave the app in a defined
+- **Chaos tests** *(built)*: killing the channel mid-stream and `SIGSTOP`ping the server run in the
+  integration suite; severing the ControlMaster socket runs opt-in behind `TETMUX_SSH_HOST`; and
+  sleep/wake is tested at its seam — a test cannot suspend the machine, so the link is killed while
+  the host is "asleep", the backoff is allowed to park a retry far enough out to be told apart from
+  a wake, and `probeAllConnections()` is called. What that asserts is **promptness**, not recovery:
+  a dropped link comes back on its own, so a wake test that only asserted reconnection would pass
+  with the wake path deleted. `NSWorkspace.didWakeNotification` itself is AppKit's and is wired up
+  in `AppModel`; it has no seam and is not covered. Each scenario must leave the app in a defined
   state and recover.
 - **Geometry regression suite** *(built)*: layout strings with expected trees, and a seeded
   50-resize storm asserting convergence on tmux's final layout.
-- **Rendering acceptance** *(half built)*: the CJK/emoji width corpus exists and is what makes
-  T5.7 asserted rather than assumed; `vim`, `htop`, `less`, and a Powerline prompt against a
-  reference terminal are still open (`TODO.md`).
+- **Rendering acceptance** *(built)*: the CJK/emoji width corpus makes T5.7 asserted rather than
+  assumed, and `vim`, `htop`, `less` and a Powerline prompt are replayed from recorded byte streams
+  and checked against a reference terminal's grid. **The reference terminal is
+  tmux's own emulator**, deliberately: what the app depends on is not correctness against some third
+  terminal but that these two build the same grid from the same bytes, since it asks tmux for a
+  column count and then renders the layout tmux computes from the answer. Both halves come from one
+  recorded run of one pane (`Scripts/capture-programs.py`), so the stream and the grid describe the
+  same instant. `top` is recorded beside `htop`, since `htop` is not on a Mac by default and the
+  timed-repaint case should still be coverable without it; both are restricted to a single process,
+  so a fixture is a record of a program rather than of one desktop.
 - **Latency and throughput measurement** *(amended)*: local, scripted, reproducible — not CI.
   Assert P6.1 and P6.3 with a harness a human runs on real hardware and records, the same
   provenance model as the fixture matrix.

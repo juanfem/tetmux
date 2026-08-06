@@ -1399,6 +1399,134 @@ final class SessionIntegrationTests: XCTestCase {
         return process.terminationStatus == 0
     }
 
+    /// §8's fourth chaos scenario: the lid closes, the link dies where nobody can see it, and the
+    /// lid opens again.
+    ///
+    /// A test cannot suspend the machine, so what is driven is the seam a wake actually runs
+    /// through. `NSWorkspace.didWakeNotification` is AppKit's and is wired up in `AppModel`
+    /// (`NetworkStateMonitor`); everything below it — cancel the pending backoff, clear the attempt
+    /// count, connect now — is `SessionService.probeAllConnections`, and that is the half with the
+    /// behaviour in it.
+    ///
+    /// **The property is promptness, not eventual recovery**, which is why this test goes to the
+    /// trouble of letting the backoff climb before it does anything. A dropped link comes back on
+    /// its own — `testAChannelKilledMidStreamReconnectsAndRepaints` is that test — so a wake test
+    /// that merely asserts reconnection would pass with the wake path deleted. F4.18 exists because
+    /// a machine that has been shut for an hour is sitting on a retry scheduled up to a minute out,
+    /// and waiting that minute after the screen comes back is the entire thing a user notices. So
+    /// the host is driven to a retry far enough away to be told apart from one, and the assertion is
+    /// that it is back **before that retry could have fired**.
+    ///
+    /// The arithmetic behind the bound: the backoff is `2^(attempt-1)` seconds ±20%, so the retry
+    /// pending at attempt 5 is at least 12.8 s away from the moment that state was set, and the poll
+    /// below sees it within 100 ms of that. Ten seconds is therefore a reconnect the scheduled task
+    /// cannot account for.
+    ///
+    /// "Asleep" is a flag file the stand-in ssh checks: while it is there nothing can connect, which
+    /// is what makes the attempts climb, and removing it is the lid opening.
+    func testWakingUpReconnectsWithoutWaitingOutTheBackoff() async throws {
+        let directory = URL(fileURLWithPath: "/tmp/tetmux-wake-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("pid")
+        let asleep = directory.appendingPathComponent("asleep")
+        let script = directory.appendingPathComponent("ssh.sh")
+        try """
+        #!/bin/sh
+        if [ -f \(asleep.path) ]; then
+          echo 'ssh: connect to host sleeper port 22: Network is unreachable' >&2
+          exit 255
+        fi
+        echo $$ > \(pidFile.path)
+        \(matrixPathExport)exec /bin/sh -c "$1"
+        """.write(to: script, atomically: true, encoding: .utf8)
+
+        let service = SessionService()
+        await service.addHost(HostConfig(
+            id: "sleeper", name: "sleeper", isLocal: false, customCommand: "/bin/sh \(script.path)"
+        ))
+        try await service.connectHost(hostId: "sleeper", targetSession: sessionName)
+
+        let host = try await waitForHost(service, id: "sleeper", timeout: 20) { host in
+            host.connectionState == .connected && host.activeSession?.activeWindow?.layoutTree != nil
+        }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+        let attached = try XCTUnwrap(host.activeSession?.name)
+
+        // Subscribed once, before the machine goes to sleep, and never again — a real view
+        // subscribes when its `NSView` is made and the pane ids survive on the server, so this is
+        // the subscription that has to still deliver on the other side.
+        let stream = await service.subscribeToPane(hostId: "sleeper", paneId: paneId).stream
+        let painted = Collector()
+        let reader = Task { for await chunk in stream { await painted.append(chunk) } }
+        defer { reader.cancel() }
+
+        try await Task.sleep(for: .milliseconds(500))
+        await service.sendKeys(hostId: "sleeper", paneId: paneId, text: "echo before-the-sleep\r")
+        let liveBefore = try await waitFor(seconds: 10) { await painted.text.contains("before-the-sleep") }
+        XCTAssertTrue(liveBefore, "the pane was not live before the machine slept")
+
+        // Asleep: the link dies and nothing can be reached while it is out.
+        FileManager.default.createFile(atPath: asleep.path, contents: nil)
+        let pidText = try String(contentsOf: pidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let pid = try XCTUnwrap(pid_t(pidText), "the stand-in ssh never recorded its pid")
+        XCTAssertEqual(kill(pid, SIGKILL), 0, "could not kill the channel's process")
+
+        // The drop is observed before anything is concluded from a later state — `SIGKILL` returns
+        // before the pty EOF propagates, so `.connected` is still there to be matched.
+        let noticed = try await waitFor(seconds: 30) {
+            await service.getHost("sleeper")?.connectionState != .connected
+        }
+        XCTAssertTrue(noticed, "the dead channel was never noticed")
+
+        // The backoff climbs while the machine is out, as it does on a train. Attempt 5 is the first
+        // whose pending retry is far enough away to be distinguishable from a wake.
+        let parked = try await waitFor(seconds: 90) {
+            guard case .reconnecting(let attempt, _)? =
+                await service.getHost("sleeper")?.connectionState else { return false }
+            return attempt >= 5
+        }
+        XCTAssertTrue(parked, "the backoff never parked far enough out for this test to mean anything")
+
+        // The lid opens.
+        try FileManager.default.removeItem(at: asleep)
+        await service.probeAllConnections()
+
+        let awake = try await waitFor(seconds: 10) {
+            await service.getHost("sleeper")?.connectionState == .connected
+        }
+        XCTAssertTrue(
+            awake,
+            "the host did not come back within ten seconds of the wake — the pending retry was "
+                + "still at least twelve seconds out, so this is the backoff being waited out rather "
+                + "than the probe short-circuiting it"
+        )
+
+        // …to the session it was on. F4.18 is a reconnect and a reconnect attaches (F4.15); it must
+        // not have created something new under the remembered name while the server was unreachable.
+        let after = await service.getHost("sleeper")
+        XCTAssertEqual(
+            after?.activeSession?.name, attached,
+            "the wake landed somewhere else, or invented a session"
+        )
+
+        // …and the pane paints and works again through the subscription made before the sleep.
+        await painted.mark()
+        try await Task.sleep(for: .milliseconds(800))
+        await service.sendKeys(hostId: "sleeper", paneId: paneId, text: "echo after-the-wake\r")
+        let liveAfter = try await waitFor(seconds: 25) {
+            await painted.textSinceMark.contains("after-the-wake")
+        }
+        let tail = await painted.textSinceMark
+        XCTAssertTrue(
+            liveAfter,
+            "the pane never moved again after the wake. Since it: \(tail.debugDescription)"
+        )
+
+        await service.disconnectHost(hostId: "sleeper")
+    }
+
     // MARK: - Geometry under load (§8)
 
     /// §8's resize storm: fifty rapid, contradictory size requests, and the model has to *converge*

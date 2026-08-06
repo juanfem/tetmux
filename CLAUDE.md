@@ -41,6 +41,9 @@ Scripts/measure-latency.sh             # P6.1 keypress→glyph p95, against a pr
 Scripts/measure-throughput.sh          # P6.3 %output parse rate, release build
 Scripts/measure-idle.md                # P6.6/P6.7 by hand — the procedure, not a program
 
+Scripts/capture-programs.py            # §8's program corpus: vim/htop/less/top/powerline, and the
+                                       # grid tmux renders from each. By hand, never in CI.
+
 Scripts/build-tmux-matrix.sh           # tmux 3.0/3.2a/3.3a/3.4/3.5 from pinned tarballs
 Scripts/test-matrix.sh                 # the integration suite against every one of them
 Scripts/test-matrix.sh 3.0 --filter testDraggingATabReordersTheSession
@@ -1337,6 +1340,17 @@ keyboard. That cost an evening and produced a TODO entry about a bug that did no
 keystroke is correct behaviour, incidentally, and consistent with the outbox's age limit: keys typed
 at a host with no channel are not worth replaying.
 
+**…and a recovery a test would get anyway is not evidence that the thing under test did it.** The
+sleep/wake scenario is the case: a dropped link reconnects on its own, so a wake test that killed
+the channel, called `probeAllConnections()` and asserted reconnection would pass with the entire
+wake path deleted. What F4.18 actually buys is *promptness* — a machine shut for an hour is sitting
+on a retry scheduled up to a minute out — so the test drives the backoff to a retry far enough away
+to be told apart from a wake (attempt 5, whose delay is `2^4` s ±20% and therefore at least 12.8 s
+out) and then asserts the host is back inside ten seconds. "Asleep" is a flag file the stand-in ssh
+checks, which is what makes the attempts climb; removing it is the lid opening. Any test of a
+mechanism that overtakes an existing one has to be written this way, or it asserts the mechanism it
+is overtaking.
+
 **A test's deadline has to be inside the work, not wrapped around it.** Pane output is read by
 `collect(_:until:seconds:)`, which starts reading before the keystrokes that produce the output and
 stops on the marker *or* on a deadline of its own. It replaced a `withTimeout` helper that raced an
@@ -1437,10 +1451,37 @@ The password path is covered end to end without a password-accepting host: `writ
 stands in for ssh — it prompts on the pty, reads one line, and only then execs the tmux command it was
 handed, so the real detect → publish → answer → handshake sequence runs against local tmux.
 
-Everything is captured from one tmux version, so the version-conditional paths self-skip rather than
-run on the versions they exist for; `TerminalGeometryTests` covers the scroller gutter and the
-font-derived cell round trip but is not the geometry suite §8 asks for. Both gaps are in `TODO.md`
-rather than fixed.
+**§8's program corpus uses tmux as the reference terminal, and that is the claim rather than a
+convenience.** `ProgramRenderingTests` replays a recorded `%output` stream for `vim`, `htop`, `less`, `top` and a
+Powerline prompt into a `Terminal` and compares the grid cell for cell with
+`capture-pane -p` on the pane it was recorded from. A third-party emulator would answer a more
+general question than anything here depends on: tetmux asks tmux for `frame.width / cellWidth`
+columns and renders the layout tmux computes from that answer, so the property that matters is that
+*these two* build the same grid from the same bytes. Both halves come out of one run of one pane
+(`Scripts/capture-programs.py`), which is what makes them describe the same instant.
+
+Three things about it, each of which produced a failure that reads like an emulator disagreement and
+is not one. **The reference must be frozen before it is read**: a program that repaints on a timer
+writes more frames while `capture-pane`'s answer is being collected, so its process group is
+`SIGSTOP`ped — the *group*, because a pane command that is a shell with a job in it does not `exec`
+and `#{pane_pid}` then names the shell rather than the program. **And the stream is truncated at the
+capture block's `%begin`**, because tmux writes a pane's `%output` and a command's `%begin` into one
+client buffer in the order it dealt with them: everything before that line is in the grid being
+answered with and everything after it is not. Freezing alone is not enough, and truncating alone
+would be if the freeze failed silently, which is how the first two recordings passed inspection.
+**A `\0` cell means two different things**: width 0 is a wide character's continuation and
+contributes nothing, while width 1 is a cell nothing was ever written to and is a *space*. Treating
+them alike collapses every run of untouched cells, which showed up as `top`'s header losing the gaps
+between its columns while every other row matched exactly.
+
+A program corpus is also a recording of a *program*, so each grid carries the version that produced
+it in a header, and the recorder keeps the machine out of the fixture the same way
+`capture-fixtures.py` does: `vim -u NONE`, a fixed sample file at a fixed path, and both process
+viewers restricted to one process — `top` to a `sleep` this script started, `htop` to pid 1. Plain
+`top` committed a corpus file naming every application the user had open.
+
+`TerminalGeometryTests` covers the scroller gutter and the font-derived cell round trip but is not
+the geometry suite §8 asks for; the seeded resize storm in `SessionIntegrationTests` is.
 
 ## State on disk
 
