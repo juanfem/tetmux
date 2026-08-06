@@ -1250,6 +1250,155 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// §8's third chaos scenario: the `ControlMaster` socket removed from under a live session.
+    ///
+    /// Needs a *reachable ssh host*, because a `ControlMaster` only exists for a real ssh connection
+    /// — there is nothing to multiplex on a local channel, which spawns tmux directly. So it is
+    /// opt-in: set `TETMUX_SSH_HOST` to `user@host` or `user@host:port` and it runs; leave it unset
+    /// and it skips, which is what CI and anyone else's machine does. A skip is as green as a pass in
+    /// general, and here that is the honest answer: the resource is genuinely absent, exactly like
+    /// the tmux-absent skip in `setUp`.
+    ///
+    /// Two halves, and the first is the one worth having. **The live channel must not care**: ssh
+    /// holds an open fd, and the path in the filesystem is only how a *later* connection finds it —
+    /// so deleting the socket has to be survivable rather than fatal. Then the next channel has to
+    /// rebuild it rather than failing because the master it expected has gone.
+    ///
+    /// Nothing of the user's is touched: only sockets that appear during the test are removed, and
+    /// the remote session is uniquely named and killed on the way out.
+    func testDroppingTheControlMasterSocketIsSurvivable() async throws {
+        // `XCTSkip`, not `XCTUnwrap`: an unset variable is the ordinary case — on CI, and on any
+        // machine but the one with the host — and `XCTUnwrap` would make it a *failure*. That is the
+        // difference between a suite that is honest about what it did not run and one that is red
+        // for everybody.
+        guard let destination = ProcessInfo.processInfo.environment["TETMUX_SSH_HOST"] else {
+            throw XCTSkip("set TETMUX_SSH_HOST=user@host[:port] to run the ControlMaster scenario")
+        }
+        let (user, hostname, port) = try parseSshDestination(destination)
+        try XCTSkipUnless(
+            sshIsReachable(user: user, hostname: hostname, port: port),
+            "\(destination) is not reachable without a password; skipping the ControlMaster scenario"
+        )
+
+        let cacheDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+            .first!.appendingPathComponent("tetmux", isDirectory: true)
+        func sockets() -> Set<String> {
+            Set((try? FileManager.default.contentsOfDirectory(atPath: cacheDirectory.path))?
+                .filter { $0.hasPrefix("cm-") } ?? [])
+        }
+        // Only what this test creates is ever removed — the developer may have live sessions of
+        // their own against other hosts, and their masters are in the same directory.
+        let preexisting = sockets()
+
+        let remoteSession = "tetmux-chaos-\(UUID().uuidString.prefix(8))"
+        defer {
+            // The remote session, and then the master this test left running. `ControlPersist` keeps
+            // one alive after the last channel closes, which is right for the app and untidy for a
+            // test: it is a live connection to somebody's machine that nothing else will close.
+            _ = runSsh(user: user, hostname: hostname, port: port, "tmux kill-session -t \(remoteSession) 2>/dev/null || true")
+            closeControlMaster(user: user, hostname: hostname, port: port)
+        }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(
+            id: "remote", name: hostname, hostname: hostname, user: user, port: port, isLocal: false
+        ))
+        try await service.connectHost(hostId: "remote", targetSession: remoteSession)
+
+        let host = try await waitForHost(service, id: "remote", timeout: 45) { host in
+            host.connectionState == .connected && host.activeSession?.activeWindow?.layoutTree != nil
+        }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        let created = sockets().subtracting(preexisting)
+        XCTAssertFalse(created.isEmpty, "no ControlMaster socket appeared; the scenario cannot run")
+
+        // The socket goes, while the session is live.
+        for name in created {
+            try FileManager.default.removeItem(at: cacheDirectory.appendingPathComponent(name))
+        }
+        XCTAssertTrue(sockets().intersection(created).isEmpty, "the socket was not removed")
+
+        // Half one: the live channel is unaffected. ssh is holding an fd; the path was only ever how
+        // a later connection finds it.
+        let stream = await service.subscribeToPane(hostId: "remote", paneId: paneId).stream
+        let survived = collect(stream, until: "socket-is-gone", seconds: 25)
+        try await Task.sleep(for: .milliseconds(700))
+        await service.sendKeys(hostId: "remote", paneId: paneId, text: "echo socket-is-gone\r")
+        let text = await survived.value
+        XCTAssertTrue(
+            text.contains("socket-is-gone"),
+            "removing the socket killed a connection that was already open: \(text.debugDescription)"
+        )
+
+        // Half two: the next channel rebuilds it rather than failing on the master that has gone.
+        await service.disconnectHost(hostId: "remote")
+        try await service.connectHost(hostId: "remote", targetSession: remoteSession)
+        let reconnected = try await waitForHost(service, id: "remote", timeout: 45) { host in
+            host.connectionState == .connected && host.activeSession?.name == remoteSession
+        }
+        XCTAssertEqual(reconnected.activeSession?.name, remoteSession)
+        XCTAssertFalse(
+            sockets().subtracting(preexisting).isEmpty,
+            "the next channel did not rebuild a ControlMaster socket"
+        )
+
+        await service.disconnectHost(hostId: "remote")
+    }
+
+    /// `user@host` or `user@host:port`.
+    private func parseSshDestination(_ text: String) throws -> (user: String, hostname: String, port: Int?) {
+        let parts = text.split(separator: "@", maxSplits: 1)
+        guard parts.count == 2 else { throw XCTSkip("TETMUX_SSH_HOST must be user@host[:port]") }
+        let hostAndPort = parts[1].split(separator: ":", maxSplits: 1)
+        return (
+            String(parts[0]),
+            String(hostAndPort[0]),
+            hostAndPort.count > 1 ? Int(hostAndPort[1]) : nil
+        )
+    }
+
+    /// Whether ssh can get in without asking anybody anything. `BatchMode` is the whole question: a
+    /// host that would prompt cannot be used by a suite nobody is watching.
+    private func sshIsReachable(user: String, hostname: String, port: Int?) -> Bool {
+        runSsh(user: user, hostname: hostname, port: port, "command -v tmux >/dev/null")
+    }
+
+    /// Asks ssh to close the multiplexing master it is holding for this destination, if any.
+    private func closeControlMaster(user: String, hostname: String, port: Int?) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        // …at *tetmux's* control path, not ssh's default. `-O exit` finds a master by path, so
+        // without this it looks somewhere the app never wrote and silently exits zero, leaving the
+        // master running — which is exactly what happened the first time.
+        let controlPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+            .first!.appendingPathComponent("tetmux", isDirectory: true)
+            .appendingPathComponent("cm-%C").path
+        var arguments = ["-O", "exit", "-o", "ControlPath=\(controlPath)"]
+        if let port { arguments += ["-p", String(port)] }
+        arguments += ["\(user)@\(hostname)"]
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+    }
+
+    @discardableResult
+    private func runSsh(user: String, hostname: String, port: Int?, _ command: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        var arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+        if let port { arguments += ["-p", String(port)] }
+        arguments += ["\(user)@\(hostname)", command]
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
     // MARK: - Geometry under load (§8)
 
     /// §8's resize storm: fifty rapid, contradictory size requests, and the model has to *converge*

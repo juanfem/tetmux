@@ -30,6 +30,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter testLayoutChangeSeparatesItsThreeFields
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter SessionIntegrationTests
 
+# §8's ControlMaster chaos scenario needs a real ssh host, and skips without one.
+TETMUX_SSH_HOST=user@host:port swift test --filter testDroppingTheControlMasterSocket
+
 Scripts/package-dmg.sh                 # .app bundle inside a .dmg, in dist/
 Scripts/package-dmg.sh --skip-build    # …from whatever is already in .build/release
 Scripts/package-dmg.sh --version 1.2.3 --output dist
@@ -1187,6 +1190,16 @@ operations: rebinding a chord persists `settings.json`, and selecting a session 
 window schedules a `workspace.json` save. A default-constructed one in a test therefore writes the
 *user's* files, and did — running the app after the suite found `testOnlyEditedBindingsAreStored`'s
 keymap in it. Hence `AppModel(directory:)` and the per-test temporary directory in `setUpWithError`.
+
+**A test that needs a resource the machine may not have skips; it does not fail.** `setUp` skips the
+whole suite when tmux is absent, and the `ControlMaster` scenario skips unless `TETMUX_SSH_HOST` names
+a host ssh can reach **without a password** (`BatchMode=yes` is the check — a host that would prompt
+is no use to a suite nobody is watching). Written with `XCTUnwrap` instead of `XCTSkip` it goes red on
+every machine but one, which is how it was written the first time. A test against somebody's real
+machine also has to leave nothing behind: only sockets that appeared during the run are removed, the
+remote session is uniquely named and killed, and the `ControlPersist` master is closed with
+`-O exit` **at tetmux's own control path** — ssh finds a master by path, so the default one exits zero
+having done nothing and leaves a live connection open.
 
 **Killing a channel is asynchronous, so a test has to watch the state *leave* `.connected` before
 waiting for it to come back.** `SIGKILL` returns the moment the signal is delivered; the pty EOF that

@@ -8,7 +8,7 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**2 features, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
+**1 feature, 1 blocked, 2 parked.** The six small items this file opened with, copy mode, and the
 integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on 2026-08-06; what
 they turned into is recorded in `CLAUDE.md`, not here.
 
@@ -17,17 +17,6 @@ References point into current `main`. Line numbers drift; the symbol names besid
 ---
 
 ## Features, sized like features
-
-- [ ] **Chaos scenario 3: the `ControlMaster` socket dropped mid-session.** Scenarios 1 and 2 are
-  done and green — `SIGKILL` on the channel's process, and `SIGSTOP` on the tmux server. This one
-  needs a *reachable ssh host*, since a `ControlMaster` only exists for a real ssh connection, so it
-  cannot run on the machine alone the way the other two can.
-  *Do:* against a host the developer can reach, delete `~/Library/Caches/tetmux/cm-*` mid-session and
-  assert the next channel rebuilds it rather than failing — and that the *current* channel is
-  unaffected, since it holds an open fd rather than a path. Best written as a documented manual pass
-  beside the P6 harness, for the same reason: it needs a machine the suite cannot assume.
-  Sleep/wake stays manual too — `pmset sleepnow` on a test box is not a CI citizen.
-  `Tests/tetmuxTests/SessionIntegrationTests.swift`
 
 - [ ] **The P6 measurement harness.** No latency, throughput, CPU, or memory instrumentation
   exists — the P6 references in the source are design rationale. Verification is local and
