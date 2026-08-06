@@ -116,10 +116,46 @@ beside the rate: a parser that is fast because it is dropping the payload measur
 
 ---
 
-## P6.6 and P6.7 — idle cost, memory, cold launch
+## P6.7 — cold launch to interactive
 
-**Not yet measured.** `Scripts/measure-idle.md` is the procedure — both requirements are claims
-about 20 panes across 4 hosts, which is an arrangement that has to be built by hand on machines
-somebody can actually reach, so there is nothing to record here until that has been done on real
-hardware. The procedure names the two places where the obvious measurement is the wrong one
-(`ps` RSS instead of `phys_footprint`, and average CPU instead of wakeups).
+**Floor:** ≤ 400 ms.
+**Script:** `Scripts/measure-launch.sh` (Instruments' App Launch template; the number is the end of
+the **Initial Frame Rendering** phase, which is what "to interactive" means here — the local host
+connecting and a pane filling with a shell prompt are several round trips further on).
+
+| Date | Machine | Target | Mode | Runs | min | **median** | max |
+|---|---|---|---|---|---|---|---|
+| 2026-08-06 | Apple M3, macOS 26.5.1 | `.build/release/tetmux` | warm | 2 | 689.6 ms | **710.8 ms** | 732.0 ms |
+
+**Missed by 1.8×, and that is the favourable case.** Warm means the frameworks were already resident
+and dyld had a launch closure; a genuinely cold launch is slower. The bare binary is also the faster
+target — the `.app` goes through a different dyld path with a Gatekeeper assessment in front of it.
+
+Where it goes, per run:
+
+| Phase | run 1 | run 2 |
+|---|---|---|
+| Initializing — Process Creation | 272.90 ms | 261.37 ms |
+| Launching — AppKit Scene Creation | 237.79 ms | 276.78 ms |
+| Launching — applicationDidFinishLaunching() | 49.19 ms | 56.35 ms |
+| Launching — applicationWillFinishLaunching() | 43.96 ms | 38.62 ms |
+| Launching — Initial Frame Rendering | 30.99 ms | 30.33 ms |
+| Initializing — System Interface Initialization | 18.90 ms | 16.19 ms |
+| remainder (runtime init, AppKit init, first scene) | ~3.8 ms | ~3.6 ms |
+
+Two terms are three quarters of it and neither is in tetmux's own code: **process creation** — dyld
+mapping the framework graph, which includes SwiftTerm, AppKit and Metal — and **AppKit Scene
+Creation**, which is SwiftUI building the scene. Everything the application itself does at launch
+(`applicationWillFinishLaunching` through `didFinishLaunching`, which is where `bootstrap` reads the
+workspace and connects the local host) is under 100 ms combined.
+
+One caveat that cuts the right way for reading this: the App Launch template samples context
+switches, so tracing is inside every number above. An untraced launch is faster than 711 ms. It is
+not 1.8× faster.
+
+## P6.6 and P6.7 — idle cost and memory
+
+**Not yet measured.** `Scripts/measure-idle.md` is the procedure — both are claims about 20 panes
+across 4 hosts, which has to be built on machines somebody can actually reach. The procedure names
+the two places where the obvious measurement is the wrong one (`ps` RSS instead of `phys_footprint`,
+and average CPU instead of wakeups).
