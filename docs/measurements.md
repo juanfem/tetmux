@@ -126,32 +126,36 @@ connecting and a pane filling with a shell prompt are several round trips furthe
 | Date | Machine | Target | Mode | Runs | min | **median** | max |
 |---|---|---|---|---|---|---|---|
 | 2026-08-06 | Apple M3, macOS 26.5.1 | `.build/release/tetmux` | warm | 2 | 689.6 ms | **710.8 ms** | 732.0 ms |
+| 2026-08-06 | Apple M3, macOS 26.5.1 | `.build/release/tetmux` | purged | 5 | 877.8 ms | **985.3 ms** | 1027.0 ms |
 
-**Missed by 1.8×, and that is the favourable case.** Warm means the frameworks were already resident
-and dyld had a launch closure; a genuinely cold launch is slower. The bare binary is also the faster
-target — the `.app` goes through a different dyld path with a Gatekeeper assessment in front of it.
+**Missed by 1.8× warm and 2.5× purged.** Warm means the frameworks were resident and dyld had a
+launch closure for the binary; purged is after `sudo purge` has emptied the filesystem cache, which
+is most of what "cold" means but leaves dyld's closure cache alone — so a true first-launch-after-
+reboot is at or beyond the purged figure. The bare binary is also the faster target: the `.app`
+launches through a different dyld path with a Gatekeeper assessment in front of it.
 
-Where it goes, per run:
+Where it goes, and the phase that moved is not the expected one:
 
-| Phase | run 1 | run 2 |
+| Phase | warm (median of 2) | purged (median of 5) |
 |---|---|---|
-| Initializing — Process Creation | 272.90 ms | 261.37 ms |
-| Launching — AppKit Scene Creation | 237.79 ms | 276.78 ms |
-| Launching — applicationDidFinishLaunching() | 49.19 ms | 56.35 ms |
-| Launching — applicationWillFinishLaunching() | 43.96 ms | 38.62 ms |
-| Launching — Initial Frame Rendering | 30.99 ms | 30.33 ms |
-| Initializing — System Interface Initialization | 18.90 ms | 16.19 ms |
-| remainder (runtime init, AppKit init, first scene) | ~3.8 ms | ~3.6 ms |
+| Launching — AppKit Scene Creation | 257 ms | **470.7 ms** |
+| Initializing — Process Creation | 267 ms | 280.9 ms |
+| Launching — applicationDidFinishLaunching() | 53 ms | 47.9 ms |
+| Launching — applicationWillFinishLaunching() | 41 ms | 55.4 ms |
+| Launching — Initial Frame Rendering | 31 ms | 28.5 ms |
+| Initializing — System Interface Initialization | 17 ms | 17.6 ms |
 
-Two terms are three quarters of it and neither is in tetmux's own code: **process creation** — dyld
-mapping the framework graph, which includes SwiftTerm, AppKit and Metal — and **AppKit Scene
-Creation**, which is SwiftUI building the scene. Everything the application itself does at launch
-(`applicationWillFinishLaunching` through `didFinishLaunching`, which is where `bootstrap` reads the
-workspace and connects the local host) is under 100 ms combined.
+**An empty page cache costs AppKit Scene Creation 210 ms and process creation 14.** That is
+backwards from the obvious expectation — dyld mapping a framework graph is the part everyone assumes
+a cold cache punishes — and it says the launch is not dominated by loading code. Something in scene
+creation is reading from disk on first use. Which is worth knowing before anybody optimises: the
+whole of what tetmux's own code does at launch (`applicationWillFinishLaunching` through
+`didFinishLaunching`, where `bootstrap` reads the workspace and connects the local host) is about
+100 ms warm and does not grow when the cache is emptied.
 
-One caveat that cuts the right way for reading this: the App Launch template samples context
-switches, so tracing is inside every number above. An untraced launch is faster than 711 ms. It is
-not 1.8× faster.
+One caveat that cuts the right way for reading all of this: the App Launch template samples context
+switches, so tracing is inside every number above. An untraced launch is faster. It is not 2.5×
+faster.
 
 ## P6.6 and P6.7 — idle cost and memory
 

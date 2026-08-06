@@ -8,7 +8,7 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**2 features, 3 tests owed, 1 blocked, 2 parked.** The six small items this file opened with, copy
+**3 features, 3 tests owed, 1 blocked, 2 parked.** The six small items this file opened with, copy
 mode, and the integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on
 2026-08-06; what they turned into is recorded in `CLAUDE.md`, not here. The five entries added on
 2026-08-06 came out of an adherence review of the tree against SRD v2.1 — a review that mostly
@@ -20,8 +20,9 @@ The launcher's half of that batch (F4.25/F4.26) closed the same day.
 and `docs/measurements.md` holds the numbers. P6.3 passed with 6.5× of room. P6.1 failed by 2× —
 p95 24.43 ms against 12 — which turned out to be an 8 ms timer of our own in the keystroke
 coalescer; flushing on the leading edge instead brought it to 11.54 ms and closed the entry that
-finding had opened. What is left of P6 is P6.6/P6.7, which need an arrangement of real machines that
-no script can build.
+finding had opened. P6.7's launch half then missed by 2.5× and got an entry of its own. What is left
+unmeasured is P6.6 and P6.7's memory half, which need an arrangement of real machines that no script
+can build.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
@@ -29,15 +30,37 @@ References point into current `main`. Line numbers drift; the symbol names besid
 
 ## Features, sized like features
 
-- [ ] **P6.6 and P6.7 have a procedure and no numbers.** `Scripts/measure-idle.md` is written —
-  idle CPU on battery, wakeups under `powermetrics`, `footprint` for resident memory, the App
-  Launch template for cold launch, and the traps in each. Nobody has run it, because both
-  requirements are claims about 20 panes across 4 hosts and that arrangement has to be built by
-  hand on machines somebody can reach.
-  *Do:* build the arrangement, follow the procedure, add the rows to `docs/measurements.md`. If
-  the four hosts are not four real machines, record what they were — a loopback ssh leg has no
-  network stack worth the name, and P6.6 is partly a claim about what an idle ssh connection
-  costs.
+- [ ] **P6.7's launch half misses by 2.5×, and the cold penalty lands where nobody would look.**
+  Measured 2026-08-06 on an M3 (`docs/measurements.md`): median **710.8 ms** warm and **985.3 ms**
+  after `sudo purge`, against a 400 ms floor — on the bare binary, which is the *faster* target,
+  and under tracing, which inflates but not by a factor. The phase breakdown is the useful part.
+  Emptying the page cache costs **AppKit Scene Creation 210 ms** (257 → 471) and process creation
+  **14 ms** (267 → 281). That is backwards from the obvious expectation: the launch is not
+  dominated by dyld mapping a framework graph, it is dominated by something in SwiftUI's scene
+  creation reading from disk on first use. Everything tetmux's own code does at launch —
+  `applicationWillFinishLaunching` through `didFinishLaunching`, where `bootstrap` reads the
+  workspace and connects the local host — is about 100 ms and does **not** grow when the cache is
+  emptied, so it is not the place to start.
+  *Ruled out already:* SwiftTerm ships `Shaders.metal` as source rather than a compiled
+  `.metallib` (see the packaging note in `CLAUDE.md`), and `makeLibrary(source:)` would be exactly
+  the kind of disk-read-then-compile that fits this shape — but tetmux never enables SwiftTerm's
+  Metal renderer, so it is never on the launch path. Do not chase it again.
+  *Do:* the traces `Scripts/measure-launch.sh` records already carry a time profile, so open one in
+  Instruments and read the samples inside the Scene Creation window rather than guessing. Then
+  re-measure with `--app` against a built bundle: an app bundle gets a dyld launch closure the bare
+  binary does not, so that number may be *better* and is in any case the one a user experiences.
+  `Scripts/measure-launch.sh`, `Sources/tetmuxUI/AppMain.swift`
+
+- [ ] **P6.6, and P6.7's memory half, have a procedure and no numbers.**
+  `Scripts/measure-idle.md` is written — idle CPU on battery, wakeups under `powermetrics`,
+  `footprint` for resident memory, and the traps in each. Nobody has run it, because both are
+  claims about 20 panes across 4 hosts and that arrangement has to be built by hand on machines
+  somebody can reach. The four are available and all real: local, `server.example.org:2222` (a WAN
+  leg), `vm.example.net` and `login.example.net`, each reachable without a password.
+  *Do:* build the arrangement, follow the procedure, add the rows to `docs/measurements.md`.
+  Record the tmux version per host — 3.7b, 3.5a, 3.2a, 3.2a — because the flow-control and
+  subscription policies differ by version and P6.6 is partly a claim about what an idle
+  subscription costs.
 
 - [ ] **P6.4's output half: the byte handoff is per-chunk, not per display frame.** The input
   direction complies — keystrokes coalesce into one `send-keys -H` per 8 ms flush, and
