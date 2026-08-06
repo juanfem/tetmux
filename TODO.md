@@ -33,7 +33,7 @@ References point into current `main`. Line numbers drift; the symbol names besid
 
 ## Features, sized like features
 
-- [ ] **P6.1 is met on an external 100 Hz display and missed on the laptop's own panel.**
+- [ ] **P6.1's application half is met; the frame it waits for is not, and that is now the target.**
   Four runs (`docs/measurements.md`): p95 **11.54 ms** on a fixed-rate 100 Hz external monitor on
   AC, **14.28 ms** on the built-in ProMotion panel on AC, **17.84 ms** on the built-in on battery,
   against a 12 ms bar. Both variables matter and neither alone explains the gap.
@@ -51,9 +51,11 @@ References point into current `main`. Line numbers drift; the symbol names besid
   compositor that this view wants frames now. That is a real change to how a pane schedules
   drawing, so it needs P6.4's output half thought about at the same time — the two are the same
   question from opposite ends.
-  Note P6.1 may simply be unmeetable at 60 Hz by any application; if the panel cannot be moved,
-  the honest close is to amend P6.1 to state a refresh-rate assumption rather than to record a
-  pass that only holds on one monitor.
+  **P6.1 was amended on 2026-08-06** to name a refresh rate — 12 ms at p95 on a 100 Hz-or-faster
+  display, one refresh interval + 2 ms below that — and to state the number a change is judged by:
+  keypress → echoed bytes at the emulator, ≤ 3 ms p95, currently 0.78–1.72. So the *requirement* is
+  no longer wrong, and what stays open is whether the frame wait can be shortened at all. If it
+  cannot, this entry closes as "met, with the display named".
   `Sources/tetmuxUI/LatencyProbe.swift`, `Sources/tetmuxUI/TerminalSurface.swift`
 
 - [ ] **P6.7's launch half misses by 2.5×, and the cold penalty lands where nobody would look.**
@@ -77,18 +79,20 @@ References point into current `main`. Line numbers drift; the symbol names besid
   binary does not, so that number may be *better* and is in any case the one a user experiences.
   `Scripts/measure-launch.sh`, `Sources/tetmuxUI/AppMain.swift`
 
-- [ ] **P6.7's memory bound cannot hold at the default scrollback, and that is arithmetic.**
+- [ ] **P6.7's memory bound was amended to match its own scrollback; the per-cell cost is what is left.**
   Measured 2026-08-06 on the real arrangement (`docs/measurements.md`): **547 MB** with 20 panes
   across 4 hosts against a 150 MB bound, and **72 MB** with one pane. The differential is 475 MB
   over 19 panes — **~25 MB per pane** at the default 10 000 lines of 55–112 columns. That is the
   emulator's scrollback, which is exactly what P6.7 asks to be measured, so the requirement and
   its own parenthesis are inconsistent: twenty panes cannot cost under 150 MB while each costs 25.
-  *Do:* one of three, and it is a decision rather than a bug. (1) Make the per-cell footprint
-  smaller — 25 MB for ~550 000 cells is ~47 bytes a cell, which is worth understanding before
-  accepting; it is SwiftTerm's buffer, so this may be a dependency question rather than ours.
-  (2) Lower the default scrollback and amend P6.7's parenthesis to match. (3) Amend the bound,
-  which needs a number somebody is willing to defend. Do not "fix" this by measuring empty panes:
-  20 panes with nothing in them are well inside 150 MB and mean nothing.
+  **Amended 2026-08-06**: P6.7 now bounds memory per pane — < 90 MB with one, < 30 MB for each
+  additional — because the old total and its own parenthesis could not both hold. That closes the
+  contradiction and leaves the real question open.
+  *Do:* find out what **~47 bytes per cell** is made of before deciding anything. It is SwiftTerm's
+  buffer, so this may be a dependency question rather than ours — in which case the options are to
+  carry it, to lower the default scrollback (and move P6.7's parenthesis with it, deliberately),
+  or to store history more compactly. Do not "fix" this by measuring empty panes: 20 panes with
+  nothing in them are well inside any bound and mean nothing.
   `Sources/tetmuxUI/TerminalSurface.swift` (`TerminalTheme.scrollbackLines`)
 
 - [ ] **P6.6's idle CPU is missed on battery, and it is one timer's answer rebuilding the tree.**

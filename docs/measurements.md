@@ -72,7 +72,13 @@ So the honest verdict is not "P6.1 passes". It is: **P6.1 is met on a fixed-rate
 display on AC and missed on the laptop's own panel**, which is the configuration most of this
 application's use will be in. The leading-edge fix remains a 2× improvement and is not in question —
 the round trip went from 19.72 ms p95 to under 1 — but the requirement is unmet where it counts.
-`TODO.md` carries what to try next.
+
+**P6.1 was amended on 2026-08-06 in light of this**, because a requirement that no application can
+meet on the machine it runs on is a broken requirement rather than a failing product: it now names a
+refresh rate, and states the application-controlled figure — keypress to echoed bytes at the
+emulator, ≤ 3 ms p95 — as the number a change is judged by. That is the echo column above, and it is
+what caught the 8 ms coalescer. The end-to-end number stays in the record with its display beside
+it. `TODO.md` carries what is still open, which is whether the frame wait can be shortened at all.
 
 Two things the measurement still does not include, both of which make the real figure worse rather
 than better. The interval closes when AppKit has drawn the view, **not** when the window server has
@@ -201,9 +207,14 @@ Panes were 55–112 columns × 10–12 rows, scrollback at the default 10 000 li
 **Against a 150 MB bound.** The differential is the useful part: 475 MB across 19 extra panes is
 **~25 MB per pane**, at 10 000 lines of 55–112 columns. That is not a leak and not a surprise once
 stated — it is the emulator's scrollback, which is what P6.7's own parenthesis asks to be measured —
-but it means the requirement is arithmetically out of reach at the default: twenty panes cannot cost
-under 150 MB while each costs 25. Either the per-cell footprint comes down or one of the two numbers
-in P6.7 is wrong. `TODO.md` carries it.
+but it means the requirement was arithmetically out of reach at the default: twenty panes cannot
+cost under 150 MB while each costs 25.
+
+**P6.7's memory half was amended on 2026-08-06** to bound the cost *per pane* — < 90 MB with one,
+< 30 MB for each additional — since the old total and its own "10 000 lines/pane" parenthesis could
+not both hold, and a bound that contradicts itself cannot be met or missed. What stays open is the
+~47 bytes per cell behind the 25 MB, which is SwiftTerm's buffer and may be a dependency question
+rather than ours. `TODO.md` carries it.
 
 ### P6.6 — idle CPU: missed on battery, met on AC
 

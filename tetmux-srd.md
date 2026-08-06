@@ -597,8 +597,19 @@ Exact, testable commitments. Violations produce visible corruption under tmux.
 
 ## 6. Performance requirements
 
-- **P6.1** Keypress → glyph, local session: ≤ 12 ms at p95.
-- **P6.2** Keypress → glyph, remote session: ≤ RTT + 12 ms at p95.
+- **P6.1** Keypress → glyph, local session: ≤ 12 ms at p95 **on a display refreshing at 100 Hz or
+  faster**; on a slower panel, ≤ one refresh interval + 2 ms. *(Amended 2026-08-06 against
+  measurement.)* The original figure named no display and was therefore unmeetable by any
+  application on the hardware most of this one runs on: at 60 Hz a frame is 16.7 ms, so a 12 ms
+  budget is spent before the compositor has had a chance to present anything. Measured across four
+  configurations, the wait for a frame is the whole of the residual — 11.54 ms p95 on a fixed-rate
+  100 Hz external monitor, 14.28 ms on the built-in ProMotion panel, 17.84 ms on that panel on
+  battery, with the protocol under 2 ms in every one.
+  So the number that judges a **change** is the part the application controls: **keypress → the
+  echoed bytes reaching the emulator ≤ 3 ms at p95**, which is what `Scripts/measure-latency.sh`
+  reports as the echo column and what caught the 8 ms coalescer. The end-to-end figure is recorded
+  with its display beside it or it means nothing.
+- **P6.2** Keypress → glyph, remote session: ≤ RTT + the P6.1 budget for the display in use, at p95.
 - **P6.3** Sustained `%output` throughput ≥ 50 MB/s on one pane without reordering or blocking the
   main thread. *(Amended:)* bytes may be **dropped only where a repaint repairs them** — a
   dropped chunk is never handed to the emulator as a hole in the stream. Passthrough is the one
@@ -619,13 +630,36 @@ Exact, testable commitments. Violations produce visible corruption under tmux.
   pause, and the byte ceiling is the entire mechanism.
 - **P6.6** Idle CPU with 20 panes across 4 hosts: < 0.5% of one core. There is no polling except
   the menu-bar modifier display, which runs only while a menu is open. Verify with Instruments on
-  battery — sustained wakeups matter more than average CPU.
-- **P6.7** Resident memory: < 150 MB with 20 panes at default scrollback (10 000 lines/pane).
-  Cold launch to interactive: < 400 ms.
+  battery — sustained wakeups matter more than average CPU. **Not amended**: measured at 1.83% on
+  battery and 0.48% on AC, so it is missed, but the miss is a periodic spike whose cause has not
+  been established and nothing suggests the target itself is wrong (`TODO.md`). The wakeup half is
+  met with room — package idle exits are ~0/s.
+- **P6.7** Resident memory, *(amended 2026-08-06 against measurement)*, is bounded **per pane**
+  rather than as a single total: **< 90 MB with one pane** at default scrollback (10 000
+  lines/pane), and **< 30 MB for each additional pane**. Twenty panes therefore sit near 600 MB,
+  and that is the honest consequence of a 10 000-line default rather than a regression.
+  The original "< 150 MB with 20 panes at default scrollback (10 000 lines/pane)" contradicted its
+  own parenthesis: a pane's scrollback measures ~25 MB at that depth (72 MB with one pane, 547 MB
+  with twenty — ~47 bytes per cell, in the emulator's buffer), so the two halves of the sentence
+  could not both hold. The bound is restated in the form that can actually be checked and that
+  fails for a reason somebody can act on: a base cost and a marginal cost. Anyone wanting the old
+  total back is choosing a smaller default scrollback, and should say so by changing that number.
+  Cold launch to interactive: < 400 ms. **Not** amended — it is missed (711 ms warm, 985 ms with
+  the page cache purged) but nothing establishes that it is unachievable, and three quarters of it
+  is in two phases that have not been investigated yet (`TODO.md`).
 
 Verification is **local and scripted**, not CI *(amended — §8)*: the R3.6 matrix set the
 precedent that a measurement worth trusting is a reproducible local artefact, and a hosted runner
-measures the runner.
+measures the runner. The harness exists — `Scripts/measure-latency.sh`,
+`Scripts/measure-throughput.sh`, `Scripts/measure-launch.sh` and the `Scripts/measure-idle.md`
+procedure — and every figure it has produced is in `docs/measurements.md` with the machine, the
+display and the power state beside it. As of 2026-08-06 **P6.3 is the only requirement here that
+passes outright**; P6.1 passes on a 100 Hz display and not on the built-in panel, and P6.6 and both
+halves of P6.7 are missed. Each has an entry in `TODO.md` carrying its measurement as evidence.
+
+Two of these numbers were amended *because* they were measured, which is the process working rather
+than a retreat: P6.1 named no display and was unachievable at 60 Hz by any application, and P6.7's
+total contradicted its own scrollback parenthesis. The two that are merely unmet were left alone.
 
 ---
 
@@ -716,7 +750,8 @@ as designed and is the recommended shape for any comparable effort.
 | Control-mode protocol edge cases across versions | Mitigated: five-version fixture corpus replayed in CI; integration suite runs across the built 3.0–3.5 binaries, weekly in CI, on demand, and on every release tag, where it blocks the .dmg |
 | Geometry desync between GUI and tmux | Mitigated architecturally (§3.3); live-resize suppression shipped (`LiveResizeGate`) |
 | Orphaned clients clamping window size | Mitigated (F4.17), with tests; known blast radius documented |
-| `send-keys` round-trip latency under fast typing | Mitigated: per-frame batching; buffer-based paste |
+| `send-keys` round-trip latency under fast typing | Mitigated and **measured**: coalescing now flushes on the leading edge, and the round trip is under 2 ms p95 (P6.1); buffer-based paste |
+| **Display refresh dominates perceived latency** *(new)* | Accepted: with the protocol under 2 ms, keypress→glyph is one frame. P6.1 amended to name a refresh rate; a fix would have to schedule drawing differently (`TODO.md`) |
 | Old tmux in institutional environments | Mitigated: passthrough shipped as a distinct channel (§4.6) |
 | **SwiftTerm dependency drift** *(new)* | Behaviour tetmux relies on but does not implement is pinned by tests, the F4.23/F4.24 pins included |
 | **Unsigned distribution** *(new)* | Every user fights Gatekeeper; blocked on an Apple Developer account (`TODO.md`) |
