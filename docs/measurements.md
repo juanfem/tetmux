@@ -16,7 +16,9 @@ because the point of the table is the trend.
 
 ## P6.1 — keypress → glyph, local session
 
-**Floor:** ≤ 12 ms at p95.
+**Floor:** ≤ 12 ms at p95 on a 100 Hz-or-faster display, one refresh interval + 2 ms below that;
+and ≤ 3 ms at p95 for the application-controlled half — keypress to the echoed bytes reaching the
+emulator, the "echo" column below. (P6.1 as amended 2026-08-06; see the end of this section.)
 **Script:** `Scripts/measure-latency.sh` (release build, private tmux server, synthetic keystrokes).
 **Instrumentation:** `Sources/tetmuxUI/LatencyProbe.swift`.
 
