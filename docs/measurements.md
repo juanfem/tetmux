@@ -157,9 +157,70 @@ One caveat that cuts the right way for reading all of this: the App Launch templ
 switches, so tracing is inside every number above. An untraced launch is faster. It is not 2.5×
 faster.
 
-## P6.6 and P6.7 — idle cost and memory
+## P6.6 — idle CPU, and P6.7 — resident memory
 
-**Not yet measured.** `Scripts/measure-idle.md` is the procedure — both are claims about 20 panes
-across 4 hosts, which has to be built on machines somebody can actually reach. The procedure names
-the two places where the obvious measurement is the wrong one (`ps` RSS instead of `phys_footprint`,
-and average CPU instead of wakeups).
+**Measured 2026-08-06**, on the arrangement P6.6 actually specifies: 20 panes across 4 real hosts,
+every pane displayed, every shell at a prompt, each pane's scrollback filled by streaming 12 000
+lines through the live channel (filling server-side first would not reach tetmux's emulator — a
+reattach replays only a bounded `capture-pane`).
+
+| Host | tmux | Panes |
+|---|---|---|
+| local (M3) | 3.7b | 5 |
+| `server.example.org:2222` (Linux, WAN) | 3.5a | 5 |
+| `vm.example.net` | 3.2a | 5 |
+| `login.example.net` | 3.2a | 5 |
+
+Panes were 55–112 columns × 10–12 rows, scrollback at the default 10 000 lines.
+
+### P6.7 — memory: missed by 3.6×
+
+| Arrangement | `phys_footprint` |
+|---|---|
+| 20 panes / 4 hosts | **547 MB** |
+| 1 pane / 1 host | 72 MB |
+
+**Against a 150 MB bound.** The differential is the useful part: 475 MB across 19 extra panes is
+**~25 MB per pane**, at 10 000 lines of 55–112 columns. That is not a leak and not a surprise once
+stated — it is the emulator's scrollback, which is what P6.7's own parenthesis asks to be measured —
+but it means the requirement is arithmetically out of reach at the default: twenty panes cannot cost
+under 150 MB while each costs 25. Either the per-cell footprint comes down or one of the two numbers
+in P6.7 is wrong. `TODO.md` carries it.
+
+### P6.6 — idle CPU: missed on battery, met on AC
+
+| Condition | mean | median | max | |
+|---|---|---|---|---|
+| battery, 20 panes | **1.83%** | 0.30% | 13.9% | missed (bar is 0.5%) |
+| AC, 20 panes | **0.48%** | 0.30% | 1.8% | inside the bar |
+| AC, 1 pane | ~0.01% | 0.0% | 0.2% | |
+
+P6.6 says verify **on battery**, so 1.83% is the number that answers it, and it is missed by ~3.7×.
+Two caveats on that comparison, both of which want a cleaner rerun before anybody optimises against
+it: the battery run was taken closer in time to the scrollback fill than the AC one, and `ps %cpu`
+is a decaying average over about a minute, so residue is plausible. The AC/battery gap may also be
+nothing but clock scaling — the same work on a slower core is a larger share of "one core".
+
+**The shape is the finding, not the mean.** Idle baseline is ~0.25% in both conditions. The entire
+miss is a spike **every 10 seconds**, reaching 13.9% on battery and 1.8% on AC. That cadence is the
+RTT probe: `SessionService`'s `rttTask` sleeps 10 s and sends `display-message -p ''` per host, and
+it is the only 10 s timer in the application. Four tiny commands cannot cost that; what fits is what
+the *answer* does — `rttMilliseconds` is a field on `HostState`, so every probe changes the state,
+`ingest` diffs it as a real change and broadcasts, and the broadcast rebuilds a SwiftUI tree holding
+20 panes. The single-pane arm is the evidence: same probe, same cadence, ~0.01%.
+
+### Wakeups: fine, and worth saying so
+
+`sudo powermetrics --samplers tasks`, three samples on battery:
+
+| | sample 1 | sample 2 | sample 3 |
+|---|---|---|---|
+| CPU ms/s | 41.79 | 20.85 | 36.97 |
+| User% | 95.39 | 94.35 | 95.27 |
+| Intr wakeups/s | 44.69 | 44.57 | 44.79 |
+| **Pkg idle wakeups/s** | **0.00** | **0.40** | **0.00** |
+
+P6.6's note says sustained wakeups matter more than average CPU. They are not the problem here.
+44.7 interrupt wakeups per second sounds like a lot, but the package idle exits — which is what
+actually keeps a laptop awake — are ~0. And 95% user time says the cost is computation in the
+application, not syscalls or I/O, which is the same finger the 10 s spike points at.

@@ -8,7 +8,7 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**3 features, 3 tests owed, 1 blocked, 2 parked.** The six small items this file opened with, copy
+**4 features, 3 tests owed, 1 blocked, 2 parked.** The six small items this file opened with, copy
 mode, and the integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on
 2026-08-06; what they turned into is recorded in `CLAUDE.md`, not here. The five entries added on
 2026-08-06 came out of an adherence review of the tree against SRD v2.1 — a review that mostly
@@ -20,9 +20,10 @@ The launcher's half of that batch (F4.25/F4.26) closed the same day.
 and `docs/measurements.md` holds the numbers. P6.3 passed with 6.5× of room. P6.1 failed by 2× —
 p95 24.43 ms against 12 — which turned out to be an 8 ms timer of our own in the keystroke
 coalescer; flushing on the leading edge instead brought it to 11.54 ms and closed the entry that
-finding had opened. P6.7's launch half then missed by 2.5× and got an entry of its own. What is left
-unmeasured is P6.6 and P6.7's memory half, which need an arrangement of real machines that no script
-can build.
+finding had opened. P6.7's launch half then missed by 2.5×, and P6.6 and P6.7's memory half were measured on
+2026-08-06 against 20 panes on four real hosts and missed too. All three have entries below, each
+with the measurement as its evidence. Every P6 requirement now has a number against it: P6.3 and
+P6.1 pass, P6.6 and both halves of P6.7 do not.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
@@ -51,16 +52,37 @@ References point into current `main`. Line numbers drift; the symbol names besid
   binary does not, so that number may be *better* and is in any case the one a user experiences.
   `Scripts/measure-launch.sh`, `Sources/tetmuxUI/AppMain.swift`
 
-- [ ] **P6.6, and P6.7's memory half, have a procedure and no numbers.**
-  `Scripts/measure-idle.md` is written — idle CPU on battery, wakeups under `powermetrics`,
-  `footprint` for resident memory, and the traps in each. Nobody has run it, because both are
-  claims about 20 panes across 4 hosts and that arrangement has to be built by hand on machines
-  somebody can reach. The four are available and all real: local, `server.example.org:2222` (a WAN
-  leg), `vm.example.net` and `login.example.net`, each reachable without a password.
-  *Do:* build the arrangement, follow the procedure, add the rows to `docs/measurements.md`.
-  Record the tmux version per host — 3.7b, 3.5a, 3.2a, 3.2a — because the flow-control and
-  subscription policies differ by version and P6.6 is partly a claim about what an idle
-  subscription costs.
+- [ ] **P6.7's memory bound cannot hold at the default scrollback, and that is arithmetic.**
+  Measured 2026-08-06 on the real arrangement (`docs/measurements.md`): **547 MB** with 20 panes
+  across 4 hosts against a 150 MB bound, and **72 MB** with one pane. The differential is 475 MB
+  over 19 panes — **~25 MB per pane** at the default 10 000 lines of 55–112 columns. That is the
+  emulator's scrollback, which is exactly what P6.7 asks to be measured, so the requirement and
+  its own parenthesis are inconsistent: twenty panes cannot cost under 150 MB while each costs 25.
+  *Do:* one of three, and it is a decision rather than a bug. (1) Make the per-cell footprint
+  smaller — 25 MB for ~550 000 cells is ~47 bytes a cell, which is worth understanding before
+  accepting; it is SwiftTerm's buffer, so this may be a dependency question rather than ours.
+  (2) Lower the default scrollback and amend P6.7's parenthesis to match. (3) Amend the bound,
+  which needs a number somebody is willing to defend. Do not "fix" this by measuring empty panes:
+  20 panes with nothing in them are well inside 150 MB and mean nothing.
+  `Sources/tetmuxUI/TerminalSurface.swift` (`TerminalTheme.scrollbackLines`)
+
+- [ ] **P6.6's idle CPU is missed on battery, and it is one timer's answer rebuilding the tree.**
+  Measured 2026-08-06 with 20 panes across 4 hosts: **mean 1.83% of one core on battery** against
+  a 0.5% bar, median 0.30%, max 13.9%. On AC the same arrangement means 0.48% and passes, so the
+  battery figure is the one P6.6 asks for and the gap may be nothing but clock scaling — a clean
+  rerun on battery, settled longer after the scrollback fill, should come first. Wakeups are
+  **fine** and should not be chased: package idle exits are ~0/s.
+  The shape is the finding. Baseline idle is ~0.25%; the whole miss is a spike **every 10
+  seconds**, which is `rttTask`'s cadence — and `rttMilliseconds` is a field on `HostState`, so
+  every probe answer diffs as a real state change, broadcasts, and rebuilds a SwiftUI tree holding
+  20 panes. The one-pane arm settles it: same probe, same cadence, ~0.01%.
+  *Do:* keep the RTT out of the broadcast that rebuilds panes. It is a status-bar readout (F4.29)
+  and nothing about a pane depends on it, so the options are to exclude it from the diff that
+  decides whether to broadcast and publish it on its own narrower channel, or to coalesce it so it
+  cannot fire more often than the tree can afford. Verify by re-running the arrangement, not by
+  reasoning: the cost is in the rebuild, which no unit test sees.
+  `Sources/tetmuxCore/Session/SessionService.swift` (`rttTask`, `ingest`),
+  `Sources/tetmuxCore/Session/HostModel.swift` (`rttMilliseconds`)
 
 - [ ] **P6.4's output half: the byte handoff is per-chunk, not per display frame.** The input
   direction complies — keystrokes coalesce into one `send-keys -H` per 8 ms flush, and

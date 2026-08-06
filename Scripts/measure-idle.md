@@ -57,8 +57,14 @@ answers a question about connecting rather than about idling.
     for i in $(seq 30); do ps -o %cpu= -p "$pid"; sleep 2; done \
         | awk '{ total += $1; n += 1 } END { printf "mean %.3f%% of one core over %d samples\n", total/n, n }'
 
-Record the mean. If it is near the bar, record the maximum too — a mean under 0.5% made of one busy
-sample per minute is a different program from a flat one.
+**Record the series, not just the mean.** This was the difference between a number and an answer the
+first time it was run: the mean was 1.83% against a 0.5% bar, and the series showed a flat 0.25%
+baseline with a spike every fifth sample. A mean hides that; a spike every ten seconds names its own
+cause. Keep the maximum too.
+
+Note that `ps -o %cpu` is a **decaying average over about a minute**, not an instantaneous reading.
+So the first samples after any burst of activity — the scrollback fill above, or an Instruments run
+— still carry it, and a settle shorter than that window measures the setup rather than the idle.
 
 **Then wakeups, which is the number P6.6 actually cares about.** A process can average almost no CPU
 and still keep the package out of its idle states by waking every few milliseconds; that is what
@@ -91,10 +97,16 @@ Write down the `phys_footprint` line. Two things to check before believing it:
 
 * **Scrollback must be at its default** (10 000 lines/pane). It is a `UserDefaults` setting, so a
   machine where it has been raised for real work measures that instead. Settings → Terminal.
-* **Fill the scrollback.** An empty pane's history costs nothing; P6.7 is a bound on 20 panes'
-  worth of it, so the honest measurement has each pane holding real lines. `seq 1 20000` per pane,
-  then let it settle, then measure. Measuring 20 empty panes and writing 150 MB in the "pass"
-  column is the easiest wrong number to produce here.
+* **Fill the scrollback, and fill it through the live pane.** An empty pane's history costs
+  nothing; P6.7 is a bound on 20 panes' worth of it, so the honest measurement has each pane
+  holding real lines. Measuring 20 empty panes and writing 150 MB in the "pass" column is the
+  easiest wrong number to produce here.
+
+  The fill has to happen **while the pane is on screen**. Sending it before tetmux attaches fills
+  tmux's history and not the emulator's: a reattach replays a bounded `capture-pane`, so the pane
+  comes back holding a couple of thousand lines however many were produced. And send more than the
+  target — tmux's own `history-limit` defaults to 2000, so `capture-pane` will only ever show you
+  2000 lines back and cannot confirm the emulator holds 10 000. What confirms it is the footprint.
 
 ## P6.7 — cold launch to interactive
 
