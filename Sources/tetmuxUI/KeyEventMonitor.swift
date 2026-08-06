@@ -39,6 +39,7 @@ final class KeyEventMonitor {
 
     /// Whether the event was consumed here and must not continue to the menu.
     private func handle(_ event: NSEvent) -> Bool {
+        noteForLatencyMeasurement(event)
         guard let model else { return false }
 
         if model.literalEscapeArmed {
@@ -61,6 +62,23 @@ final class KeyEventMonitor {
         guard Self.focusedPane() != nil else { return false }
         model.literalEscapeArmed = true
         return true
+    }
+
+    /// P6.1's first point, borrowed from the one hook that already runs this early.
+    ///
+    /// A local monitor sees a key event before `sendEvent` dispatches it — ahead of the menu, the
+    /// responder chain and SwiftTerm's key table — which makes it the honest start of "keypress →
+    /// glyph". The probe is off unless a measurement asked for it, so this is one boolean test on
+    /// every keystroke and nothing else; nothing about the event is changed either way.
+    ///
+    /// Single ASCII only, because the echo is matched by byte: a multi-byte character would be
+    /// matched on its first unit, and a chord or a function key has no echo to match at all.
+    /// `charactersIgnoringModifiers`, so the key is recorded as the one on the keyboard.
+    private func noteForLatencyMeasurement(_ event: NSEvent) {
+        guard LatencyProbe.shared.isEnabled, let pane = Self.focusedPane() else { return }
+        guard let typed = event.charactersIgnoringModifiers, typed.count == 1 else { return }
+        guard let ascii = typed.utf8.first, ascii >= 0x20, ascii < 0x7f else { return }
+        LatencyProbe.shared.keyDown(ascii, in: pane)
     }
 
     /// The pane the keyboard is pointing at, or `nil` when the first responder is not one.

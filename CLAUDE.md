@@ -37,6 +37,10 @@ Scripts/package-dmg.sh                 # .app bundle inside a .dmg, in dist/
 Scripts/package-dmg.sh --skip-build    # …from whatever is already in .build/release
 Scripts/package-dmg.sh --version 1.2.3 --output dist
 
+Scripts/measure-latency.sh             # P6.1 keypress→glyph p95, against a private tmux server
+Scripts/measure-throughput.sh          # P6.3 %output parse rate, release build
+Scripts/measure-idle.md                # P6.6/P6.7 by hand — the procedure, not a program
+
 Scripts/build-tmux-matrix.sh           # tmux 3.0/3.2a/3.3a/3.4/3.5 from pinned tarballs
 Scripts/test-matrix.sh                 # the integration suite against every one of them
 Scripts/test-matrix.sh 3.0 --filter testDraggingATabReordersTheSession
@@ -1210,6 +1214,46 @@ for is that the chord still *matches*, so that has its own test: `charactersIgno
   takes an 11×11 mark from 45 inked pixels to 65 offscreen and **still does not read** on a row where
   it is drawn in `.secondary`, so the signal is a filled chip behind the button and the weight is
   only its companion.
+
+## Measuring (§6)
+
+Verification is **local and scripted, not CI** — the SRD's decision (§6, §8), on the same argument
+the fixture matrix rests on: a hosted runner measures the runner. `docs/measurements.md` holds the
+numbers with the machine beside each, and is written to rather than edited, because the point of the
+table is the trend. Three things about the harness are worth knowing before extending it.
+
+**A perf harness measures itself first, and the wrong answer looks exactly like a finding.** P6.3's
+first run read 23 MB/s in release — half the floor, a plausible number with a plausible story. It
+was the test: it sliced the fixture at its first `%output`, so the repeated body carried no
+handshake, and `ControlCodec` skips everything before the first `%begin` with a substring search
+that allocates at every position. A startup path the app runs a handful of lines through, run over
+every line forever. Handshake once then output repeated, and the same bytes measured 396 MB/s. The
+fully-decoded assertion beside the rate is the standing guard against the other direction: a parser
+that is fast because it is dropping the payload measures wonderfully.
+
+**A floor has to name its build.** A debug build of the codec is **17× slower** than the release one
+— no optimisation, retain/release around every array, bounds checks on every subscript. So
+`CodecThroughputTests` asserts P6.3's real 50 MB/s only when built release, and 5 MB/s in debug as an
+order-of-magnitude tripwire that survives a slow runner while still catching the complexity class of
+mistake above (which measured 2 MB/s in debug against 18 for the same bytes). Anything quoting a
+debug number as a performance figure is quoting the wrong program.
+
+**P6.1's two ends are in code we do not own, and neither could be an override.** SwiftTerm declares
+`TerminalView.keyDown` and `draw` `public` rather than `open`, which closes both to a subclass in
+another module. The keystroke end moved to `KeyEventMonitor` — a local `NSEvent` monitor runs before
+`sendEvent` dispatches, so it is *earlier* than `keyDown` and is the honest start. The draw end has
+no such hook, so `LatencyProbe` closes the interval from a 1×1 overlay **subview** of the pane,
+marked dirty when the echo lands: AppKit draws a view's own content before its subviews, so the
+overlay's `draw` runs in the same cycle, after the terminal has painted. `viewWillDraw` on the pane
+was the alternative and would understate every sample by one full-screen draw. What is still outside
+the interval is the window server and the display — unreachable from the process, so every P6.1
+figure understates by up to a frame and the record says so.
+
+The probe is off unless asked (`TETMUX_MEASURE_LATENCY`, or a live signpost trace), which is what
+keeps the byte scan for the echo off the path P6.3 is a promise about. And `measure-latency.sh` runs
+the app with `HOME` and `TMUX_TMPDIR` pointed at a scratch directory, so it gets a private tmux
+server, an empty host list and its own workspace file — a measurement that typed into the user's
+real session and rewrote their window arrangement would be worse than no measurement.
 
 ## Testing
 

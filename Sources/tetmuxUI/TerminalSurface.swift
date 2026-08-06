@@ -296,6 +296,10 @@ struct TerminalPaneView: NSViewRepresentable {
                     if Task.isCancelled { break }
                     guard let view else { break }
                     let bytes = [UInt8](data)
+                    // P6.1's middle point, before the emulator sees the bytes: this is the round
+                    // trip landing. Guarded inside the probe, which is off unless a measurement
+                    // asked for it — the scan would otherwise be on the path P6.3 measures.
+                    LatencyProbe.shared.observeOutput(bytes)
                     view.feed(byteArray: bytes[...])
 
                     unacknowledged += data.count
