@@ -8,7 +8,7 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**5 features, 3 tests owed, 1 blocked, 2 parked.** The six small items this file opened with, copy
+**4 features, 3 tests owed, 1 blocked, 3 parked.** The six small items this file opened with, copy
 mode, and the integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on
 2026-08-06; what they turned into is recorded in `CLAUDE.md`, not here. The five entries added on
 2026-08-06 came out of an adherence review of the tree against SRD v2.1 — a review that mostly
@@ -16,16 +16,26 @@ found the *documents* behind the code, and amended the SRD's stale status notes 
 The launcher's half of that batch (F4.25/F4.26) closed the same day.
 
 **The P6 harness closed on 2026-08-06 and paid for itself the same day.**
-`Scripts/measure-latency.sh`, `Scripts/measure-throughput.sh` and `Scripts/measure-idle.md` exist,
-and `docs/measurements.md` holds the numbers. P6.3 passed with 6.5× of room. P6.1 failed by 2× —
-p95 24.43 ms against 12 — which turned out to be an 8 ms timer of our own in the keystroke
-coalescer; flushing on the leading edge instead took the round trip from 19.72 ms p95 to under 1,
-and the whole figure to 11.54 ms — on a 100 Hz external monitor. On the laptop's own panel it is
-14.28 ms and still missed, which is the entry that finding left behind. P6.7's launch half missed by
-2.5×, and P6.6 and P6.7's memory half were measured against 20 panes on four real hosts and missed
-too. Every P6 requirement now has a number against it, and **P6.3 is the only one that passes
-outright**: P6.1 passes on one display and fails on the built-in, P6.6 and both halves of P6.7 fail.
-Each has an entry below with its measurement as evidence.
+`Scripts/measure-latency.sh`, `Scripts/measure-throughput.sh`, `Scripts/measure-launch.sh` and the
+`Scripts/measure-idle.md` procedure exist, and `docs/measurements.md` holds every number with the
+machine, display and power state beside it.
+
+It found one bug and two broken requirements. The bug: P6.1 missed by 2× — p95 24.43 ms against
+12 — because of an 8 ms timer of our own in the keystroke coalescer, which flushed on the trailing
+edge and so made every keystroke at typing speed wait out a window it had nothing to share. Flushing
+on the leading edge took the round trip from 19.72 ms p95 to under 1 and the whole figure to 11.54.
+The broken requirements: **P6.1 named no display**, and at 60 Hz a 12 ms budget is spent before the
+compositor can present anything, so it was unmeetable by any application; and **P6.7's memory total
+contradicted its own scrollback parenthesis**, asking for two things that could not both hold. Both
+were amended against the measurements rather than chased, which is what having numbers is for.
+
+Where that leaves §6, and the honesty matters more than the tally. **P6.3 passes outright**, with
+6.5× of room. **P6.7's memory half passes the amended bound** — but that bound was drawn from these
+measurements with headroom, so it passes nearly by construction; what it buys is a regression check,
+not a validation. **P6.1's verdict is not yet knowable**: under the amended rule it passes on the
+100 Hz external monitor, and passes on the built-in panel *if* that panel is at 60 Hz while failing
+if it is at 120 — and nobody has measured which. **P6.6 and P6.7's launch half fail**, by 3.7× and
+2.5×, each with an entry below carrying its measurement as evidence.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
@@ -33,7 +43,8 @@ References point into current `main`. Line numbers drift; the symbol names besid
 
 ## Features, sized like features
 
-- [ ] **P6.1's application half is met; the frame it waits for is not, and that is now the target.**
+- [ ] **P6.1's application half is met; whether the whole of it is turns on a refresh rate nobody
+  has measured.**
   Four runs (`docs/measurements.md`): p95 **11.54 ms** on a fixed-rate 100 Hz external monitor on
   AC, **14.28 ms** on the built-in ProMotion panel on AC, **17.84 ms** on the built-in on battery,
   against a 12 ms bar. Both variables matter and neither alone explains the gap.
@@ -53,9 +64,11 @@ References point into current `main`. Line numbers drift; the symbol names besid
   question from opposite ends.
   **P6.1 was amended on 2026-08-06** to name a refresh rate — 12 ms at p95 on a 100 Hz-or-faster
   display, one refresh interval + 2 ms below that — and to state the number a change is judged by:
-  keypress → echoed bytes at the emulator, ≤ 3 ms p95, currently 0.78–1.72. So the *requirement* is
-  no longer wrong, and what stays open is whether the frame wait can be shortened at all. If it
-  cannot, this entry closes as "met, with the display named".
+  keypress → echoed bytes at the emulator, ≤ 3 ms p95, currently 0.78–1.72 and comfortably met.
+  **That makes the refresh rate the thing that decides pass or fail, not a curiosity.** At 60 Hz the
+  bound is 18.7 ms and both built-in runs pass (14.28 and 17.84); at 120 Hz the bound is 12 ms and
+  both fail. So this entry cannot be closed *or* confirmed until the panel's actual rate during a
+  run is known — which is the first task below and is a few lines, not an investigation.
   `Sources/tetmuxUI/LatencyProbe.swift`, `Sources/tetmuxUI/TerminalSurface.swift`
 
 - [ ] **P6.7's launch half misses by 2.5×, and the cold penalty lands where nobody would look.**
@@ -78,32 +91,6 @@ References point into current `main`. Line numbers drift; the symbol names besid
   re-measure with `--app` against a built bundle: an app bundle gets a dyld launch closure the bare
   binary does not, so that number may be *better* and is in any case the one a user experiences.
   `Scripts/measure-launch.sh`, `Sources/tetmuxUI/AppMain.swift`
-
-- [ ] **P6.7's memory bound was amended to match its own scrollback; the per-cell cost is what is left.**
-  Measured 2026-08-06 on the real arrangement (`docs/measurements.md`): **547 MB** with 20 panes
-  across 4 hosts against a 150 MB bound, and **72 MB** with one pane. The differential is 475 MB
-  over 19 panes — **~25 MB per pane** at the default 10 000 lines of 55–112 columns. That is the
-  emulator's scrollback, which is exactly what P6.7 asks to be measured, so the requirement and
-  its own parenthesis are inconsistent: twenty panes cannot cost under 150 MB while each costs 25.
-  **Amended 2026-08-06**: P6.7 now bounds memory per pane — < 90 MB with one, < 30 MB for each
-  additional — because the old total and its own parenthesis could not both hold. That closes the
-  contradiction and leaves the real question open.
-  **The per-cell cost is now measured, not estimated** (`PaneMemoryTests`, which pins it):
-  `SwiftTerm.CharData` is **24 bytes**, of which `Attribute` is 14 — two 4-byte `Color`s, because
-  truecolor needs three components and a tag, twice. At the default 10 000 lines that is 12.6 MB
-  per 55-column pane and 18.3 MB at 80, in cell data alone. The measured ~25 MB per pane is that
-  plus allocator rounding, the per-line object and the alternate buffer: **not a leak, and nothing
-  is wrongly retained**.
-  *Do:* this is now a decision with exactly two levers, and only one of them is ours.
-  (1) **Lower the default scrollback**, which scales the dominant term exactly — 5 000 lines halves
-  it — and move P6.7's parenthesis with it deliberately rather than as a side effect. The question
-  is what a terminal's history is worth to this user, which is not a question measurement answers.
-  (2) **Pack the attribute** — an index into a palette of attribute runs instead of two inline
-  colours would take a cell from 24 bytes toward 8 — which is upstream work in SwiftTerm and so a
-  dependency question: worth raising there, not worth forking for.
-  Doing neither is also defensible now that the bound describes the behaviour. Do not "fix" this by
-  measuring empty panes: 20 panes with nothing in them are well inside any bound and mean nothing.
-  `Sources/tetmuxUI/TerminalSurface.swift` (`TerminalTheme.scrollbackLines`)
 
 - [ ] **P6.6's idle CPU is missed on battery, and it is one timer's answer rebuilding the tree.**
   Measured 2026-08-06 with 20 panes across 4 hosts: **mean 1.83% of one core on battery** against
@@ -135,7 +122,10 @@ References point into current `main`. Line numbers drift; the symbol names besid
   and nothing in the tree is ProMotion-aware; there is no display link anywhere. SwiftTerm's own
   redraw coalescing is what keeps the paint rate sane, which may make this a non-problem in
   practice, but P6.4 as written asks for per-frame batching of the handoff itself.
-  *Do:* measure first — the P6 harness above is the tool. If per-chunk feeding shows up, coalesce
+  *Do:* measure first — `Scripts/measure-latency.sh` is the tool, and the P6.1 entry above is the
+  other end of this question: with the protocol under 2 ms, everything left in keypress→glyph is
+  the draw side, so a change to how panes schedule drawing shows up in that measurement. If
+  per-chunk feeding shows up, coalesce
   chunks in `TerminalSurface.Coordinator.attach` behind `NSView.displayLink(target:selector:)`
   and flush once per frame; if it does not, amend P6.4 to record per-chunk feeding over
   SwiftTerm's coalescing as the accepted design. Until one of those happens the requirement reads
@@ -193,6 +183,30 @@ References point into current `main`. Line numbers drift; the symbol names besid
   one user and they do not need it. The entry stays because it names what is missing and why it
   is hard, which is the expensive half of the work.
   `Sources/tetmuxUI/TerminalSurface.swift` (`PaneTerminalView` accessibility overrides)
+
+- [~] **P6.7's memory: the bound is met and the cell is 24 bytes. What is left is an optimisation
+  nobody is owed.** Measured 2026-08-06 on the real arrangement (`docs/measurements.md`): **72 MB**
+  with one pane and **547 MB** with 20 across 4 hosts, which is 25 MB per additional pane at the
+  default 10 000 lines. Against the amended bound — < 90 MB with one, < 30 MB for each additional —
+  that **passes**, and it passes nearly by construction, since the bound was drawn from these
+  numbers with headroom. What it buys is a regression check rather than a validation, which is why
+  the arithmetic is pinned (`PaneMemoryTests`) rather than trusted.
+  The cause is settled and is not a defect: `SwiftTerm.CharData` is **24 bytes**, of which
+  `Attribute` is 14 — two 4-byte `Color`s, because truecolor needs three components and a tag,
+  twice. 10 000 lines of an 80-column pane is 18.3 MB in cell data alone. **Nothing is leaked and
+  nothing is wrongly retained**, which is the thing worth knowing before anybody goes looking.
+  The user-facing half **shipped on 2026-08-06**: the settings pane shows the per-pane cost beside
+  the scrollback picker and updates it as you choose, and the README carries the table and the
+  advice for anyone wanting a smaller footprint.
+  Parked rather than open, because the requirement is met and the two remaining levers are choices
+  rather than work owed. (1) **Lower the default from 10 000**, which scales the dominant term
+  exactly — but that is a question about what a terminal's history is worth, not one measurement
+  answers, and the setting now makes it the user's call. (2) **Pack the attribute** into a palette
+  index, taking a cell from 24 bytes toward 8 — upstream work in SwiftTerm, worth raising there and
+  not worth forking for. Un-park this if the default changes or if SwiftTerm's cell size moves, in
+  which case `PaneMemoryTests` fails first and says so.
+  `Sources/tetmuxUI/TerminalSurface.swift` (`TerminalTheme.scrollbackLines`),
+  `Tests/tetmuxTests/PaneMemoryTests.swift`
 
 - [~] **Desync recovery.** Detection is done — a `%begin` whose number fails to increase, a
   terminator closing nothing, a `%begin` with nothing pending are all logged — but detecting is
