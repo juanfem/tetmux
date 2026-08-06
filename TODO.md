@@ -88,11 +88,21 @@ References point into current `main`. Line numbers drift; the symbol names besid
   **Amended 2026-08-06**: P6.7 now bounds memory per pane — < 90 MB with one, < 30 MB for each
   additional — because the old total and its own parenthesis could not both hold. That closes the
   contradiction and leaves the real question open.
-  *Do:* find out what **~47 bytes per cell** is made of before deciding anything. It is SwiftTerm's
-  buffer, so this may be a dependency question rather than ours — in which case the options are to
-  carry it, to lower the default scrollback (and move P6.7's parenthesis with it, deliberately),
-  or to store history more compactly. Do not "fix" this by measuring empty panes: 20 panes with
-  nothing in them are well inside any bound and mean nothing.
+  **The per-cell cost is now measured, not estimated** (`PaneMemoryTests`, which pins it):
+  `SwiftTerm.CharData` is **24 bytes**, of which `Attribute` is 14 — two 4-byte `Color`s, because
+  truecolor needs three components and a tag, twice. At the default 10 000 lines that is 12.6 MB
+  per 55-column pane and 18.3 MB at 80, in cell data alone. The measured ~25 MB per pane is that
+  plus allocator rounding, the per-line object and the alternate buffer: **not a leak, and nothing
+  is wrongly retained**.
+  *Do:* this is now a decision with exactly two levers, and only one of them is ours.
+  (1) **Lower the default scrollback**, which scales the dominant term exactly — 5 000 lines halves
+  it — and move P6.7's parenthesis with it deliberately rather than as a side effect. The question
+  is what a terminal's history is worth to this user, which is not a question measurement answers.
+  (2) **Pack the attribute** — an index into a palette of attribute runs instead of two inline
+  colours would take a cell from 24 bytes toward 8 — which is upstream work in SwiftTerm and so a
+  dependency question: worth raising there, not worth forking for.
+  Doing neither is also defensible now that the bound describes the behaviour. Do not "fix" this by
+  measuring empty panes: 20 panes with nothing in them are well inside any bound and mean nothing.
   `Sources/tetmuxUI/TerminalSurface.swift` (`TerminalTheme.scrollbackLines`)
 
 - [ ] **P6.6's idle CPU is missed on battery, and it is one timer's answer rebuilding the tree.**

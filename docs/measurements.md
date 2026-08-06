@@ -214,9 +214,41 @@ cost under 150 MB while each costs 25.
 
 **P6.7's memory half was amended on 2026-08-06** to bound the cost *per pane* — < 90 MB with one,
 < 30 MB for each additional — since the old total and its own "10 000 lines/pane" parenthesis could
-not both hold, and a bound that contradicts itself cannot be met or missed. What stays open is the
-~47 bytes per cell behind the 25 MB, which is SwiftTerm's buffer and may be a dependency question
-rather than ours. `TODO.md` carries it.
+not both hold, and a bound that contradicts itself cannot be met or missed.
+
+### Where the bytes are: a cell is 24 bytes, and the attribute is most of it
+
+Measured directly from the dependency's layout rather than inferred from the footprint
+(`PaneMemoryTests`, which pins all three numbers):
+
+| | stride |
+|---|---|
+| `SwiftTerm.CharData` — one terminal cell | **24 bytes** |
+| `Attribute` inside it | 14 bytes |
+| `Attribute.Color`, two per cell | 4 bytes each |
+
+A cell is `code` (4) + `width` (1) + atom (1) + padding + **`Attribute` (14)**. The attribute is
+more than half the cell, and it is that size because truecolor needs three components and a tag per
+colour, twice. SwiftTerm's own comment beside the padding field still says *"Purely here to align to
+16 bytes"* — the struct outgrew that comment when truecolor arrived, and is 50% larger than it
+claims.
+
+The consequence in P6.7's units, cell data alone and before allocator rounding, per-line objects,
+the alternate screen buffer or any view:
+
+| Pane width | 10 000 lines of scrollback |
+|---|---|
+| 55 columns | 12.6 MB |
+| 80 columns | 18.3 MB |
+| 112 columns | 25.6 MB |
+
+So a single pane of ordinary width holds more than a tenth of the old 150 MB budget before anything
+else exists, and the measured ~25 MB per pane is this plus overhead rather than a leak.
+
+**The only lever on this side is the scrollback default.** Halving it halves the dominant term
+exactly. Making a *cell* smaller means packing `Attribute` — an index into a palette of attribute
+runs rather than two inline colours — which is upstream work in SwiftTerm, not a change tetmux can
+make. `TODO.md` carries that as the remaining decision.
 
 ### P6.6 — idle CPU: missed on battery, met on AC
 
