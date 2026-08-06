@@ -25,6 +25,7 @@ because the point of the table is the trend.
 | 2026-08-06 | external 3440×1440 @ 100 Hz | AC | 38 | 13.50 ms | **24.43 ms** | 24.88 ms | trailing-edge flush |
 | 2026-08-06 | external 3440×1440 @ 100 Hz | AC | 148 | 11.11 ms | **11.54 ms** | 11.84 ms | leading-edge flush |
 | 2026-08-06 | built-in 2880×1864 (ProMotion) | battery | 148 | 12.07 ms | **17.84 ms** | 17.94 ms | leading-edge flush |
+| 2026-08-06 | built-in 2880×1864 (ProMotion) | AC | 148 | 12.14 ms | **14.28 ms** | 24.96 ms | leading-edge flush |
 
 All on an Apple M3, macOS 26.5.1.
 
@@ -46,32 +47,32 @@ arrives during the window that follows leaves P6.4's batching exactly where it i
 sustained typing the command rate is unchanged, one per interval — and takes the timer off the
 keystroke somebody is waiting on. **19.72 ms p95 of round trip became 1.72.**
 
-### What is left is the display, and the third run proves it
+### P6.1 is met on one configuration and missed on the machine's own screen
 
-After the fix the round trip is under 2 ms everywhere, and the remainder is between the bytes
-reaching the emulator and AppKit having drawn — which is one display frame. The echo column is what
-makes this checkable, and across the two leading-edge runs it moves the *wrong* way for any
-protocol-side explanation:
+Four runs isolate both variables, and the answer is that **both** matter and neither alone explains
+the gap:
 
-| | echo p50 | echo p95 | total p95 |
+| | echo p95 | **total p95** | |
 |---|---|---|---|
-| external 100 Hz, AC | 0.92 ms | 1.72 ms | 11.54 ms |
-| built-in ProMotion, battery | 0.64 ms | **0.78 ms** | **17.84 ms** |
+| external 100 Hz, AC | 1.72 ms | **11.54 ms** | passes |
+| built-in ProMotion, AC | 0.80 ms | **14.28 ms** | +2.74 ms — the display |
+| built-in ProMotion, battery | 0.78 ms | **17.84 ms** | +3.56 ms more — the power state |
 
-The round trip got **faster** and the total got 6 ms **slower**. Whatever the second run is measuring
-extra, it is not tetmux talking to tmux — it is the wait for a frame. tetmux is frame-bound here, and
-that reframes what P6.1's 12 ms can mean:
+The protocol half is **under 2 ms in every one of them**, and it is *lowest* in the two that fail.
+Whatever the failing runs spend extra, it is not tetmux talking to tmux; it is between the bytes
+reaching the emulator and the glyph being on screen. tetmux is frame-bound here.
 
-* At **100 Hz** a frame is 10 ms, leaving about 2 ms of slack, and the measurement passes at 11.54.
-* On the **built-in ProMotion panel** it fails at 17.84. ProMotion is adaptive and drops its refresh
-  rate when content is static, which a terminal at a prompt is — a 17.8 ms p95 is one frame at
-  ~60 Hz plus the draw, and at 16.7 ms per frame **no application can meet a 12 ms budget**.
+The likely mechanism, and it is worth stating because it suggests a fix rather than a shrug:
+**ProMotion is adaptive and idles the panel down when content is static**, which a terminal sitting
+at a prompt is. A keystroke then waits for the next refresh at whatever rate the panel has drifted
+to — 17.8 ms is about one frame at 60 Hz plus the draw, and at 16.7 ms per frame no application can
+meet a 12 ms budget. The external monitor's fixed 100 Hz is what makes the passing row pass.
 
-**The two runs changed two variables at once** — display *and* power — so the split between them is
-not established. The evidence points at the display (the protocol half improved on battery, and
-16.7 ms is exactly a 60 Hz frame), but a run on the built-in panel while plugged in is what would
-settle it, and it has not been done. Until it is, "P6.1 passes" is a claim about the 100 Hz external
-monitor and nothing broader.
+So the honest verdict is not "P6.1 passes". It is: **P6.1 is met on a fixed-rate 100 Hz external
+display on AC and missed on the laptop's own panel**, which is the configuration most of this
+application's use will be in. The leading-edge fix remains a 2× improvement and is not in question —
+the round trip went from 19.72 ms p95 to under 1 — but the requirement is unmet where it counts.
+`TODO.md` carries what to try next.
 
 Two things the measurement still does not include, both of which make the real figure worse rather
 than better. The interval closes when AppKit has drawn the view, **not** when the window server has

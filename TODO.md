@@ -31,6 +31,29 @@ References point into current `main`. Line numbers drift; the symbol names besid
 
 ## Features, sized like features
 
+- [ ] **P6.1 is met on an external 100 Hz display and missed on the laptop's own panel.**
+  Four runs (`docs/measurements.md`): p95 **11.54 ms** on a fixed-rate 100 Hz external monitor on
+  AC, **14.28 ms** on the built-in ProMotion panel on AC, **17.84 ms** on the built-in on battery,
+  against a 12 ms bar. Both variables matter and neither alone explains the gap.
+  The protocol half is **under 2 ms in all four**, and lowest in the two that fail, so this is not
+  the channel: it is the wait between the bytes reaching the emulator and the glyph being on
+  screen. The likely mechanism is that **ProMotion idles the refresh rate down when content is
+  static**, which a terminal at a prompt is, so a keystroke waits for a frame at whatever rate the
+  panel has drifted to — 17.8 ms is about one 60 Hz frame plus the draw.
+  *Do:* first establish the panel's actual refresh rate *during* a run rather than inferring it
+  from the arithmetic — `CGDisplayCopyDisplayMode`'s refresh rate reads 0 for ProMotion, so this
+  wants a `CADisplayLink`/`NSView.displayLink` sampling its own callback interval, which is a few
+  lines in the existing probe and would put the number in the record instead of a hypothesis.
+  If it confirms the panel idling, the fix is to ask for a higher rate while a pane is being typed
+  into: `NSView.preferredFrameRateRange` (or the display link's) is the supported way to tell the
+  compositor that this view wants frames now. That is a real change to how a pane schedules
+  drawing, so it needs P6.4's output half thought about at the same time — the two are the same
+  question from opposite ends.
+  Note P6.1 may simply be unmeetable at 60 Hz by any application; if the panel cannot be moved,
+  the honest close is to amend P6.1 to state a refresh-rate assumption rather than to record a
+  pass that only holds on one monitor.
+  `Sources/tetmuxUI/LatencyProbe.swift`, `Sources/tetmuxUI/TerminalSurface.swift`
+
 - [ ] **P6.7's launch half misses by 2.5×, and the cold penalty lands where nobody would look.**
   Measured 2026-08-06 on an M3 (`docs/measurements.md`): median **710.8 ms** warm and **985.3 ms**
   after `sudo purge`, against a 400 ms floor — on the bare binary, which is the *faster* target,

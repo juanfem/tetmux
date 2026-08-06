@@ -48,9 +48,18 @@ if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
 fi
 
 scratch=$(mktemp -d /tmp/tetmux-launch.XXXXXX)
+# `HOME` does not isolate `~/Library/Application Support/tetmux`: `FileManager`'s
+# `.applicationSupportDirectory` resolves the real home from the password database and ignores the
+# environment, so the app reads and rewrites the real `workspace.json` whatever `HOME` says. Saved
+# and restored, because a measurement must not cost somebody their window arrangement.
+state="$HOME/Library/Application Support/tetmux/workspace.json"
+[[ -f "$state" ]] && cp "$state" "$scratch/workspace.json.saved"
 cleanup() {
     pkill -f "$target" 2>/dev/null || true
     TMUX_TMPDIR="$scratch/tmux" tmux kill-server 2>/dev/null || true
+    if [[ -f "$scratch/workspace.json.saved" ]]; then
+        cp "$scratch/workspace.json.saved" "$state" 2>/dev/null || true
+    fi
     rm -rf "$scratch"
 }
 

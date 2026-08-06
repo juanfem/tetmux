@@ -1266,10 +1266,22 @@ the interval is the window server and the display — unreachable from the proce
 figure understates by up to a frame and the record says so.
 
 The probe is off unless asked (`TETMUX_MEASURE_LATENCY`, or a live signpost trace), which is what
-keeps the byte scan for the echo off the path P6.3 is a promise about. And `measure-latency.sh` runs
-the app with `HOME` and `TMUX_TMPDIR` pointed at a scratch directory, so it gets a private tmux
-server, an empty host list and its own workspace file — a measurement that typed into the user's
-real session and rewrote their window arrangement would be worse than no measurement.
+keeps the byte scan for the echo off the path P6.3 is a promise about.
+
+**`HOME` does not isolate the app's state files, and assuming it did cost a real workspace.**
+`TMUX_TMPDIR` genuinely gives a measurement run its own tmux server, so keystrokes land in a
+throwaway shell. `HOME` does *not* do the equivalent for `~/Library/Application Support/tetmux`:
+`FileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)` resolves the real home
+from the password database and ignores the environment, so a run launched with `HOME` pointed at a
+scratch directory still reads and rewrites the user's actual `hosts.json` and `workspace.json`. The
+measurement scripts therefore copy `workspace.json` aside and restore it in their exit trap.
+
+Two things followed from getting this wrong, both worth knowing because they look like product bugs
+and are not. A scratch-`HOME` run **restores the user's real windows**, so it can open a window per
+saved host — which reads as "the app opens four windows on a fresh launch". And a `workspace.json`
+written into the scratch directory is never read *or written* by the app, so watching it shows a
+file that never changes: pending restores that appear never to resolve, and an apparent absence of
+state broadcasts. Both were chased as defects. Neither exists.
 
 ## Testing
 

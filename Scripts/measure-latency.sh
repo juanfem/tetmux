@@ -15,10 +15,15 @@
 # stops with a diagnosis if nothing comes back, rather than reporting a confident p95 over zero
 # samples.
 #
-# **It touches nothing of yours.** The app runs with `HOME` and `TMUX_TMPDIR` pointed at a scratch
-# directory, so it gets a private tmux server, an empty host list and its own workspace file: the
-# keystrokes land in a throwaway shell, and your real session, window arrangement and saved hosts
-# are not opened, typed into or rewritten. The scratch directory goes at the end.
+# **The tmux side is isolated; the app's state files are not, so they are saved and put back.**
+# `TMUX_TMPDIR` gives the run a private tmux server, so the keystrokes land in a throwaway shell and
+# your real session is never typed into. `HOME` does **not** do the equivalent for
+# `~/Library/Application Support/tetmux`: `FileManager.urls(for: .applicationSupportDirectory, …)`
+# resolves the real home from the password database and ignores the environment, so the app reads
+# and rewrites your actual `workspace.json` whatever `HOME` says. This was discovered the hard way —
+# an earlier version of this comment claimed isolation it did not have, and measurement runs
+# overwrote a real window arrangement while asserting they could not. So the file is copied aside
+# before the run and restored after, including when the run fails.
 
 set -euo pipefail
 
@@ -41,11 +46,19 @@ fi
 
 scratch=$(mktemp -d /tmp/tetmux-latency.XXXXXX)
 app_pid=""
+# The one piece of real state this cannot keep the app away from. See the header.
+state="$HOME/Library/Application Support/tetmux/workspace.json"
+[[ -f "$state" ]] && cp "$state" "$scratch/workspace.json.saved"
 cleanup() {
     [[ -n "$app_pid" ]] && kill "$app_pid" 2>/dev/null || true
     # The private server too: the app's own teardown does not run when it is killed, and a stray
     # tmux against a socket in a directory about to be deleted is a process nobody will notice.
     TMUX_TMPDIR="$scratch/tmux" tmux kill-server 2>/dev/null || true
+    # Put the window arrangement back before the scratch goes. A measurement must not cost somebody
+    # their workspace, and the app has been writing to the real one throughout.
+    if [[ -f "$scratch/workspace.json.saved" ]]; then
+        cp "$scratch/workspace.json.saved" "$state" 2>/dev/null || true
+    fi
     rm -rf "$scratch"
 }
 trap cleanup EXIT
