@@ -39,6 +39,8 @@ public actor SessionService {
     /// owner's stream starts from a screen it agrees with.
     private var paneOwners: [String: [String: UUID]] = [:]
     private var stateContinuations: [UUID: AsyncStream<[HostState]>.Continuation] = [:]
+    /// F4.29's round-trip readings, on a channel of their own. See `broadcastRoundTrips`.
+    private var roundTripContinuations: [UUID: AsyncStream<[String: Double]>.Continuation] = [:]
     private var diagnosticLogger: (@Sendable (String) -> Void)?
 
     /// Repaint budget for `capture-pane` on reattach (F4.16).
@@ -455,6 +457,9 @@ public actor SessionService {
         hosts.removeValue(forKey: hostId)
         hostOrder.removeAll { $0 == hostId }
         broadcastState()
+        // The narrow channel is keyed by host and is not derived from the snapshot above, so a
+        // removed host's last reading would sit in it until that host's replacement produced one.
+        broadcastRoundTrips()
     }
 
     public func stateStream() -> AsyncStream<[HostState]> {
@@ -470,6 +475,60 @@ public actor SessionService {
 
     private func removeStateContinuation(_ id: UUID) {
         stateContinuations.removeValue(forKey: id)
+    }
+
+    /// Round-trip times, keyed by host, on a channel that is deliberately not the state broadcast.
+    ///
+    /// F4.29's readout is the only consumer, and it is one line of text in a status bar — but the
+    /// value it displays lives on `HostState`, so until this existed every probe answer was a real
+    /// difference in the diffed model, and every ten seconds each host broadcast a snapshot that
+    /// rebuilt a SwiftUI tree holding every pane on screen. **That was the whole of P6.6's miss.**
+    /// Measured on 12 panes, two runs each: mean 0.45% and 0.71% of one core with spikes to 5.4%,
+    /// against **0.04% mean and no sample above 0.8%** once the reading moved here.
+    ///
+    /// The probe is not the cost and was never a candidate: an arm that kept sending
+    /// `display-message` every ten seconds and only stopped writing the answer to `HostState` was
+    /// flat, with no spike at all. What costs is the broadcast, and after it the rebuild.
+    public func roundTripStream() -> AsyncStream<[String: Double]> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream.makeStream(of: [String: Double].self)
+        roundTripContinuations[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeRoundTripContinuation(id) }
+        }
+        continuation.yield(currentRoundTrips())
+        return stream
+    }
+
+    private func removeRoundTripContinuation(_ id: UUID) {
+        roundTripContinuations.removeValue(forKey: id)
+    }
+
+    private func currentRoundTrips() -> [String: Double] {
+        hosts.compactMapValues { $0.rttMilliseconds }
+    }
+
+    private func broadcastRoundTrips() {
+        guard !roundTripContinuations.isEmpty else { return }
+        let snapshot = currentRoundTrips()
+        for continuation in roundTripContinuations.values {
+            continuation.yield(snapshot)
+        }
+    }
+
+    /// Whether two states of one host differ in anything but the round-trip reading.
+    ///
+    /// The reading is normalised onto the earlier value rather than both being cleared, so this stays
+    /// one comparison of two whole states: a field added to `HostState` is covered by it from the day
+    /// it is added, which an allowlist of compared fields would not be. `HostState`'s arrays are
+    /// copy-on-write, so the copy is a retain rather than a walk of every pane.
+    /// Internal rather than private so `RoundTripBroadcastTests` can hold it to the rule: the whole
+    /// of P6.6's fix is which changes reach `broadcastState`, and a later field that quietly stopped
+    /// being compared would cost a topology update rather than a status-bar reading.
+    static func differsBeyondRoundTrip(_ before: HostState?, _ after: HostState?) -> Bool {
+        guard var normalised = before, let after else { return (before != nil) != (after != nil) }
+        normalised.rttMilliseconds = after.rttMilliseconds
+        return normalised != after
     }
 
     public func setDiagnosticLogger(_ logger: (@Sendable (String) -> Void)?) {
@@ -1388,7 +1447,16 @@ public actor SessionService {
         // Only topology changes redraw the UI. Broadcasting on every %output would rebuild the
         // whole SwiftUI tree for each chunk of terminal output, which tears down the very terminal
         // views the output is meant to be painting into.
-        if hosts[hostId] != before {
+        //
+        // F4.29's round-trip reading is excluded from that decision and published separately: it
+        // changes every ten seconds per host, by definition, and a status-bar readout is not worth a
+        // tree rebuild. It is yielded whenever it moves — including alongside a real state change,
+        // so the narrow channel is never the stale one (P6.6).
+        let after = hosts[hostId]
+        if before?.rttMilliseconds != after?.rttMilliseconds {
+            broadcastRoundTrips()
+        }
+        if Self.differsBeyondRoundTrip(before, after) {
             broadcastState()
         }
     }

@@ -8,6 +8,8 @@ struct StatusBarView: View {
     let session: TmuxSession
     let window: TmuxWindow
     let focusedPaneId: String?
+    /// Read for F4.29's indicator, and read *there* rather than here. See `RoundTripIndicator`.
+    let model: AppModel
     /// F4.21 — whether the next chord is going to the pane rather than to the application.
     let literalEscapeArmed: Bool
 
@@ -69,15 +71,7 @@ struct StatusBarView: View {
                     .help("Pane size in cells, as reported by tmux")
             }
 
-            if let rtt = host.rttMilliseconds {
-                HStack(spacing: 4) {
-                    Circle().fill(rttColor(rtt)).frame(width: 6, height: 6)
-                    Text(Self.rttText(rtt, differentiateWithoutColor: differentiateWithoutColor))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .help("Round trip over the control channel")
-            }
+            RoundTripIndicator(model: model, hostId: host.id)
 
             if let version = host.tmuxVersion {
                 Text("tmux \(version)").font(.caption2).foregroundStyle(.secondary)
@@ -105,10 +99,6 @@ struct StatusBarView: View {
         return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
     }
 
-    private func rttColor(_ rtt: Double) -> Color {
-        rtt < 50 ? .green : (rtt < 150 ? .orange : .red)
-    }
-
     /// The dot is the judgement and the number is the measurement, so with colour taken away only the
     /// measurement is left — and "120 ms" answers nothing unless you already know where the
     /// thresholds sit. The word is the same answer the dot gives, in the one channel that survives.
@@ -126,5 +116,42 @@ struct StatusBarView: View {
         guard differentiateWithoutColor else { return measured }
         let judgement = rtt < 50 ? "good" : (rtt < 150 ? "fair" : "slow")
         return "\(measured) · \(judgement)"
+    }
+}
+
+/// F4.29's round-trip readout, as a view of its own — which is the whole point of it.
+///
+/// The reading changes every ten seconds per host and nothing else in the application depends on
+/// it, so it travels on `SessionService.roundTripStream` rather than in the state broadcast (P6.6).
+/// That is only half the fix, and the missing half has no compiler to catch it: SwiftUI invalidates
+/// the views whose **body reads** the property, so reading `model.roundTripMilliseconds` in
+/// `AppMain`'s window body — the body that also builds the pane tree — puts the ten-second rebuild
+/// back through a different door, with a channel change that looks like it fixed something. The
+/// first attempt did exactly that.
+///
+/// So this exists to be the only reader, and to be small enough that being rebuilt every ten
+/// seconds costs nothing. Anything else that comes to depend on a value changing on a timer wants
+/// the same treatment, and wants it checked the same way — by measuring, since the cost is a tree
+/// rebuild and no unit test can see one.
+struct RoundTripIndicator: View {
+    let model: AppModel
+    let hostId: String
+
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
+
+    var body: some View {
+        if let rtt = model.roundTripMilliseconds[hostId] {
+            HStack(spacing: 4) {
+                Circle().fill(color(rtt)).frame(width: 6, height: 6)
+                Text(StatusBarView.rttText(rtt, differentiateWithoutColor: differentiateWithoutColor))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .help("Round trip over the control channel")
+        }
+    }
+
+    private func color(_ rtt: Double) -> Color {
+        rtt < 50 ? .green : (rtt < 150 ? .orange : .red)
     }
 }

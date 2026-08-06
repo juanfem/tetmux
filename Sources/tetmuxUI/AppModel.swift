@@ -14,6 +14,14 @@ public final class AppModel {
     public let settings: SettingsStore
 
     public var hosts: [HostState] = []
+    /// F4.29's round-trip readings, by host id, kept apart from `hosts` on purpose.
+    ///
+    /// Assigning `hosts` invalidates everything that reads it, which is the sidebar, the tab strip
+    /// and every pane in the tree — and the reading changes every ten seconds per host whether or not
+    /// anything else has. Keeping it here means a probe answer invalidates the one status-bar line
+    /// that displays it. It arrives on `SessionService.roundTripStream`, which is where the
+    /// measurement behind this is written down.
+    public var roundTripMilliseconds: [String: Double] = [:]
     /// Written by the settings pane and by ⌘+/⌘−, and persisted on every change.
     ///
     /// `didSet` rather than an explicit save at each call site: there are several writers now and one
@@ -150,6 +158,7 @@ public final class AppModel {
 
     @ObservationIgnored private var networkMonitor: NetworkStateMonitor?
     @ObservationIgnored private var stateTask: Task<Void, Never>?
+    @ObservationIgnored private var roundTripTask: Task<Void, Never>?
     /// Prompts already acted on, by prompt id. A prompt stays published until it is answered, so
     /// without this every state broadcast in between would launch another Keychain lookup.
     @ObservationIgnored private var handledPrompts: Set<UUID> = []
@@ -461,6 +470,13 @@ public final class AppModel {
             guard let self else { return }
             for await snapshot in await self.service.stateStream() {
                 self.apply(snapshot)
+            }
+        }
+
+        roundTripTask = Task { [weak self] in
+            guard let self else { return }
+            for await readings in await self.service.roundTripStream() {
+                self.roundTripMilliseconds = readings
             }
         }
 

@@ -576,6 +576,7 @@ struct RootView: View {
                 StatusBarView(
                     host: host, session: session, window: window,
                     focusedPaneId: state.focusedPaneId,
+                    model: model,
                     literalEscapeArmed: model.literalEscapeArmed
                 )
             }
