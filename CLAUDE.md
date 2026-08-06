@@ -1215,6 +1215,22 @@ for is that the chord still *matches*, so that has its own test: `charactersIgno
   it is drawn in `.secondary`, so the signal is a filled chip behind the button and the weight is
   only its companion.
 
+**Keystrokes coalesce on the trailing edge of the window and are written on the leading one, and
+the difference was two thirds of P6.1's budget.** Every `send-keys` under control mode is a
+`%begin`/`%end` round trip, so a burst has to become one command (§3.2, P6.4) — but the first
+implementation started a task that slept `keyFlushInterval` (8 ms) and *then* wrote, which made a
+keystroke with nothing to coalesce with pay the full interval for a batch of one. That is every
+keystroke at typing speed. Measured p50 keypress → echo was 9.76 ms, of which 8 was the timer, and
+P6.1's 12 ms was missed at 24.43 ms p95. Writing immediately when the window has already elapsed,
+and coalescing whatever arrives during the one that follows, took the round trip's p95 from 19.72 ms
+to 1.72 and the whole figure to 11.54. Two things keep it honest: the scheduled flush waits out the
+**remainder** of the window rather than a fresh interval, or a steady typist pushes it further away
+with every key and starves it; and a flush that finds an empty queue must **not** start a new
+window, since nothing was written and the next keystroke would wait for a send that never happened.
+The command rate under sustained typing is unchanged — one per interval — and that is asserted, not
+assumed: `testABurstOfKeystrokesStillLeavesAsOneCommand` reads the count *before* waiting, because
+after the wait the two designs are indistinguishable.
+
 ## Measuring (§6)
 
 Verification is **local and scripted, not CI** — the SRD's decision (§6, §8), on the same argument

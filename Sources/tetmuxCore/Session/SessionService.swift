@@ -210,6 +210,10 @@ public actor SessionService {
         var promptSettleTask: Task<Void, Never>?
 
         var pendingKeys: [String: [UInt8]] = [:]
+        /// When the last `send-keys` went out, so the coalescer can tell a keystroke that has
+        /// something to wait for from one that does not. `nil` until the first, which is what makes
+        /// the very first keystroke of a session take the immediate path like any other isolated one.
+        var lastKeyFlush: ContinuousClock.Instant?
         var repaintedPanes: Set<String> = []
 
         /// Whether this server can pause a pane at all (`refresh-client -A`, tmux 3.2).
@@ -2683,13 +2687,41 @@ public actor SessionService {
 
     /// Queues keystrokes for a pane. Under control mode every keystroke is a command with a
     /// `%begin`/`%end` round trip, so they are coalesced into one `send-keys` per frame (§3.2).
+    ///
+    /// **Coalesced on the trailing edge of the window, written on the leading one**, and the
+    /// difference is most of P6.1's budget. This used to start a task that slept `keyFlushInterval`
+    /// and *then* wrote, so a keystroke with nothing to coalesce with — which is every keystroke at
+    /// typing speed — paid the full 8 ms before anything left the process. Measured against P6.1's
+    /// 12 ms: p50 keypress → echo was 9.76 ms, of which 8 was this timer and 1.8 was the work
+    /// (`docs/measurements.md`).
+    ///
+    /// So a keystroke arriving when the window has already elapsed goes out **now**, and the window
+    /// starts again from that write; anything typed during it accumulates and leaves as one command
+    /// when it closes. Under sustained typing the command rate is unchanged — one per interval,
+    /// which is what P6.4 asks for and what keeps a burst from becoming one `%begin`/`%end` round
+    /// trip per key. What changes is only the first keystroke after a pause, which is the one a
+    /// person is waiting on.
     public func sendKeys(hostId: String, paneId: String, bytes: [UInt8]) {
         guard !bytes.isEmpty, let connection = connections[hostId] else { return }
         connection.pendingKeys[paneId, default: []].append(contentsOf: bytes)
 
+        // A flush is already scheduled: this keystroke is one of the ones being coalesced.
         guard connection.keyFlushTask == nil else { return }
-        connection.keyFlushTask = Task { [weak self, interval = keyFlushInterval] in
-            try? await Task.sleep(for: interval)
+
+        guard let last = connection.lastKeyFlush else {
+            flushKeys(hostId: hostId)
+            return
+        }
+        let elapsed = now() - last
+        guard elapsed < keyFlushInterval else {
+            flushKeys(hostId: hostId)
+            return
+        }
+        // Part-way into the window, so this waits out the *remainder* rather than a fresh interval.
+        // Sleeping the whole interval here would let a steady typist push the flush further away
+        // with every key and starve it for as long as they kept typing.
+        connection.keyFlushTask = Task { [weak self, remaining = keyFlushInterval - elapsed] in
+            try? await Task.sleep(for: remaining)
             await self?.flushKeys(hostId: hostId)
         }
     }
@@ -2703,10 +2735,19 @@ public actor SessionService {
         connection.keyFlushTask = nil
         let batches = connection.pendingKeys
         connection.pendingKeys.removeAll(keepingCapacity: true)
+        // Nothing to send is not a write, so it must not start the window: a flush that found an
+        // empty queue would otherwise make the next keystroke wait out an interval during which
+        // nothing was sent.
+        guard batches.contains(where: { !$0.value.isEmpty }) else { return }
+        connection.lastKeyFlush = now()
 
         for (paneId, bytes) in batches where !bytes.isEmpty {
             let hex = bytes.map { String(format: "%02x", $0) }.joined(separator: " ")
             send("send-keys -H -t \(paneId) \(hex)", kind: .ignore, hostId: hostId, connection: connection)
+            // The one seam a test has on the coalescer: whether a burst became one command or
+            // several is invisible in `HostState` by design — the pane receives the same bytes
+            // either way — so this is asserted through the diagnostic logger, as flow control is.
+            log("[\(hostId)] send-keys flush: \(bytes.count) byte(s) to \(paneId)")
         }
     }
 

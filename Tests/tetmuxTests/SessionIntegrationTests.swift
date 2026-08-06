@@ -3298,6 +3298,87 @@ final class SessionIntegrationTests: XCTestCase {
         XCTAssertTrue(reason.contains("Permission denied"), "got: \(reason)")
     }
 
+    // MARK: - Keystroke coalescing (P6.1/P6.4)
+
+    /// P6.1 — a keystroke with nothing to coalesce with is written immediately.
+    ///
+    /// The coalescer used to sleep the flush interval and *then* write, so the first key of a burst
+    /// paid 8 ms for a batch of one. That was two thirds of the 12 ms budget spent on a timer, and
+    /// it is the single biggest term the P6.1 harness found.
+    ///
+    /// Asserted without a stopwatch, and without waiting at all — which is the only way to tell the
+    /// two designs apart. Freezing the injected clock does *not* do it: `Task.sleep` runs on the
+    /// real one, so a trailing-edge flush still lands 8 ms later and any test that waits sees it and
+    /// passes. What separates them is that the leading-edge write happens **inside the `sendKeys`
+    /// call**, so it is already done when the `await` returns. Hence the synchronous sink: an actor
+    /// sink would need an await of its own, which is the wait this is trying not to do.
+    func testAnIsolatedKeystrokeIsNotHeldForTheCoalescer() async throws {
+        let frozen = ContinuousClock.now
+        let service = SessionService(now: { frozen })
+        let sink = SyncLogSink()
+        await service.setDiagnosticLogger { message in sink.append(message) }
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        let before = sink.count("send-keys flush")
+        await service.sendKeys(hostId: "local", paneId: paneId, bytes: [0x61])
+        XCTAssertEqual(
+            sink.count("send-keys flush"), before + 1,
+            "the keystroke was still in the coalescer when sendKeys returned: \(sink.text)"
+        )
+    }
+
+    /// …and P6.4's half, which the fix had to leave alone: a burst is still one command.
+    ///
+    /// Under control mode every `send-keys` is a `%begin`/`%end` round trip, so a command per key is
+    /// what wedges the channel under a fast typist or a held key. Leading-edge flushing costs at
+    /// most one extra command per burst — the first one — and everything typed during the window
+    /// that follows still leaves together.
+    func testABurstOfKeystrokesStillLeavesAsOneCommand() async throws {
+        let frozen = ContinuousClock.now
+        let service = SessionService(now: { frozen })
+        let sink = SyncLogSink()
+        await service.setDiagnosticLogger { message in sink.append(message) }
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        // Subscribed before the keys are sent, because the assertion below is about what the pane
+        // received and `collect` has to be reading before it arrives.
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
+        let collected = collect(stream, until: "coalesced-ok")
+        try await Task.sleep(for: .milliseconds(500))
+
+        // One key at a time, as a typist produces them, with the clock held still: the first leaves
+        // immediately and every one after it is inside the window for as long as the frozen clock
+        // says it is. The trailing `\r` runs the line, which is what the marker below waits for.
+        let burst: [UInt8] = Array("echo coalesced-ok\r".utf8)
+        for byte in burst {
+            await service.sendKeys(hostId: "local", paneId: paneId, bytes: [byte])
+        }
+        // Read before waiting: exactly one command has gone out — the leading-edge write — and the
+        // other seventeen keys are still being coalesced. This is the assertion that says the fix
+        // did not turn a burst into a command per key, which is what P6.4 forbids.
+        XCTAssertEqual(
+            sink.count("send-keys flush"), 1,
+            "\(burst.count) keys produced \(sink.count("send-keys flush")) commands: \(sink.text)"
+        )
+
+        _ = try await waitFor(seconds: 3) { sink.count("send-keys flush") >= 2 }
+        let flushes = sink.count("send-keys flush")
+        XCTAssertEqual(flushes, 2, "\(burst.count) keys became \(flushes) commands: \(sink.text)")
+
+        // And correctness, which is what the count is in service of: the pane received the whole
+        // line, in order, split across those two commands.
+        let output = await collected.value
+        XCTAssertTrue(output.contains("coalesced-ok"), "got:\n\(output)")
+    }
+
     // MARK: - Helpers
 
     /// Collects one pane subscription's bytes, with a mark so a test can ask what arrived *after* some
@@ -3305,11 +3386,42 @@ final class SessionIntegrationTests: XCTestCase {
     /// Collects the diagnostic log, which is the only place the flow-control decisions are visible:
     /// pausing a pane changes nothing about `HostState`, deliberately — it is a property of the
     /// channel, not of the model the UI renders.
+    /// The same, for the one question that cannot be asked across an `await`.
+    ///
+    /// `LogSink` is an actor, so reading it suspends — and a suspension is exactly long enough for a
+    /// flush scheduled 8 ms out to have happened, which is the thing the coalescer tests have to be
+    /// able to tell apart. This one is read synchronously, so "has the command gone out *yet*" is a
+    /// question with an answer. `@unchecked Sendable` over a lock rather than an actor for that
+    /// reason and no other.
+    private final class SyncLogSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+
+        func append(_ line: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            lines.append(line)
+        }
+
+        func count(_ needle: String) -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return lines.filter { $0.contains(needle) }.count
+        }
+
+        var text: String {
+            lock.lock()
+            defer { lock.unlock() }
+            return lines.joined(separator: "\n")
+        }
+    }
+
     private actor LogSink {
         private var lines: [String] = []
 
         func append(_ line: String) { lines.append(line) }
         func contains(_ needle: String) -> Bool { lines.contains { $0.contains(needle) } }
+        func count(_ needle: String) -> Int { lines.filter { $0.contains(needle) }.count }
         var text: String { lines.joined(separator: "\n") }
     }
 

@@ -20,35 +20,47 @@ because the point of the table is the trend.
 **Script:** `Scripts/measure-latency.sh` (release build, private tmux server, synthetic keystrokes).
 **Instrumentation:** `Sources/tetmuxUI/LatencyProbe.swift`.
 
-| Date | Machine | Display | Samples | p50 | **p95** | max |
-|---|---|---|---|---|---|---|
-| 2026-08-06 | Apple M3, macOS 26.5.1 | 3440×1440 @ 100 Hz | 38 | 13.50 ms | **24.43 ms** | 24.88 ms |
+| Date | Machine | Display | Samples | p50 | **p95** | max | |
+|---|---|---|---|---|---|---|---|
+| 2026-08-06 | Apple M3, macOS 26.5.1 | 3440×1440 @ 100 Hz | 38 | 13.50 ms | **24.43 ms** | 24.88 ms | trailing-edge flush |
+| 2026-08-06 | Apple M3, macOS 26.5.1 | 3440×1440 @ 100 Hz | 148 | 11.11 ms | **11.54 ms** | 11.84 ms | leading-edge flush |
 
-**Missed, by 2×.** And the split says where it goes:
+**Missed by 2×, then met.** The split is what found it:
 
-| | p50 | p95 |
-|---|---|---|
-| keypress → echo (off-machine and back) | 9.76 ms | 19.72 ms |
-| echo → glyph drawn (AppKit + SwiftTerm) | ~3.7 ms | ~4.7 ms |
+| | p50 before | p95 before | p50 after | p95 after |
+|---|---|---|---|---|
+| keypress → echo (off-machine and back) | 9.76 ms | 19.72 ms | 0.92 ms | 1.72 ms |
+| echo → glyph drawn (AppKit + SwiftTerm) | ~3.7 ms | ~4.7 ms | ~10.2 ms | ~9.8 ms |
 
-The round trip is the whole problem, and **8 ms of it is a timer we set ourselves**.
-`SessionService.sendKeys` starts a task that sleeps `keyFlushInterval` (8 ms) and *then* writes, so
-a keystroke with nothing to coalesce with — which is every keystroke at typing speed — waits the
-full interval before anything leaves the process. Measured p50 echo is 9.76 ms: 8 ms of sleep and
-about 1.8 ms of real work, on a local session where tmux is on the same machine.
+The round trip was the whole problem, and **8 ms of it was a timer we set ourselves**.
+`SessionService.sendKeys` started a task that slept `keyFlushInterval` (8 ms) and *then* wrote, so a
+keystroke with nothing to coalesce with — which is every keystroke at typing speed — waited the full
+interval before anything left the process. p50 echo was 9.76 ms: 8 ms of sleep and 1.8 ms of real
+work, on a session where tmux is on the same machine.
 
-That is not an argument against coalescing. P6.4 asks for it and a paste or a held key needs it.
-It is an argument about *which edge*: flushing the first keystroke immediately and coalescing
-everything that arrives during the next 8 ms would leave the batching intact under load and take 8
-ms off the isolated keystroke. `TODO.md` carries it as its own entry, with this measurement as the
-evidence.
+The fix was the edge, not the interval. Writing the first keystroke immediately and coalescing what
+arrives during the window that follows leaves P6.4's batching exactly where it is needed — under
+sustained typing the command rate is unchanged, one per interval — and takes the timer off the
+keystroke somebody is waiting on. **19.72 ms p95 of round trip became 1.72.**
 
-Two things this measurement does not include, both of which make the real figure worse rather than
-better. The interval closes when AppKit has drawn the view, **not** when the window server has
-composited it or the display has scanned it out — at 100 Hz that is up to another 10 ms, and it is
-not reachable from inside the process. And the samples are synthetic keystrokes posted by
-`osascript`, which arrive as ordinary events but at machine-perfect spacing; a human types less
-evenly, which is the case that finds the tail.
+### What is left is the display, and it is most of the budget now
+
+After the fix the round trip is under 2 ms and the remaining ~10 ms is between the bytes reaching
+the emulator and AppKit having drawn — which at 100 Hz is one frame. tetmux is frame-bound here, not
+protocol-bound, and that reframes P6.1's 12 ms:
+
+* At **100 Hz** a frame is 10 ms, leaving about 2 ms of slack. The measured p95 of 11.54 ms fits,
+  but not with room to spare — a p95 that drifts past 12 on this hardware is a frame being missed,
+  not the protocol slowing down, and the echo column is how to tell.
+* At **60 Hz** a frame is 16.7 ms and P6.1 cannot be met by *any* application, this one included.
+  A future run on a 60 Hz panel that reports ~18 ms is not a regression. This is why the display is
+  recorded beside the machine.
+
+Two things the measurement still does not include, both of which make the real figure worse rather
+than better. The interval closes when AppKit has drawn the view, **not** when the window server has
+composited it or the display has scanned it out — unreachable from inside the process. And the
+samples are synthetic keystrokes posted by `osascript`: they arrive as ordinary events but at
+machine-perfect spacing, and a human types less evenly, which is the case that finds a tail.
 
 ## P6.3 — sustained `%output` throughput
 

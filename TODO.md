@@ -8,44 +8,26 @@ that the work can start from the entry alone. An unlisted requirement reads as d
 failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
 belongs here.
 
-**3 features, 3 tests owed, 1 blocked, 2 parked.** The six small items this file opened with, copy
+**2 features, 3 tests owed, 1 blocked, 2 parked.** The six small items this file opened with, copy
 mode, and the integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on
 2026-08-06; what they turned into is recorded in `CLAUDE.md`, not here. The five entries added on
 2026-08-06 came out of an adherence review of the tree against SRD v2.1 — a review that mostly
 found the *documents* behind the code, and amended the SRD's stale status notes in the same pass.
 The launcher's half of that batch (F4.25/F4.26) closed the same day.
 
-**The P6 harness closed on 2026-08-06 and replaced itself with what it measured.** The entry asking
-for instrumentation is gone — `Scripts/measure-latency.sh`, `Scripts/measure-throughput.sh` and
-`Scripts/measure-idle.md` exist, and `docs/measurements.md` holds the numbers. The two entries
-below are its output: P6.3 passes with 6.5× of room, P6.1 misses by 2×, and P6.6/P6.7 need an
-arrangement of real machines that no script can build. That is what a measurement harness is for,
-and it is the reason the count above went up rather than down.
+**The P6 harness closed on 2026-08-06 and paid for itself the same day.**
+`Scripts/measure-latency.sh`, `Scripts/measure-throughput.sh` and `Scripts/measure-idle.md` exist,
+and `docs/measurements.md` holds the numbers. P6.3 passed with 6.5× of room. P6.1 failed by 2× —
+p95 24.43 ms against 12 — which turned out to be an 8 ms timer of our own in the keystroke
+coalescer; flushing on the leading edge instead brought it to 11.54 ms and closed the entry that
+finding had opened. What is left of P6 is P6.6/P6.7, which need an arrangement of real machines that
+no script can build.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
 ---
 
 ## Features, sized like features
-
-- [ ] **P6.1 is missed by 2×, and 8 ms of the 12 ms budget is a timer we set ourselves.**
-  Measured 2026-08-06 on an M3: **p95 24.43 ms** keypress → glyph on a *local* session, against
-  P6.1's 12 ms (`docs/measurements.md`). The split is the finding — 19.72 ms p95 of it is
-  keypress → echo, and `SessionService.sendKeys` (`keyFlushInterval`, 8 ms) accounts for most of
-  that: it starts a task that *sleeps and then writes*, so a keystroke with nothing to coalesce
-  with — every keystroke at typing speed — waits the full interval before anything leaves the
-  process. Measured p50 echo is 9.76 ms: 8 ms of sleep and 1.8 ms of work.
-  *Do:* flush on the **leading** edge — write the first keystroke immediately, then coalesce
-  whatever arrives during the next 8 ms into the following `send-keys`. That keeps P6.4's
-  batching exactly where it is needed (a paste, a held key, a fast burst) and takes 8 ms off the
-  isolated keystroke. Two things to get right: the flush task must not be scheduled when the
-  write already happened, or every burst pays the interval twice; and the batching under load is
-  what P6.4 asks for, so the fix is verified by re-running `Scripts/measure-latency.sh` **and**
-  by checking a fast burst still coalesces rather than sending one command per key. The
-  remaining ~4 ms (echo → drawn) is AppKit and SwiftTerm and is not ours; the compositor and the
-  display are outside the measurement entirely, so the real figure is worse than 24 ms and the
-  budget after this fix is tighter than it looks.
-  `Sources/tetmuxCore/Session/SessionService.swift` (`sendKeys`, `flushKeys`)
 
 - [ ] **P6.6 and P6.7 have a procedure and no numbers.** `Scripts/measure-idle.md` is written —
   idle CPU on battery, wakeups under `powermetrics`, `footprint` for resident memory, the App
