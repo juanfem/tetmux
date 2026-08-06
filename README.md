@@ -277,6 +277,21 @@ seam narrow enough that nothing above it knows which emulator is drawing. It res
 
 tmux itself is neither bundled nor linked — tetmux spawns whatever `tmux` is on the host's `PATH`.
 
+## Scope and contributions
+
+tetmux is written for my own daily use, and that is what decides what goes in it. It is shared
+because it may be useful to someone else, not because it is aiming to be everyone's tmux client.
+
+Feature requests are welcome and I will consider the ones I find useful myself — if a request does
+not fit how I work, I will say so rather than leave it open indefinitely. Pull requests are welcome
+on the same terms: fixes, tests, and additions that leave the existing behaviour alone are the
+easiest to accept, and anything that changes the default workflow is unlikely to be merged even if
+it is well built. If you are planning something substantial, open an issue first so neither of us
+spends the effort before finding that out.
+
+The license is MIT, so forking is always an option and is the right one when the disagreement is
+about what the app should be.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
