@@ -28,6 +28,11 @@ so closing the lid, changing networks, or quitting the app leaves everything run
   Developed against tmux 3.7; older-server differences are handled explicitly, and some features are
   version-gated: per-window sizing needs 2.9, and flow control and format subscriptions need 3.2.
   Below 2.9 you get a one-time warning saying what is unavailable.
+  A host **below 2.4** is not refused: it falls back to a passthrough terminal — one plain `tmux` on
+  a pty, drawing its own status bar and answering its own prefix key, in one window rather than as
+  tabs and splits. It is a different thing wearing the same app, and the host says so; a host with no
+  tmux at all is offered a plain login shell instead, which is offered rather than opened because
+  nothing in it would survive the window closing.
 - For remote hosts: a working `ssh` login. tetmux shells out to the system `ssh`, so `~/.ssh/config`
   — including `ProxyJump`, `Match`, and agent forwarding — applies unchanged.
 
@@ -71,7 +76,9 @@ first open needs right-click → Open, or
 The sidebar lists hosts, their sessions, and each session's windows. `localhost` is always present
 and connects itself at launch; other hosts come from a conservative scan of `~/.ssh/config` plus
 anything you add in-app, and connect when you click them. There is also a menu bar item listing every
-host and session, and a **New Window** item in the Dock menu.
+host and session, and a Dock menu with **New Window**, **New Local Session**, and **New Remote
+Session ▸** — the last two because the Dock is the only surface the app has when no window is open,
+and offering only "new window" there meant a second view of what you were already looking at.
 
 | Shortcut | Action |
 |---|---|
@@ -86,14 +93,28 @@ host and session, and a **New Window** item in the Dock menu.
 | `⇧⌘[` / `⇧⌘]` | Previous / next tmux window |
 | `⌘R` / `⇧⌘R` | Rename window / rename session |
 | `⌘F` | Find in the focused pane's scrollback |
+| `⌃⌘F` | Search tmux's own history — further back than `⌘F` can reach |
+| `⌃⌘[` | Enter copy mode |
+| `⌃⌘Space` / `⌃⌘C` | Start selection / copy it to the Mac clipboard |
 | `⌘=` / `⌘-` / `⌘0` | Bigger / smaller / actual size |
 | `⌘V` | Paste into the focused pane |
+| `⌥⌘V` | Send the next chord to the pane literally, past every binding above |
 
 `⌘N` is a macOS window and `⌘T` is a tmux one, which is what those chords mean everywhere else.
 Every default binding lives in `Cmd` space — the one real simplification of being macOS-only, since
 `Cmd` chords collide with neither readline, Emacs, nor tmux's own prefix, so every bare `Ctrl` chord
 forwards to the pane untouched. tmux's prefix key is *not* intercepted and reaches the pane, which
-also means `prefix`-based bindings do nothing useful here; the table above is the replacement.
+also means `prefix`-based bindings do nothing useful here; the table above is the replacement. Every
+binding is editable in **Settings ▸ Keys**, and a rebind must keep `Cmd` in it, which is what keeps
+that promise about bare `Ctrl` true.
+
+The two searches are genuinely two. `⌘F` searches what this side is holding — the scrollback in the
+pane, as deep as the Settings depth and reset by a repaint. `⌃⌘F` searches tmux's own history on the
+server, which reaches further back than tetmux was ever sent, and it enters copy mode to do it. Copy
+mode itself is visible rather than silent: the pane badges the mode by name, because control mode is
+never streamed the overlay and a pane sitting in it otherwise looks exactly like a dead process. The
+keys you already use in copy mode still work — they go to tmux and are looked up in your own table —
+so the menu items add a way in and a way out to the Mac clipboard without taking anything away.
 
 Closing a tab **unlinks** the window — it never kills what is running — unless the window is linked
 to only that one session, which tmux cannot unlink, and then you are asked and told why. Holding `⌥`
@@ -109,10 +130,22 @@ every pane, with the focused pane's part in medium.
 
 ### Settings
 
-**tetmux ▸ Settings…** covers the font (family, size, ligatures) and how much scrollback each pane
-keeps — 10,000 lines by default. Scrollback is held on this side rather than by tmux, because control
-mode streams output here, so that number is what `⌘F` and scrolling up actually search. Changing the
-font re-asks tmux for a new grid, so panes reflow.
+**tetmux ▸ Settings…** has three tabs. **Terminal** covers the font (family, size, ligatures), the
+pane colour scheme, and how much scrollback each pane keeps — 10,000 lines by default. Scrollback is
+held on this side rather than by tmux, because control mode streams output here, so that number is
+what `⌘F` and scrolling up actually search. Changing the font re-asks tmux for a new grid, so panes
+reflow. The colour scheme applies to pane *contents* only and never to the app's chrome, which
+follows the system appearance; **System** is the absence of a scheme rather than a copy of today's
+colours, so it tracks light and dark while the app runs.
+
+**Notifications** is two switches, for bells and for activity, and they are deliberately not the same
+kind of thing. A bell is a program asking for attention, so it is on for every pane. Activity is only
+"output arrived in a window nobody is reading", which for most windows is a prompt redrawing — so it
+is opt-in **per window**, from the tab's or the tree's context menu, and the windows you have opted
+into persist across launches. Both only ever notify while tetmux is in the background.
+
+**Keys** is the keymap table, with a chord recorder. A chord already taken is refused rather than
+silently resolved, and edits are stored as the difference from the defaults.
 
 #### Scrollback is where the memory goes
 
@@ -253,9 +286,10 @@ them fail.
 - Authentication remains ssh's responsibility. A password is stored only if you ask for it, only in the
   login Keychain, and never in `hosts.json` — which has no field that could hold one. Deleting a host,
   or turning storage off, deletes the Keychain item too.
-- OSC 52 clipboard access by a remote host is refused: writes are denied and reads are never permitted.
-  T5.6 asks for writes to be enableable per host, and that switch does not exist yet — so today the
-  answer is simply no.
+- OSC 52 clipboard **writes are off by default and enabled per host**, in **Edit Host…** — trusting
+  the machine on your desk to set your clipboard is a different decision from trusting a shared box
+  you ssh into, so it is not one application-wide switch. A host record written before the field
+  existed reads as denied. Clipboard **reads are never permitted**, at any setting.
 - OSC 8 hyperlinks open only `http`, `https`, `mailto`, and `ftp`.
 - Clipboard content is encoded before it reaches tmux, so a paste is data and never a command. Names
   entered in the UI are stripped of anything that could end a command early.
@@ -265,8 +299,10 @@ them fail.
 | Path | Contents |
 |---|---|
 | `~/Library/Application Support/tetmux/hosts.json` | Host list, including tunnels, extra ssh options, and whether a password is expected. Hosts discovered from `~/.ssh/config` are re-read each launch; only your *edits* to them are stored, so the config file stays authoritative. A file that cannot be read is kept as `hosts.json.corrupt-<timestamp>` rather than overwritten. |
+| `~/Library/Application Support/tetmux/workspace.json` | Window arrangement — one entry per macOS window (host, session, tmux window, frame, whether the tree was showing), plus which windows you watch for activity and the launcher's recency order. View state and nothing else: tmux is the persistence layer for anything inside a pane. |
+| `~/Library/Application Support/tetmux/settings.json` | The keymap, as the difference from the defaults; `null` is a shortcut deliberately unbound. JSON rather than `UserDefaults` because a keymap is a document you may want to read, diff, or copy to another Mac. |
 | `~/Library/Caches/tetmux/cm-%C` | ssh `ControlMaster` socket. Kept short on purpose — unix socket paths cap at 104 bytes. |
-| `UserDefaults` | Terminal font, size, ligatures, and scrollback depth. |
+| `UserDefaults` | Terminal font, size, ligatures, scrollback depth, colour scheme, and the two notification switches — the ordinary preferences the system already has a place for. |
 | Login Keychain | Per-host passwords, opt-in, as internet passwords with protocol `ssh`. |
 
 While tetmux is attached it sets `window-size manual` on the session so each window can be sized

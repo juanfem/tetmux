@@ -47,6 +47,7 @@ Scripts/measure-idle.md                # P6.6/P6.7 by hand — the procedure, no
 
 Scripts/capture-programs.py            # §8's program corpus: vim/htop/less/top/powerline, and the
                                        # grid tmux renders from each. By hand, never in CI.
+Scripts/capture-throughput.py          # the %output fixture measure-throughput.sh replays
 
 Scripts/build-tmux-matrix.sh           # tmux 3.0/3.2a/3.3a/3.4/3.5 from pinned tarballs
 Scripts/test-matrix.sh                 # the integration suite against every one of them
@@ -149,6 +150,9 @@ Where things are, since the invariants below name symbols without saying which f
 | `DestructiveActionModal.swift` | The F4.10 confirmation, which says *why* the close is a kill. |
 | `CopyModeSearchSheet.swift` | Searches tmux's history, which is not what ⌘F searches. |
 | `BellNotifier.swift` · `KeychainStore.swift` | F4.31 background bells; per-host passwords. |
+| `HostEditorView.swift` | The per-host form: destination, password, tunnels, ssh options, clipboard. |
+| `AuthenticationSheet.swift` · `RenameSheet.swift` | The four ssh prompt kinds; session/window renames. |
+| `LatencyProbe.swift` · `LaunchProbe.swift` | P6.1 and P6.7, off unless their env var asks. |
 
 ### The central abstraction
 
