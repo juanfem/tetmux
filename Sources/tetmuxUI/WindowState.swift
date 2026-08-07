@@ -88,7 +88,19 @@ public final class WindowState: Identifiable {
     /// `$id`
     public var selectedSessionId: String?
     /// `@id`
-    public var selectedWindowId: String?
+    ///
+    /// Changing it drops `focusedPaneId`, which belonged to the tab being left. Keeping it would
+    /// name a pane the new tab does not contain, so no pane there would match and none would take
+    /// the keyboard — while the old tab's pane, still in the hierarchy behind `.opacity(0)`, went on
+    /// matching and went on receiving every keystroke. Cleared, the new tab focuses the pane tmux
+    /// calls active, which is `TmuxWindow.preferredPaneId` and is also what tmux would hand a
+    /// `select-window` anywhere else.
+    public var selectedWindowId: String? {
+        didSet {
+            guard selectedWindowId != oldValue else { return }
+            focusedPaneId = nil
+        }
+    }
     /// `%id`
     public var focusedPaneId: String?
 

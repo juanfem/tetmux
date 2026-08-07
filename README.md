@@ -98,7 +98,7 @@ and offering only "new window" there meant a second view of what you were alread
 | `⌃⌘[` | Enter copy mode |
 | `⌃⌘Space` / `⌃⌘C` | Start selection / copy it to the Mac clipboard |
 | `⌘=` / `⌘-` / `⌘0` | Bigger / smaller / actual size |
-| `⌘V` | Paste into the focused pane |
+| `⌘V` | Paste into the focused pane (middle-click pastes the selection instead) |
 | `⌥⌘V` | Send the next chord to the pane literally, past every binding above |
 
 **A tmux window is called a *tab* throughout the app, and *window* always means a macOS window.**

@@ -27,6 +27,16 @@ public struct TerminalContainerView: View {
     /// 2.9 there is no per-window sizing at all, and `refresh-client -C` is then the single knob for
     /// every window the client shows — two windows setting it would just overwrite each other.
     let drivesClientSize: Bool
+    /// Whether this container is the tab currently on screen.
+    ///
+    /// Every tmux window of the session is built and the unselected ones are hidden with
+    /// `.opacity(0)` rather than dropped, so their pane surfaces are real `NSView`s in the hierarchy
+    /// the whole time — and an `NSView` that is merely transparent is still perfectly able to be the
+    /// window's first responder. Without this a keyboard tab switch left the *old* tab's pane
+    /// holding the keyboard: the new tab drew, the old one kept every keystroke, and nothing on
+    /// screen said so. `opacity`, `allowsHitTesting` and `accessibilityHidden` were all already
+    /// keyed on selection at the `ZStack`; first responder was the one that was not.
+    let isSelectedTab: Bool
     /// T5.6 — whether *this host* may write the Mac's clipboard with OSC 52. Passed down from the
     /// host's config rather than read from the theme: it is a statement about one machine's
     /// trustworthiness, and the theme is application-wide.
@@ -69,6 +79,7 @@ public struct TerminalContainerView: View {
         focusedPaneId: Binding<String?>,
         owner: UUID,
         drivesClientSize: Bool = true,
+        isSelectedTab: Bool = true,
         allowsRemoteClipboardWrite: Bool = false,
         liveResize: LiveResizeGate
     ) {
@@ -80,6 +91,7 @@ public struct TerminalContainerView: View {
         self._focusedPaneId = focusedPaneId
         self.owner = owner
         self.drivesClientSize = drivesClientSize
+        self.isSelectedTab = isSelectedTab
         self.allowsRemoteClipboardWrite = allowsRemoteClipboardWrite
     }
 
@@ -352,8 +364,13 @@ public struct TerminalContainerView: View {
     }
 
     private func pane(_ paneId: String, cols: Int, rows: Int) -> some View {
-        let focused = focusedPaneId == paneId
-            || (focusedPaneId == nil && paneId == window.preferredPaneId)
+        // The `nil` arm is what a freshly-selected tab focuses through: switching tabs clears
+        // `focusedPaneId` (it named a pane in the tab being left), so the new tab falls to the pane
+        // tmux itself calls active. Both arms are gated on being the visible tab, or every hidden
+        // one would resolve its own `preferredPaneId` and race for the keyboard.
+        let focused = isSelectedTab
+            && (focusedPaneId == paneId
+                || (focusedPaneId == nil && paneId == window.preferredPaneId))
         // A single pane is not ambiguous, so it is neither framed nor dimmed.
         let split = window.paneCount > 1
         return TerminalPaneView(

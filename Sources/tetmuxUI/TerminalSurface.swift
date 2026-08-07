@@ -442,7 +442,22 @@ struct TerminalPaneView: NSViewRepresentable {
         /// menu and middle-click. It targets *this* pane rather than `activeScope`'s, because a
         /// right-click is a statement about where the pointer is and need not have focused anything.
         func pasteFromPasteboard() {
-            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
+            paste(NSPasteboard.general.string(forType: .string))
+        }
+
+        /// Middle-click's text: the selection, the way it is on every X11 terminal.
+        ///
+        /// This pane's own selection first, then the last selection made in *any* pane, which is
+        /// what makes select-here/paste-there work and is the whole of what a primary selection is.
+        /// The clipboard is the last resort and only applies when nothing has ever been selected —
+        /// it used to be the *first* answer, so selecting a word and middle-clicking pasted whatever
+        /// was last ⌘C'd instead, which is a silent wrong paste rather than a missing feature.
+        func pasteSelection(in view: TerminalView) {
+            paste(view.getSelection() ?? PrimarySelection.text ?? NSPasteboard.general.string(forType: .string))
+        }
+
+        private func paste(_ text: String?) {
+            guard let text, !text.isEmpty else { return }
             let hostId = parent.hostId
             let paneId = parent.paneId
             let service = parent.service
@@ -688,16 +703,43 @@ final class PaneTerminalView: TerminalView, NSMenuItemValidation {
             .joined(separator: "\n")
     }
 
-    /// Middle-click pastes, the way it does everywhere else a terminal is used.
+    /// Middle-click pastes the **selection**, the way it does everywhere else a terminal is used.
     ///
-    /// The clipboard, not a primary selection — macOS has no such thing, so there is nothing else it
-    /// could mean. It routes through the same chunked path as ⌘V rather than SwiftTerm's keystroke
-    /// paste, so a multi-line clipboard cannot arrive as tmux commands.
+    /// It used to paste the clipboard, on the reasoning that macOS has no primary selection so
+    /// there was nothing else it could mean. There is: the terminal's own selection, which is what
+    /// every X11 terminal pastes here and what Terminal.app pastes too. Reading the clipboard
+    /// instead meant selecting a word and middle-clicking quietly pasted whatever was last ⌘C'd —
+    /// not a missing feature but a wrong paste, into a shell, with no way to tell from the gesture.
+    ///
+    /// It routes through the same chunked path as ⌘V rather than SwiftTerm's keystroke paste, so a
+    /// multi-line selection cannot arrive as tmux commands.
     override func otherMouseDown(with event: NSEvent) {
         guard event.buttonNumber == 2 else {
             super.otherMouseDown(with: event)
             return
         }
-        coordinator?.pasteFromPasteboard()
+        coordinator?.pasteSelection(in: self)
     }
+
+    /// Records every selection as the app-wide primary, so select-here/paste-there works across
+    /// panes and tabs the way it does across windows on X11.
+    ///
+    /// `selection` itself is internal to SwiftTerm, so this is the only seam: `selectionChanged` is
+    /// `open` and `getSelection()` is public. A cleared selection is deliberately *not* recorded —
+    /// releasing a drag or pressing a key clears it, and a primary that emptied itself the moment
+    /// you reached for the mouse would be useless.
+    override func selectionChanged(source: Terminal) {
+        super.selectionChanged(source: source)
+        if let text = getSelection(), !text.isEmpty { PrimarySelection.text = text }
+    }
+}
+
+/// The last text selected in any pane — X11's PRIMARY, kept by hand because macOS has no such
+/// pasteboard and SwiftTerm has no cross-view notion of one.
+///
+/// Deliberately not `NSPasteboard`: this must not touch the user's clipboard, and it must not
+/// outlive the process either. A selection is a transient pointing gesture, not a document.
+@MainActor
+enum PrimarySelection {
+    static var text: String?
 }

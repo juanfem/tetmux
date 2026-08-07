@@ -584,7 +584,10 @@ struct RootView: View {
                 // to nothing and reflow everything running in it.
                 ZStack {
                     ForEach(session.windows) { candidate in
-                        terminalContainer(host: host, window: candidate, state: state)
+                        terminalContainer(
+                            host: host, window: candidate, state: state,
+                            isSelectedTab: candidate.id == window.id
+                        )
                             .opacity(candidate.id == window.id ? 1 : 0)
                             .allowsHitTesting(candidate.id == window.id)
                             // Keeps AppKit from moving focus into a pane nobody can see.
@@ -617,7 +620,9 @@ struct RootView: View {
         }
     }
 
-    private func terminalContainer(host: HostState, window: TmuxWindow, state: WindowState) -> some View {
+    private func terminalContainer(
+        host: HostState, window: TmuxWindow, state: WindowState, isSelectedTab: Bool
+    ) -> some View {
         TerminalContainerView(
             hostId: host.id,
             window: window,
@@ -638,6 +643,9 @@ struct RootView: View {
             // and letting them drive the one client size would put the last one laid out in charge.
             drivesClientSize: model.activeWindowState?.id == state.id
                 && state.selectedWindowId == window.id,
+            // Gates first responder: a hidden tab's panes are real views and would otherwise keep
+            // the keyboard after a switch.
+            isSelectedTab: isSelectedTab,
             // T5.6 — the host's own opt-in, denied unless someone said otherwise for this host.
             allowsRemoteClipboardWrite: host.config.allowRemoteClipboardWrite,
             // R3.7 — this macOS window's, so a drag on another window's edge silences nothing here.

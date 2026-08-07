@@ -428,7 +428,15 @@ erases structural identity, so without an explicit id SwiftUI rebuilds every `NS
 and discards the terminal's contents.
 
 **Every tmux window of the session is built; unselected ones are hidden with `.opacity(0)`, never
-omitted with `if`.** Two separate failures, one visible and one not. Building only the selected window
+omitted with `if` — and everything that follows focus has to be keyed on selection by hand.** A
+hidden tab's pane surfaces are real `NSView`s in the hierarchy, and a transparent view is still able
+to be the window's first responder. `opacity`, `allowsHitTesting` and `accessibilityHidden` were
+keyed on the selected tab from the start; **first responder was not**, so a keyboard tab switch drew
+the new tab while the old one kept the keyboard — typing went into a pane nobody could see, with
+nothing on screen saying so. Two halves fix it and both are needed: `TerminalContainerView` takes an
+`isSelectedTab` and refuses focus without it, and `WindowState.selectedWindowId` clears
+`focusedPaneId` on a change, since that id named a pane in the tab being left and no pane in the new
+one would ever match it. Anything else that resolves "which pane is live" wants the same treatment. Two separate failures, one visible and one not. Building only the selected window
 tore down its `TerminalView`s on each tab switch and with them the whole local scrollback — the return
 trip replays `capture-pane`, which begins `ESC[H ESC[2J ESC[3J` and is capped at the capture budget,
 so "scroll up to see what that build printed" worked right up until you looked at another tab. And a

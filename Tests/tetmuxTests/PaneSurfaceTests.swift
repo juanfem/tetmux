@@ -170,3 +170,64 @@ final class TerminalLoggingTests: XCTestCase {
 private final class StubTerminalDelegate: TerminalDelegate {
     func send(source: Terminal, data: ArraySlice<UInt8>) {}
 }
+
+/// Switching tab must move the keyboard with it.
+///
+/// Every tmux window of the session is built and the unselected ones are hidden with `.opacity(0)`
+/// rather than dropped, so their pane surfaces stay in the view hierarchy — and a transparent
+/// `NSView` is still perfectly able to be first responder. `focusedPaneId` is one value per macOS
+/// window, so after a keyboard tab switch it still named a pane in the tab being *left*: nothing in
+/// the new tab matched it, so nothing there took the keyboard, while the old tab's pane went on
+/// matching and went on receiving every keystroke. You typed into a pane you could not see.
+final class TabFocusTests: XCTestCase {
+
+    @MainActor
+    func testSelectingAnotherTabDropsTheFocusedPane() {
+        let state = WindowState()
+        state.selectedWindowId = "@1"
+        state.focusedPaneId = "%5"
+
+        state.selectedWindowId = "@2"
+
+        XCTAssertNil(
+            state.focusedPaneId,
+            "it named a pane in the tab being left, so the new tab could focus nothing"
+        )
+    }
+
+    /// Re-selecting the same tab is not a switch, and must not throw away where the user was.
+    @MainActor
+    func testReselectingTheSameTabKeepsTheFocusedPane() {
+        let state = WindowState()
+        state.selectedWindowId = "@1"
+        state.focusedPaneId = "%5"
+
+        state.selectedWindowId = "@1"
+
+        XCTAssertEqual(state.focusedPaneId, "%5")
+    }
+}
+
+/// Middle-click pastes the selection, not the clipboard.
+final class PrimarySelectionTests: XCTestCase {
+
+    @MainActor
+    func testASelectionBecomesThePrimary() {
+        PrimarySelection.text = nil
+        PrimarySelection.text = "selected words"
+        XCTAssertEqual(PrimarySelection.text, "selected words")
+    }
+
+    /// The clipboard is the last resort and must not be the first answer: that is what made
+    /// selecting a word and middle-clicking paste whatever was last ⌘C'd.
+    @MainActor
+    func testThePrimaryIsSeparateFromTheClipboard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("clipboard contents", forType: .string)
+        PrimarySelection.text = "selected words"
+
+        XCTAssertEqual(PrimarySelection.text, "selected words")
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "clipboard contents")
+        XCTAssertNotEqual(PrimarySelection.text, NSPasteboard.general.string(forType: .string))
+    }
+}
