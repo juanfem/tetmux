@@ -11,10 +11,14 @@ so closing the lid, changing networks, or quitting the app leaves everything run
 
 > **Status:** usable, and honest about it. It connects, renders sessions and splits across as many
 > macOS windows as you like, survives dropped connections, restores your window arrangement across
-> launches, and has copy mode, drag-to-reorder tabs, an editable keymap and a settings pane. What it
-> does not have is a signed, notarised build (see the packaging note below) or an updater. `TODO.md`
-> is the working list; `docs/measurements.md` records where it meets its own performance targets and
-> where it does not.
+> launches, and has copy mode, drag-to-reorder tabs, an editable keymap and a settings pane. It meets
+> every performance target it sets itself — `docs/measurements.md` has the numbers with the hardware
+> beside each one.
+>
+> What it does **not** have is a notarised build or an updater, and that is a decision rather than a
+> queue: notarisation needs a paid Apple Developer account, tetmux is written for one person's daily
+> use, and the cost is a one-time right-click → Open on first launch (see the packaging note below).
+> `TODO.md` lists that and everything else parked, with the reasoning; nothing on it is in progress.
 
 ## Requirements
 
@@ -58,8 +62,9 @@ CI does the same on every push and attaches the image to any `v*` tag.
 
 The build is single-architecture — the filename says which — because a universal one pulls in
 SwiftTerm's Metal shader compilation and a toolchain component that is a separate multi-gigabyte
-download. The image is ad-hoc signed rather than notarised, so the first open needs right-click →
-Open, or `xattr -dr com.apple.quarantine /Applications/tetmux.app`.
+download. The image is ad-hoc signed rather than notarised — by decision, not omission — so the
+first open needs right-click → Open, or
+`xattr -dr com.apple.quarantine /Applications/tetmux.app`. Once per install, and never again.
 
 ## Using it
 

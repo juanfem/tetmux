@@ -75,8 +75,11 @@ SwiftTerm's Metal shaders and so needs a Metal toolchain component that is a sep
 multi-gigabyte download. The native path copies the `.metal` source into the resource bundle and
 never invokes the compiler. Do not revisit universal as part of other packaging work.
 
-Signing is ad-hoc (`codesign --sign -`): no Developer ID, no notarisation, no updater. That is a known
-gap with an account behind it, not an oversight — see `TODO.md`.
+Signing is ad-hoc (`codesign --sign -`): no Developer ID, no notarisation, no updater. That is a
+**decision** (§2.5), not a gap awaiting funds — notarisation needs a paid Apple Developer account,
+this is a tool for one person's daily use, and a first open is right-click → Open, which the release
+notes and the README both say at the download. Do not add signing work to unrelated packaging
+changes; the entry in `TODO.md` says what to do if an account ever arrives.
 
 ### The diagnostic CLI
 
@@ -1311,6 +1314,10 @@ nothing attached, closed from a 1×1 probe view added at `applicationDidFinishLa
 268–288 ms, inside the floor. The trace is still what says *where* the time goes (`xctrace export` on
 the `time-profile` table, aggregated over a phase window, needs no Instruments UI); the untraced probe
 is what says how much of it a user pays. Neither replaces the other.
+**P6.7 names *warm* launch** since the 2026-08-06 amendment. A cold one is ~898 ms, of which ~630 is
+an empty page cache paid inside AppKit's framework first-use — no tetmux symbol in it — so that half
+was amended out rather than chased, deliberately and not because it was incoherent. `TODO.md` keeps
+what was ruled out.
 
 **P6.1's two ends are in code we do not own, and neither could be an override.** SwiftTerm declares
 `TerminalView.keyDown` and `draw` `public` rather than `open`, which closes both to a subclass in

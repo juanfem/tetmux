@@ -3,17 +3,30 @@
 Rewritten from scratch on 2026-08-05 against `tetmux-srd.md` v2.1, which absorbed the audit's
 history: everything the old file recorded as done is now either an invariant in `CLAUDE.md` or an
 amended requirement in the SRD, and repeating it here would be a second copy that drifts. This file
-holds only what is **open**, with the evidence that it is open and instructions concrete enough
-that the work can start from the entry alone. An unlisted requirement reads as done — that is the
-failure mode this file exists to prevent, so anything the SRD asks for that the tree does not do
-belongs here.
+holds what is **open** — with the evidence that it is open and instructions concrete enough that the
+work can start from the entry alone — and what is **parked**, marked `[~]`, which is work that could
+be done and deliberately is not, carrying the reason and enough of the investigation that un-parking
+it does not start from nothing. An unlisted requirement reads as done — that is the failure mode this
+file exists to prevent, so anything the SRD asks for that the tree does not do belongs here.
+As of 2026-08-06 the open list is empty and only the parked one has entries.
 
-**1 feature, 1 blocked, 3 parked.** The six small items this file opened with, copy
+**0 open, 5 parked by decision.** The six small items this file opened with, copy
 mode, and the integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on
 2026-08-06; what they turned into is recorded in `CLAUDE.md`, not here. The five entries added on
 2026-08-06 came out of an adherence review of the tree against SRD v2.1 — a review that mostly
 found the *documents* behind the code, and amended the SRD's stale status notes in the same pass.
 The launcher's half of that batch (F4.25/F4.26) closed the same day.
+
+**Nothing here blocks a release.** The last two entries left the open list on 2026-08-06 without
+either being implemented, and both are honest about that. P6.7's launch half was **amended to name
+warm launch**, which it passes at 268–288 ms: a cold launch is ~898 ms, the 630 ms difference is an
+empty page cache paid inside AppKit's framework first-use rather than in tetmux's code, and buying it
+back is open-ended work against a cost paid once per boot. Signing and notarisation moved from
+*blocked* to *parked*, because "blocked on an Apple Developer account" described a purchase nobody
+intends to make as though it were a queue: §1 says this is a tool for one person's daily use, and
+that person is content with the one-time right-click → Open. Both decisions are written into the SRD
+(§6 P6.7, §2.5) rather than left here, since a decision recorded only in a TODO list reads as
+outstanding work forever.
 
 **The three tests the SRD was owed closed on 2026-08-06**, and §8's status notes moved with them.
 T5.2 is asserted on both paths a pane's bytes arrive by. Sleep/wake is tested at its seam, and the
@@ -38,8 +51,9 @@ compositor can present anything, so it was unmeetable by any application; and **
 contradicted its own scrollback parenthesis**, asking for two things that could not both hold. Both
 were amended against the measurements rather than chased, which is what having numbers is for.
 
-Where that first pass left §6, and the honesty matters more than the tally. **P6.3 passes
-outright**, with
+Where that first pass left §6, and the honesty matters more than the tally — read as a snapshot of
+that pass, not as current status; the second pass and the launch amendment below supersede it.
+**P6.3 passes outright**, with
 6.5× of room. **P6.7's memory half passes the amended bound** — but that bound was drawn from these
 measurements with headroom, so it passes nearly by construction; what it buys is a regression check,
 not a validation. **P6.1's verdict is not yet knowable**: under the amended rule it passes on the
@@ -81,21 +95,24 @@ core became 0.14%** and the maximum 13.9% became 2.10%, against a 0.5% bar: insi
 been 3.7× over. The ten-second cadence is gone rather than reduced. Memory on the same arrangement is
 unchanged at 550 MB.
 
-*P6.7's launch half splits in two.* A third of every traced figure was `xctrace`: under the App
-Launch template `Process Creation` is ~290 ms for tetmux and **413 ms for Calculator**, with no
-main-thread samples in it at all. Untraced, the app times itself from the kernel's `p_starttime` to
-first frame and a warm launch is **268–288 ms, inside the 400 ms floor**. Cold is a different answer:
-purged and untraced the median is **897.8 ms**, so the page cache is worth ~630 ms and the
-requirement — which says *cold* — is **missed by ~2.2×**.
+*P6.7's launch half splits in two, and the split is what the amendment rests on.* A third of every
+traced figure was `xctrace`: under the App Launch template `Process Creation` is ~290 ms for tetmux
+and **413 ms for Calculator**, with no main-thread samples in it at all. Untraced, the app times
+itself from the kernel's `p_starttime` to first frame and a warm launch is **268–288 ms, inside the
+400 ms floor**. Cold is a different answer: purged and untraced the median is **897.8 ms**, so the
+page cache is worth ~630 ms. **P6.7 was amended on 2026-08-06 to name warm launch**, and the entry
+that stood here is below, kept as the record of what was ruled out.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
 ---
 
-## Features, sized like features
+## Parked by decision
 
-- [ ] **P6.7's launch half passes warm and misses cold by ~2.2× — and the old figure was partly the
-  tracer.**
+- [~] **P6.7's cold launch: ~898 ms, amended out of the requirement rather than fixed.** The
+  requirement now names **warm** launch, which passes at 268–288 ms (SRD §6, and the reasoning is
+  there rather than here). This entry survives because it holds what was measured and what was ruled
+  out, which is the expensive half and would otherwise have to be rediscovered.
   The 711 ms and 985 ms in the table were taken under Instruments' App Launch template, and the
   overhead that is inside every one of its phases was assumed small. It is not: `Process Creation`
   is ~290 ms for tetmux and **413 ms for Calculator**, an application with no scene of ours in it,
@@ -103,53 +120,49 @@ References point into current `main`. Line numbers drift; the symbol names besid
   each traced number is `xctrace` launching a process under ktrace.
   Untraced — `Scripts/measure-launch.sh --untraced`, where `LaunchProbe` times the kernel's
   `p_starttime` to the first frame with nothing attached — the median is **268–288 ms across two
-  sets of runs, inside the 400 ms floor**. The packaged `.app` is also not slower than the bare
-  binary (699.8 ms against 710.8 traced), which removes that caveat too.
+  sets of runs**. The packaged `.app` is also not slower than the bare binary (699.8 ms against
+  710.8 traced), which removes that caveat too.
   *Also answered:* the Scene Creation window holds no hot spot and no tetmux symbol. Read out of the
   trace with `xctrace export` on the `time-profile` table, its 215 ms of main-thread samples are
   AppKit 30, libobjc 27, CoreFoundation 24, libswiftCore 20, SwiftUI 14, CoreUI 14, dyld 10 — class
   realization, category attachment, bundle localization scans, the font registry, asset lookups,
   `NSWindow` init and SwiftUI graph construction. Framework first-use, spread thin. There is no
   single change to make there, which is consistent with an empty page cache costing that phase
-  210 ms while costing tetmux's own launch code nothing.
+  210 ms while costing tetmux's own launch code nothing — and it is why this was amended rather than
+  chased: the 630 ms is not in code this project writes.
   *Ruled out already:* SwiftTerm ships `Shaders.metal` as source rather than a compiled
   `.metallib` (see the packaging note in `CLAUDE.md`), and `makeLibrary(source:)` would be exactly
   the kind of disk-read-then-compile that fits this shape — but tetmux never enables SwiftTerm's
   Metal renderer, so it is never on the launch path. Do not chase it again.
-  **Cold is measured now and it fails**: purged and untraced, median **897.8 ms** against 400 ms,
-  spread 579.7–1012.3 across five runs. The page cache is worth ~630 ms of that, and P6.7 says
-  *cold*, so the warm pass does not discharge it — the requirement is missed by ~2.2×. A first
-  launch of a freshly linked binary, which is the shape of a first launch after install, measured
-  1192 ms independently.
-  *Do:* the target is the **210 ms an empty page cache adds to AppKit Scene Creation** — the only
-  phase that grows when the cache is emptied. Nothing tetmux does at launch grows, and the window
-  holds no hot spot, so this is not about optimising our own code: the samples are class
-  realization, category attachment, bundle localization scans, the font registry and asset lookups,
-  each a first-use cost paid once per framework rather than per line of ours. What is worth trying is
-  whether the first frame can be built touching fewer distinct SwiftUI/AppKit subsystems — the
-  sidebar, the tab strip, the status bar and the menu-bar extra are all constructed before it — and
-  measuring after each, since none of this is predictable from reading.
+  *If it is ever un-parked*, the target is the **210 ms an empty page cache adds to AppKit Scene
+  Creation** — the only phase that grows when the cache is emptied. What is worth trying is whether
+  the first frame can be built touching fewer distinct SwiftUI/AppKit subsystems — the sidebar, the
+  tab strip, the status bar and the menu-bar extra are all constructed before it — measuring after
+  each, since none of this is predictable from reading. Purged and untraced the median is
+  **897.8 ms**, spread 579.7–1012.3 across five runs, and a first launch of a freshly linked binary
+  measured 1192 ms independently; those are the numbers to beat.
   Whoever runs it: **not under `sudo`**. The script escalates for `purge` itself and now refuses to
   run as root, because as root the app reads root's Application Support and gets no dyld launch
   closure; that produced 1100.7 ms, *above* the traced figure, which is backwards and is how the
   confound was spotted.
   `Scripts/measure-launch.sh`, `Sources/tetmuxUI/LaunchProbe.swift`
 
-## Blocked on credentials
-
-- [ ] **Developer ID signing, notarisation, hardened runtime, and an updater (§2.5).** Signing is
-  ad-hoc (`codesign --sign -`); every user is on manual download plus a Gatekeeper fight the
-  release notes paper over with a quarantine workaround. Blocked on an Apple Developer account —
-  a decision with money attached, not an engineering task.
-  *When unblocked:* sign with the Developer ID Application cert plus
-  `--options runtime --timestamp` in `package-dmg.sh` (the ad-hoc branch stays for local
-  builds); `xcrun notarytool submit --wait` + `xcrun stapler staple` in the `v*` tag job, with
-  the account's app-specific password as a repo secret; then Sparkle via SPM, an EdDSA key
-  kept offline, and an appcast served from GitHub Releases. The DMG stays arm64-only by
-  decision — do not revisit universal as part of this.
+- [~] **Developer ID signing, notarisation, hardened runtime, and an updater (§2.5).** Signing is
+  ad-hoc (`codesign --sign -`), so a first open is right-click → Open or
+  `xattr -dr com.apple.quarantine`, which the release notes and the README both state at the
+  download. Parked 2026-08-06, moved here from *blocked*: notarisation needs a paid Apple Developer
+  account, §1 says tetmux is built for one person's daily use, and that person is content with the
+  one-time step — so this is a purchase deliberately not made, not a queue. Calling it blocked
+  implied somebody was waiting for it.
+  *If an account arrives* — sponsored, bought, or because the friction started landing on somebody
+  else — sign with the Developer ID Application cert plus `--options runtime --timestamp` in
+  `package-dmg.sh` (the ad-hoc branch stays for local builds); `xcrun notarytool submit --wait` +
+  `xcrun stapler staple` in the `v*` tag job, with the account's app-specific password as a repo
+  secret; then Sparkle via SPM, an EdDSA key kept offline, and an appcast served from GitHub
+  Releases. A Homebrew cask is worth doing at that moment and not before, since a cask of an
+  un-notarised build hands the same Gatekeeper step to someone who did not read the README. The DMG
+  stays arm64-only by decision — do not revisit universal as part of this.
   `Scripts/package-dmg.sh:136`, `.github/workflows/ci.yml`
-
-## Parked by decision
 
 - [~] **VoiceOver: announcing new output and per-line navigation.** The readable half is done —
   `accessibilityValue` is the visible viewport, bounded by the grid. Nothing posts

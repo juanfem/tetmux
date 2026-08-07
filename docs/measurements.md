@@ -221,9 +221,10 @@ coalescer needed.
 
 ---
 
-## P6.7 — cold launch to interactive
+## P6.7 — launch to interactive
 
-**Floor:** ≤ 400 ms.
+**Floor:** ≤ 400 ms **warm** *(amended 2026-08-06; the requirement said cold, and the rows below are
+what that change was made against — cold is still recorded here, just no longer bounded)*.
 **Script:** `Scripts/measure-launch.sh` (Instruments' App Launch template; the number is the end of
 the **Initial Frame Rendering** phase, which is what "to interactive" means here — the local host
 connecting and a pane filling with a shell prompt are several round trips further on).
@@ -266,7 +267,14 @@ binary — not in the page cache, no dyld launch closure — measured **1192 ms*
 over the next few launches and to ~270 ms once warm. That is the shape of a first launch after
 install, and it is why the purged figure matters more than the warm one.
 
-### Warm passes; cold misses by ~2.2×, and cold is the requirement
+### Warm passes; cold misses by ~2.2× — and the requirement was then amended to name warm
+
+*Written before the amendment and kept as it was measured; the verdict below is what the numbers said
+at the time. On 2026-08-06 P6.7 was amended to name **warm** launch, which passes at 268–288 ms.
+The cold figure stands as recorded and is no longer a bound — the reasoning is in SRD §6, and the
+short version is that the 630 ms is an empty page cache inside AppKit's framework first-use, with no
+tetmux symbol in it, against a cost paid once per boot. What had to be true for that to be an honest
+amendment rather than a retreat is exactly the phase breakdown in the next section.*
 
 The purged untraced row is a **fail**: median 897.8 ms against 400 ms, spread 579.7–1012.3 ms across
 five runs. `sudo purge` leaves the whole machine re-faulting, so a launch measured into that contends

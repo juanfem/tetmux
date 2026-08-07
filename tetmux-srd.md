@@ -187,9 +187,23 @@ component that is a separate multi-gigabyte download; the native path copies the
 into the resource bundle and never invokes the compiler. The `.dmg` filename carries the
 architecture so nobody on an Intel Mac is surprised late.
 
-Target state: Developer ID signed, notarised, hardened runtime, distributed via direct download and
-Homebrew cask, Sparkle for updates. Current state: ad-hoc signing, no notarisation, no updater —
-a known gap with an Apple Developer account behind it, tracked in `TODO.md`, not an oversight.
+**Ad-hoc signing, no notarisation, no updater — by decision, and not a gap waiting to be closed**
+*(amended 2026-08-06)*. Notarisation needs a paid Apple Developer account, and §1 is explicit that
+tetmux is built for one person's daily use: that person is content to right-click → Open once, or
+run `xattr -dr com.apple.quarantine`, which is what the release notes and the README both say out
+loud. Buying a certificate to remove a one-time step for its only guaranteed user is not a trade
+worth making, and leaving it listed as pending work misrepresents a decision as a backlog item.
+Anyone else's first open costs the same one-time step, which is stated at the download rather than
+discovered after it.
+
+*If that ever changes* — an account arrives, sponsored or bought, or the friction starts landing on
+somebody else — the work is known and is not large: sign with the Developer ID Application cert plus
+`--options runtime --timestamp` in `Scripts/package-dmg.sh` (the ad-hoc branch stays, for local
+builds), add `xcrun notarytool submit --wait` and `xcrun stapler staple` to the `v*` tag job with the
+app-specific password as a repo secret, then Sparkle via SPM with an EdDSA key kept offline and an
+appcast served from GitHub Releases. A Homebrew cask becomes worth doing at the same moment and not
+before. The .dmg stays arm64-only regardless — that is this section's other decision, and it is not
+part of this one.
 
 **App Store distribution is impossible**, not merely inconvenient: the sandbox forbids spawning
 `/usr/bin/ssh`, reading `~/.ssh`, and connecting to the user's SSH agent socket. Do not design
@@ -649,9 +663,10 @@ Exact, testable commitments. Violations produce visible corruption under tmux.
   change and every state change rebuilt a SwiftUI tree holding every pane. Isolated by suppressing
   only the write while still sending the probe, then fixed by publishing the reading on a channel of
   its own with one leaf view reading it. On 12 panes: mean 0.45%/0.71% with spikes to 5.4% before,
-  **0.04% with nothing above 0.8%** after. The arrangement this requirement names — 20 panes,
-  4 hosts, on battery — has not been re-run (`TODO.md`). The wakeup half is met with room — package
-  idle exits are ~0/s.
+  **0.04% with nothing above 0.8%** after. Re-run on the arrangement this requirement names — 20
+  panes, 4 hosts, on battery — it **passes**: mean 1.83% became **0.14%** and the maximum 13.9%
+  became 2.10%, with the ten-second cadence gone rather than reduced. The wakeup half is met with
+  room — package idle exits are ~0/s.
 - **P6.7** Resident memory, *(amended 2026-08-06 against measurement)*, is bounded **per pane**
   rather than as a single total: **< 90 MB with one pane** at default scrollback (10 000
   lines/pane), and **< 30 MB for each additional pane**. Twenty panes therefore sit near 600 MB,
@@ -662,37 +677,55 @@ Exact, testable commitments. Violations produce visible corruption under tmux.
   could not both hold. The bound is restated in the form that can actually be checked and that
   fails for a reason somebody can act on: a base cost and a marginal cost. Anyone wanting the old
   total back is choosing a smaller default scrollback, and should say so by changing that number.
-  Cold launch to interactive: < 400 ms. **Not** amended, and **still missed** — but the number moved
-  twice. A third of every traced figure was the instrument: under Instruments' App Launch template
-  `Process Creation` is ~290 ms for tetmux and 413 ms for Calculator, with no main-thread samples in
-  it at all. Timed by the application itself from the kernel's `p_starttime` to the first frame, a
-  **warm** launch is 268–288 ms, inside the floor. **Cold is 898 ms**, so the page cache is worth
-  ~630 ms and this is missed by ~2.2× — and cold is what the requirement says, so the warm pass does
-  not discharge it. The phases are investigated now: Scene Creation holds no hot spot and no tetmux
-  symbol, only framework first-use spread thin, and it is the only phase that grows when the cache is
-  emptied (`TODO.md`).
+  **Warm** launch to interactive: < 400 ms *(amended 2026-08-06; the original said cold)*. Measured
+  268–288 ms across two sets of runs, so it **passes**. A cold launch is recorded rather than
+  bounded: 898 ms median, spread 579.7–1012.3, and 1192 ms for the first launch of a freshly linked
+  binary, which is the shape of a first launch after install.
+  Two things justify the amendment, and only the second is a judgement. The first is that the
+  original number was never measured against the program: a third of every traced figure was the
+  instrument — under Instruments' App Launch template `Process Creation` is ~290 ms for tetmux and
+  413 ms for **Calculator**, with no main-thread samples in it at all — so what the 400 ms floor had
+  been failing against was partly `xctrace`. Timed by the application itself from the kernel's
+  `p_starttime` to the first frame, warm was inside the floor all along.
+  The second is that **cold is not tetmux's number to move**. The page cache is worth ~630 ms of it,
+  and the only phase that grows when the cache is emptied is AppKit Scene Creation, which holds no
+  hot spot and no tetmux symbol — class realization, category attachment, bundle localization scans,
+  the font registry, asset lookups, spread thin across AppKit, libobjc, CoreFoundation, libswiftCore,
+  SwiftUI, CoreUI and dyld. Buying it back means building a first frame that touches fewer framework
+  subsystems, which is open-ended work against a cost paid once per boot or once per install. **The
+  owner's judgement is that ~1 s there is good enough** (§1: this is a tool for one person's daily
+  use), and a requirement nobody intends to meet is worse than one that says what is actually
+  promised. This amendment is therefore **not** the same kind as the other two in this section: P6.1
+  and the memory total were incoherent as written, while this one was achievable in principle and was
+  given up on purpose. If the cold figure is ever chased, the target is that 210 ms, and the record
+  of what has already been ruled out is in `docs/measurements.md`.
 
 Verification is **local and scripted**, not CI *(amended — §8)*: the R3.6 matrix set the
 precedent that a measurement worth trusting is a reproducible local artefact, and a hosted runner
 measures the runner. The harness exists — `Scripts/measure-latency.sh`,
 `Scripts/measure-throughput.sh`, `Scripts/measure-launch.sh` and the `Scripts/measure-idle.md`
 procedure — and every figure it has produced is in `docs/measurements.md` with the machine, the
-display and the power state beside it. As of 2026-08-06, after a second pass, **every requirement in
-this section is met except one**: P6.1 passes on both displays, with the built-in panel's rate now
-measured at a fixed 60 Hz rather than assumed; P6.3 passes with 6.5× of room; P6.4 is met and
-verified by counting; P6.6 passes on the 20-pane, 4-host, on-battery arrangement it names; and
-P6.7's memory half passes the amended per-pane bound. The exception is **P6.7's launch half, which
-passes warm and fails cold** — 268 ms against 898 ms — and cold is what the requirement says, so it
-is a miss. It has the one remaining entry in `TODO.md`, carrying its measurement as evidence.
+display and the power state beside it. As of 2026-08-06, after a second pass and the launch
+amendment above, **every requirement in this section is met**: P6.1 passes on both displays, with the
+built-in panel's rate now measured at a fixed 60 Hz rather than assumed; P6.3 passes with 6.5× of
+room; P6.4 is met and verified by counting; P6.6 passes on the 20-pane, 4-host, on-battery
+arrangement it names; and both halves of P6.7 pass their amended bounds. Nothing in §6 has an entry
+in `TODO.md`.
 
-Two of these numbers were amended *because* they were measured, which is the process working rather
-than a retreat: P6.1 named no display and was unachievable at 60 Hz by any application, and P6.7's
-total contradicted its own scrollback parenthesis. The ones that were merely unmet were left alone
-and then met — P6.4 and P6.6 both — which is the distinction the two amendments were meant to
-protect. **And two of the four misses were the harness**: P6.7's launch figure was a third
-`xctrace`, and P6.6's rerun threw away an arm that had measured window occlusion. A performance
-harness gets something badly wrong before it is right, and the wrong answer looks exactly like a
-finding — the same lesson P6.3's first 23 MB/s taught.
+Three of these numbers were amended *because* they were measured, which is the process working rather
+than a retreat — but they are not all the same move, and the difference is the part worth keeping.
+P6.1 named no display and was unachievable at 60 Hz by any application; P6.7's memory total
+contradicted its own scrollback parenthesis. Those two were **incoherent**, and restating them cost
+nothing that was ever really promised. P6.7's launch half is the third and is different in kind: cold
+launch was a coherent, achievable target that was **deliberately given up**, because the 630 ms at
+stake is framework first-use rather than tetmux's code and the owner judged the work not worth it.
+Recording which of the two a given amendment is, is what keeps the section from becoming a list of
+whatever turned out to be easy. The ones that were merely unmet were left alone and then met — P6.4
+and P6.6 both.
+**And two of the four original misses were the harness**: P6.7's launch figure was a third `xctrace`,
+and P6.6's rerun threw away an arm that had measured window occlusion. A performance harness gets
+something badly wrong before it is right, and the wrong answer looks exactly like a finding — the
+same lesson P6.3's first 23 MB/s taught.
 
 ---
 
@@ -796,8 +829,8 @@ as designed and is the recommended shape for any comparable effort.
 | Geometry desync between GUI and tmux | Mitigated architecturally (§3.3); live-resize suppression shipped (`LiveResizeGate`) |
 | Orphaned clients clamping window size | Mitigated (F4.17), with tests; known blast radius documented |
 | `send-keys` round-trip latency under fast typing | Mitigated and **measured**: coalescing now flushes on the leading edge, and the round trip is under 2 ms p95 (P6.1); buffer-based paste |
-| **Display refresh dominates perceived latency** *(new)* | Accepted: with the protocol under 2 ms, keypress→glyph is one frame. P6.1 amended to name a refresh rate; a fix would have to schedule drawing differently (`TODO.md`) |
+| **Display refresh dominates perceived latency** *(new)* | Accepted: with the protocol under 2 ms, keypress→glyph is one frame. P6.1 amended to name a refresh rate, and passes on both displays; a fix would have to schedule drawing differently |
 | Old tmux in institutional environments | Mitigated: passthrough shipped as a distinct channel (§4.6) |
 | **SwiftTerm dependency drift** *(new)* | Behaviour tetmux relies on but does not implement is pinned by tests, the F4.23/F4.24 pins included |
-| **Unsigned distribution** *(new)* | Every user fights Gatekeeper; blocked on an Apple Developer account (`TODO.md`) |
+| **Unsigned distribution** *(new)* | Accepted by decision (§2.5): a one-time right-click → Open, stated at the download. Revisit if an account arrives or the friction lands on somebody else |
 | macOS-only limits reach | Accepted deliberately; §2.4 hedge CI-enforced |

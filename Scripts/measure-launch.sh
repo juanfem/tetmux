@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# P6.7's second half — cold launch to interactive. The floor is 400 ms.
+# P6.7's second half — launch to interactive. The floor is 400 ms, and since the 2026-08-06
+# amendment it applies to a **warm** launch: cold is ~898 ms, of which ~630 is an empty page cache
+# paid inside AppKit's framework first-use rather than in tetmux's code, so it is recorded here and
+# bounded nowhere. `--purge` therefore reports its number instead of failing.
 #
 #     Scripts/measure-launch.sh                    # 3 warm launches of the release binary
 #     Scripts/measure-launch.sh 5 --purge          # 5, each preceded by `sudo purge`
@@ -11,11 +14,13 @@
 # "to interactive" stops — the local host connecting and a pane filling with a shell prompt are
 # several round trips further on and are not what this bounds.
 #
-# **Warm by default, and that is not the requirement.** The first launch after a reboot is the one
-# P6.7 is about: nothing in the page cache, no dyld launch closure for this binary, no prewarming.
-# `--purge` is the closest approximation without rebooting — `sudo purge` empties the filesystem
-# cache, which is most of the difference, though it leaves dyld's closure cache alone. Record which
-# mode produced a number; a warm launch quoted as a cold one is the easiest wrong row in the table.
+# **Warm by default, and warm is now the requirement.** It was not always: P6.7 said *cold*, and
+# `--purge` exists because the first launch after a reboot is a different program to measure —
+# nothing in the page cache, no dyld launch closure for this binary, no prewarming. `sudo purge`
+# empties the filesystem cache, which is most of that difference, though it leaves dyld's closure
+# cache alone. Keep taking it: the amendment made cold un-bounded, not uninteresting, and a
+# regression there would still be worth seeing. Record which mode produced a number either way; a
+# warm launch quoted as a cold one is the easiest wrong row in the table.
 #
 # **The bundle and the bare binary are two different numbers.** `--app` points at a built
 # `tetmux.app` (`Scripts/package-dmg.sh`, then mount the image and copy it out): that is what
@@ -231,7 +236,12 @@ fi
 
 echo
 echo "== P6.7 (launch)"
-python3 - "$scratch/report.txt" <<'PY'
+# The bound is judged against the mode, because P6.7 names **warm** launch (amended 2026-08-06).
+# A purged run is still worth taking and still worth recording — it is the first-launch-after-install
+# shape — but it is no longer a bound anything fails, so it reports its number and exits 0. Judging a
+# purged run against the warm floor is what this script did before the amendment, and it would now
+# report a failure the SRD does not claim.
+python3 - "$scratch/report.txt" "$PURGE" <<'PY'
 import sys, statistics
 
 totals = [float(line.split()[1]) for line in open(sys.argv[1]) if line.startswith("TOTAL ")]
@@ -239,14 +249,18 @@ if not totals:
     print("FAILED: no run produced a number", file=sys.stderr)
     sys.exit(1)
 
+purged = sys.argv[2] == "1"
 median = statistics.median(totals)
 print(f"runs {len(totals)}   min {min(totals):.1f} ms   median {median:.1f} ms   max {max(totals):.1f} ms")
 print()
-if median <= 400:
-    print(f"PASS: median {median:.1f} ms is within P6.7's 400 ms")
+if purged:
+    print(f"RECORDED: median {median:.1f} ms, purged. P6.7 bounds warm launch only, so this is not")
+    print("          a pass or a fail — the reference figure is 897.8 ms (docs/measurements.md).")
+elif median <= 400:
+    print(f"PASS: median {median:.1f} ms is within P6.7's 400 ms warm")
 else:
-    print(f"FAIL: median {median:.1f} ms exceeds P6.7's 400 ms")
+    print(f"FAIL: median {median:.1f} ms exceeds P6.7's 400 ms warm")
 print()
 print("Record the above in docs/measurements.md, with the machine, the mode and the target.")
-sys.exit(0 if median <= 400 else 1)
+sys.exit(0 if purged or median <= 400 else 1)
 PY

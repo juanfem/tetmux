@@ -1,4 +1,4 @@
-# P6.6 and P6.7 — idle cost, memory, and cold launch
+# P6.6 and P6.7 — idle cost, memory, and launch
 
 The two requirements no script can own end to end, and why: both are claims about a **loaded**
 application — 20 panes across 4 hosts — and building that arrangement means four machines you can
@@ -10,8 +10,17 @@ two places where the obvious measurement is the wrong one.
 
     P6.6  Idle CPU with 20 panes across 4 hosts: < 0.5% of one core.
           Verify on battery — sustained wakeups matter more than average CPU.
-    P6.7  Resident memory < 150 MB with 20 panes at default scrollback (10 000 lines/pane).
-          Cold launch to interactive < 400 ms.
+    P6.7  Resident memory < 90 MB with one pane at default scrollback (10 000 lines/pane),
+          and < 30 MB for each additional pane.
+          Warm launch to interactive < 400 ms.
+
+Both halves of P6.7 were **amended on 2026-08-06 against what this procedure measured**, and the
+originals are worth knowing because they are what these steps were written for. Memory said
+"< 150 MB with 20 panes at default scrollback", which contradicted its own parenthesis — a pane's
+scrollback is ~25 MB at that depth, so twenty of them cannot fit in 150 MB and the sentence could
+not hold both ways. Launch said *cold*; it now says warm, because cold is ~898 ms of which ~630 is an
+empty page cache inside AppKit's framework first-use. Keep taking the cold number anyway (below):
+it is unbounded, not uninteresting.
 
 Results go in `docs/measurements.md`, with the machine beside them. See the head of that file for
 why they are recordings rather than a pass mark.
@@ -99,8 +108,9 @@ Write down the `phys_footprint` line. Two things to check before believing it:
   machine where it has been raised for real work measures that instead. Settings → Terminal.
 * **Fill the scrollback, and fill it through the live pane.** An empty pane's history costs
   nothing; P6.7 is a bound on 20 panes' worth of it, so the honest measurement has each pane
-  holding real lines. Measuring 20 empty panes and writing 150 MB in the "pass" column is the
-  easiest wrong number to produce here.
+  holding real lines. Measuring 20 empty panes and writing the result in the "pass" column is the
+  easiest wrong number to produce here — and it is what made the original 150 MB total look
+  achievable.
 
   The fill has to happen **while the pane is on screen**. Sending it before tetmux attaches fills
   tmux's history and not the emulator's: a reattach replays a bounded `capture-pane`, so the pane
@@ -108,7 +118,7 @@ Write down the `phys_footprint` line. Two things to check before believing it:
   target — tmux's own `history-limit` defaults to 2000, so `capture-pane` will only ever show you
   2000 lines back and cannot confirm the emulator holds 10 000. What confirms it is the footprint.
 
-## P6.7 — cold launch to interactive
+## P6.7 — launch to interactive
 
 Instruments has a template for exactly this and it is worth using rather than a stopwatch, because
 "interactive" needs a definition and App Launch has one: first frame.
@@ -118,12 +128,19 @@ Instruments has a template for exactly this and it is worth using rather than a 
 
 Open the resulting `.trace`, and read the **App Launch** track's total to first frame. Record that.
 
+**But do not quote it as the launch time.** Roughly a third of it is `xctrace` — `Process Creation`
+measures ~290 ms for tetmux and 413 ms for Calculator, with no main-thread samples in it at all.
+What the trace is for is *where* the time goes; `Scripts/measure-launch.sh --untraced` is what says
+how much of it a user pays, and that is the number P6.7 is judged on.
+
 Three things make the number mean what P6.7 means by it:
 
-* **Cold.** The second launch of anything is warm — the dynamic linker's caches, the page cache, the
-  prewarming macOS does after the first run. Reboot, or at least leave it alone for a while, and
-  take the *first* launch. A warm launch is worth recording too, as a separate row; it is what the
-  user sees most of the time.
+* **Warm is the bound; cold is the row beside it.** The second launch of anything is warm — the
+  dynamic linker's caches, the page cache, the prewarming macOS does after the first run — and since
+  the amendment that is what the 400 ms applies to, because it is what the user sees nearly every
+  time. Take a cold one as well, from a reboot or with `Scripts/measure-launch.sh --purge`, and
+  record it as its own row: nothing fails on it, but a cold figure drifting upward is still the
+  earliest sign that something new is being touched before the first frame.
 * **`.app` or binary, but say which.** `Scripts/package-dmg.sh` produces the bundle people actually
   double-click, and a bundled launch goes through Gatekeeper's assessment and a different dyld path
   than `.build/release/tetmux` does. They are two numbers, not one.
