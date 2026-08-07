@@ -2630,9 +2630,9 @@ final class SessionIntegrationTests: XCTestCase {
     /// Clicking a host attaches to the session that is there — it does not insist on a name.
     ///
     /// The bug this pins made the app look broken, and it was invisible on the machine it was
-    /// developed on: local tmux always has `tetmux-main` because tetmux itself made it, so the
+    /// developed on: local tmux always has a session because tetmux itself made it, so the
     /// hard-coded name always resolved. On any *other* server it does not, and clicking the host ran
-    /// `attach-session -t tetmux-main`, got `can't find session: tetmux-main` and `%exit`, and the
+    /// `attach-session -t <the remembered name>`, got `can't find session` and `%exit`, and the
     /// `%exit` handler read that as "the server has nothing left" — `.disconnected`, no retry, no
     /// message. A host with three sessions on it did nothing at all when clicked.
     func testOpeningAHostAttachesToAnExistingSessionRatherThanAName() async throws {
@@ -2649,7 +2649,8 @@ final class SessionIntegrationTests: XCTestCase {
             host.connectionState == .connected && !host.sessions.isEmpty
         }
         XCTAssertEqual(host.sessions.map(\.name), ["already-here"])
-        // …and nothing was invented alongside it. `tetmux-main` appearing here is the whole failure.
+        // …and nothing was invented alongside it. A second session appearing here is the whole failure,
+        // whatever it is called — which is why this compares the list rather than a name.
         XCTAssertEqual(sessionNames(on: server), ["already-here"])
 
         await service.disconnectHost(hostId: "opened")
@@ -2914,7 +2915,7 @@ final class SessionIntegrationTests: XCTestCase {
     ///
     /// The three assertions are the whole requirement. It has to *find* the session; it has to leave
     /// `session_attached` at zero, since a discovery that attaches is just a connection with extra
-    /// steps; and it must not bring `tetmux-main` into existence, which is what clicking the host
+    /// steps; and it must not bring a session into existence, which is what clicking the host
     /// does today and the reason this exists at all.
     func testSessionsAreDiscoveredWithoutAttachingOrCreating() async throws {
         let existing = "\(sessionName)-discoverable"
@@ -2940,7 +2941,7 @@ final class SessionIntegrationTests: XCTestCase {
             tmuxQuery(["display-message", "-p", "-t", existing, "#{session_attached}"]), "0",
             "the probe attached a client, which is the one thing it must not do"
         )
-        // …and nothing was created. `connectHost` would have made `tetmux-main` here.
+        // …and nothing was created. `connectHost` would have made one here.
         XCTAssertEqual(tmuxSessionNames(), before, "the probe changed what is on the server")
 
         // The host is still disconnected, and stayed that way — a probe is not a connection and must

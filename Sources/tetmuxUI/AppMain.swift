@@ -596,7 +596,12 @@ struct RootView: View {
                 host: host,
                 endedSessionName: state.recreatableSessionName(in: host),
                 onConnect: { model.reconnect(host.id) },
-                onRecreate: { model.recreateEndedSession(host.id) }
+                onRecreate: { model.recreateEndedSession(host.id) },
+                // The same path the sidebar's New Session takes, which already copes with a host
+                // that has no channel: it connects with `new-session -A -s <fresh name>`.
+                onNewSession: {
+                    model.createSessionWithDefaultName(hostId: host.id, revealIn: state)
+                }
             )
         } else {
             EmptyStateView { model.presentNewHost(in: state) }
@@ -1186,6 +1191,7 @@ struct HostPlaceholderView: View {
     let endedSessionName: String?
     let onConnect: () -> Void
     let onRecreate: () -> Void
+    let onNewSession: () -> Void
 
     var body: some View {
         VStack(spacing: 14) {
@@ -1223,7 +1229,7 @@ struct HostPlaceholderView: View {
                 if let endedSessionName {
                     Text("Session “\(endedSessionName)” ended.")
                         .foregroundStyle(.secondary)
-                    Text("Its tabs and everything running in them are gone. Recreating makes a new, empty session under the same name.")
+                    Text("Its tabs and everything running in them are gone. Recreating makes an empty session under the same name; a new session gets a fresh one.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -1233,10 +1239,17 @@ struct HostPlaceholderView: View {
                         // up taller than itself with both columns pushed off the top.
                         .lineLimit(4)
                         .frame(maxWidth: 420)
+                    // **Not "Connect"**, which is what stood here and could not do what it said. This
+                    // branch is only reached when `attachAny` found nothing, so there is nothing on
+                    // the server to connect *to*: the button fell through to creating a session
+                    // under the host's default name, which was the constant `tetmux-main` — the
+                    // very name beside it on the Recreate button. Two buttons, one outcome, and a
+                    // verb that described neither. The real choice here is what the session about
+                    // to be made should be called, so that is what the two buttons offer.
                     HStack(spacing: 10) {
                         Button("Recreate “\(endedSessionName)”", action: onRecreate)
                             .buttonStyle(.borderedProminent)
-                        Button("Connect", action: onConnect)
+                        Button("New Session", action: onNewSession)
                     }
                 } else {
                     Button("Connect", action: onConnect).buttonStyle(.borderedProminent)

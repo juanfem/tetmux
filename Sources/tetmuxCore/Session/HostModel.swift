@@ -919,3 +919,25 @@ public struct TmuxVersion: Comparable, Sendable {
     /// are the only mechanism and every client's size is a vote (F4.17).
     public var sizesWindowsIndividually: Bool { self >= TmuxVersion("2.9")! }
 }
+
+/// What tetmux calls a session it made itself.
+///
+/// One rule, in the layer both callers can reach. There used to be two: the sidebar's New Session
+/// counted up a `tetmux_N` series, while anything the *connection* created — a first connect to a
+/// host, or an empty server the user asked to open — was hardcoded to `tetmux-main`, from a function
+/// that took a `HostConfig` and ignored it. The seam showed on the placeholder F4.15 puts up when
+/// the last session ends: "Recreate “tetmux-main”" sat beside a button that also made
+/// `tetmux-main`, so two different-sounding choices did the same thing.
+///
+/// The index is the lowest free one rather than a count, so closing `tetmux_2` and making another
+/// gives `tetmux_2` back instead of climbing forever.
+public enum SessionNaming {
+
+    public static let prefix = "tetmux_"
+
+    public static func nextName(taken: Set<String>) -> String {
+        var index = 1
+        while taken.contains("\(prefix)\(index)") { index += 1 }
+        return "\(prefix)\(index)"
+    }
+}

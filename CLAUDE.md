@@ -533,12 +533,12 @@ user-initiated connect goes through `openHost`: `attach-session` with **no targe
 the server's most recently used session and cannot create, and only when there is nothing to attach
 to does a second attempt make one. It replaced `reconnectNow` — since deleted, because an entry point
 reachable only by writing new code is a trap — at those call sites because that path attached by
-*remembered name*, and with nothing remembered the name is `tetmux-main` — a session almost no server
-has. tmux answers `can't find session: tetmux-main`, `%error`, `%exit`, and the
+*remembered name*, and with nothing remembered that is a generated name (`tetmux_1`) — a session
+almost no server has. tmux answers `can't find session`, `%error`, `%exit`, and the
 `%exit` handler reads that as "the server has nothing left": `.disconnected`, no retry, nothing said.
 Clicking a host with three sessions on it did nothing at all, while clicking one of those sessions in
 the tree worked, because that path names a session that exists. It was invisible on localhost, where
-tetmux creates `tetmux-main` itself so the hard-coded name always resolves. Both shapes of "nothing
+tetmux had created that session itself so the name always resolved. Both shapes of "nothing
 to attach to" have to be handled: an empty server arrives as `%exit`, and a host with no tmux server
 running at all dies before the handshake and otherwise falls into the backoff to retry, eight times,
 an attach that cannot ever succeed.
@@ -650,7 +650,7 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   snapshot, and since a passthrough host never gains a session, clicking any other host in the tree
   was silently undone by the next topology change.
 - **Discovery asks `tmux -C list-sessions` and attaches nothing (F4.4).** The list is not the point:
-  clicking an unconnected host runs `new-session -A -s tetmux-main`, so a host with the user's own
+  clicking an unconnected host runs `new-session -A -s <a generated name>`, so a host with the user's own
   work on it got a second, empty session made before anyone saw what was there. A discovered session
   attaches *by name* with `attach-session`, which cannot create. Four things are load-bearing.
   **`tmux -C` reads commands until its input ends** — `tmux -C list-sessions` prints the answer and

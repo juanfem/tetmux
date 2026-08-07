@@ -584,7 +584,7 @@ public actor SessionService {
         if passthroughChannels[hostId] != nil { stopPassthrough(hostId: hostId) }
         host.passthrough = nil
 
-        let sessionTarget = targetSession ?? reconnectTarget[hostId] ?? defaultSessionName(for: host.config)
+        let sessionTarget = targetSession ?? reconnectTarget[hostId] ?? defaultSessionName(for: hostId)
         // `attachAny` deliberately does not adopt a target: it is used precisely when the remembered
         // name refers to a session that no longer exists, and writing it back here would put it in
         // front of the next connect to be recreated.
@@ -713,7 +713,7 @@ public actor SessionService {
     /// Asks a host what sessions it has, without attaching to it (F4.4).
     ///
     /// The point is not the list; it is that the first click on a remote host currently *creates*
-    /// one. `connectHost` defaults to `new-session -A -s tetmux-main`, so a host with the user's own
+    /// one. `connectHost` falls back to `new-session -A -s <a generated name>`, so a host with the user's own
     /// `work` session sitting on it gets a second, empty session made on it before anyone has seen
     /// what was there. Discovery is what lets the choice come first.
     ///
@@ -884,7 +884,7 @@ public actor SessionService {
             teardown(hostId: hostId, connection: existing)
         }
 
-        let target = sessionName ?? reconnectTarget[hostId] ?? defaultSessionName(for: host.config)
+        let target = sessionName ?? reconnectTarget[hostId] ?? defaultSessionName(for: hostId)
         let transport = PtyTransport()
         let channel = PassthroughChannel(transport: transport)
 
@@ -1294,8 +1294,18 @@ public actor SessionService {
         }
     }
 
-    private func defaultSessionName(for config: HostConfig) -> String {
-        "tetmux-main"
+    /// The name for a session this connection is about to make, by the one rule (`SessionNaming`).
+    ///
+    /// It was `"tetmux-main"`, from a function that took a `HostConfig` and ignored it — a per-host
+    /// default that was never per-host. That constant is why the F4.15 placeholder could offer
+    /// "Recreate “tetmux-main”" beside a second button that made `tetmux-main` as well.
+    ///
+    /// Keyed off the sessions this host is known to have, which on a first connect is none — so a
+    /// host being reached for the first time gets `tetmux_1`, and a server that already has one
+    /// keeps counting. It cannot consult a server it has not spoken to yet, and does not need to:
+    /// `new-session -A` attaches to that name if it happens to exist.
+    private func defaultSessionName(for hostId: String) -> String {
+        SessionNaming.nextName(taken: Set(hosts[hostId]?.sessions.map(\.name) ?? []))
     }
 
     /// What a channel is being opened to *talk to* — a parser or a person.
@@ -3535,7 +3545,7 @@ public actor SessionService {
         let createsIfServerIsEmpty = connection.createsIfServerIsEmpty
         let handshakeComplete = connection.handshakeComplete
         let isRecoveryAttempt = connection.isRecoveryAttempt
-        let defaultName = hosts[hostId].map { defaultSessionName(for: $0.config) } ?? "tetmux-main"
+        let defaultName = defaultSessionName(for: hostId)
         // A recovery attach that died before tmux ever spoke is the remembered session failing to
         // resolve — `attach-session -t <name>` exits when there is no such session. The next attempt
         // takes whatever the server still has rather than retrying a name that will never come back.
@@ -3772,8 +3782,9 @@ public actor SessionService {
     ///
     /// It replaces `reconnectNow` at every one of those call sites, and the reason is a bug that made
     /// the app look broken. Those clicks used to run the *recovery* path, which attaches by remembered
-    /// name — and with nothing remembered that name is `tetmux-main`, a session almost no server has.
-    /// tmux answers `can't find session: tetmux-main`, `%error`, `%exit`; the `%exit` handler reads
+    /// name — and with nothing remembered that name is a generated one (`tetmux_1`; it was the
+    /// constant `tetmux-main` at the time), which almost no server has.
+    /// tmux answers `can't find session`, `%error`, `%exit`; the `%exit` handler reads
     /// "the server has nothing left", sets `.disconnected`, and returns without retrying or saying
     /// anything. So clicking a host with three sessions on it did *nothing at all*, silently, while
     /// clicking one of those sessions in the tree worked — because that path names a session that

@@ -739,3 +739,35 @@ final class TmuxWindowTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Session naming
+
+/// One rule for what tetmux calls a session it made, in the layer both callers reach.
+///
+/// There were two. The sidebar's New Session counted up `tetmux_N`, while anything the *connection*
+/// created — a first connect, or an empty server the user asked to open — used the constant
+/// `tetmux-main`, from a function that took a `HostConfig` and ignored it. F4.15's placeholder is
+/// where that showed: "Recreate “tetmux-main”" beside a second button that also made `tetmux-main`,
+/// so two different-sounding choices did the same thing.
+final class SessionNamingTests: XCTestCase {
+
+    func testStartsAtOne() {
+        XCTAssertEqual(SessionNaming.nextName(taken: []), "tetmux_1")
+    }
+
+    /// tmux refuses a duplicate session name, and that refusal would surface as a failure banner for
+    /// a command the user never typed a name for.
+    func testSkipsNamesAlreadyTaken() {
+        XCTAssertEqual(SessionNaming.nextName(taken: ["tetmux_1", "tetmux_2"]), "tetmux_3")
+    }
+
+    /// The lowest free index, not a running count: closing one in the middle gives its name back
+    /// rather than leaving a gap and climbing forever.
+    func testReusesAFreedIndex() {
+        XCTAssertEqual(SessionNaming.nextName(taken: ["tetmux_1", "tetmux_3"]), "tetmux_2")
+    }
+
+    func testIgnoresUnrelatedNames() {
+        XCTAssertEqual(SessionNaming.nextName(taken: ["work", "tetmux-main", "notes"]), "tetmux_1")
+    }
+}

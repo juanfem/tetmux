@@ -756,9 +756,9 @@ public final class AppModel {
     /// is there, and make one only if there is nothing to attach to.
     ///
     /// `connect` and `reconnect` are the same call now. They were not, and the difference was the
-    /// bug: `reconnect` ran the *recovery* path, which attaches by remembered name — `tetmux-main`
+    /// bug: `reconnect` ran the *recovery* path, which attaches by remembered name — a generated one
     /// when nothing is remembered — so clicking a host with three sessions on it ran
-    /// `attach-session -t tetmux-main`, got `can't find session`, and stopped. Silently. Both names
+    /// `attach-session -t <that name>`, got `can't find session`, and stopped. Silently. Both names
     /// are kept because the call sites read differently ("connect this host" / "try again"), and
     /// they now mean the same thing because they always should have.
     public func connect(_ hostId: String) {
@@ -796,7 +796,7 @@ public final class AppModel {
     /// Opens a session discovery found — attaching to *that* session, never creating one.
     ///
     /// This is what F4.4 is for. Clicking an unconnected host otherwise runs
-    /// `new-session -A -s tetmux-main`, so a host with the user's own work sitting on it gets a
+    /// `new-session -A -s <a generated name>`, so a host with the user's own work sitting on it gets a
     /// second, empty session made before anyone has seen what was there. Here the name is known, so
     /// the attach can be exact — and `.attach` cannot create, which is the same guarantee F4.15 puts
     /// on a reconnect.
@@ -1686,13 +1686,10 @@ public final class AppModel {
     /// Non-private so the naming rule can be asserted without a channel: an off-by-one here collides
     /// with a live session, and tmux answers that with a refusal the user did not ask for.
     public func defaultSessionName(hostId: String) -> String {
-        let taken = Set(hosts.first { $0.id == hostId }?.sessions.map(\.name) ?? [])
-        var index = 1
-        while taken.contains("\(Self.defaultSessionPrefix)\(index)") { index += 1 }
-        return "\(Self.defaultSessionPrefix)\(index)"
+        SessionNaming.nextName(taken: Set(hosts.first { $0.id == hostId }?.sessions.map(\.name) ?? []))
     }
 
-    static let defaultSessionPrefix = "tetmux_"
+    static let defaultSessionPrefix = SessionNaming.prefix
 
     public func pasteIntoFocusedPane() {
         let scope = activeScope
