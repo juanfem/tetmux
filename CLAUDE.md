@@ -803,6 +803,18 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   through `SessionService(now:)` so a test can move it — waiting ten real seconds to assert a
   ten-second rule is a test nobody runs. There is deliberately no distinction between kinds of
   command: the age alone disqualifies.
+- **An empty server is not an unreachable host, and the sidebar says which.** A tmux client cannot
+  stay attached to a server with no sessions — tmux exits — so an empty server *is* a disconnected
+  host, and "not connected" read as a failure on a machine that is perfectly reachable. That is the
+  ordinary state of the local host once its last session goes. `HostState.serverIsEmpty` is the
+  distinction and it keys on `endedSessionName`, never on an empty session list: a host that was
+  never connected has one of those too, and about that host nothing is known. Deliberately *not*
+  fixed by having the local host make itself a session — that was tried, and it breaks F4.15's two
+  tests and silently removes the ended-session offer, since a window with a new session to show
+  never presents one. The local host's menu drops **Disconnect**, **Detach This Client** and
+  **Reconnect** for the same reason the label changed: it is connected at launch, needs no
+  credentials, and New Session attaches on its way to creating one (`createSession` routes a host
+  with no channel through `connectHost`), so all three name problems it does not have.
 - **The local host connects itself at launch; remote ones wait to be asked.** Not a general
   auto-connect policy. Local tmux is always reachable, needs no credentials and cannot prompt for
   anything, so the click was a step with no decision in it. A remote host connecting unbidden can

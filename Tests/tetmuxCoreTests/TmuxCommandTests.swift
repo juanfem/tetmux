@@ -771,3 +771,45 @@ final class SessionNamingTests: XCTestCase {
         XCTAssertEqual(SessionNaming.nextName(taken: ["work", "tetmux-main", "notes"]), "tetmux_1")
     }
 }
+
+/// "The server has nothing on it" and "I cannot reach this host" are one `ConnectionState` and
+/// completely different news — the same shape as F4.15's ended-session versus dropped-link split.
+final class EmptyServerTests: XCTestCase {
+
+    private func host(
+        state: ConnectionState, ended: String?, sessions: [TmuxSession] = []
+    ) -> HostState {
+        var host = HostState(
+            config: HostConfig(id: "local", name: "local", isLocal: true),
+            connectionState: state,
+            sessions: sessions
+        )
+        host.endedSessionName = ended
+        return host
+    }
+
+    /// The state the local host lands in when its last session goes: reachable, with nothing on it.
+    func testAnEndedSessionWithNothingLeftIsAnEmptyServer() {
+        XCTAssertTrue(host(state: .disconnected, ended: "work").serverIsEmpty)
+    }
+
+    /// A host that has never been connected has an empty session list too, and about that host we
+    /// genuinely do not know — which is why the remembered name is what answers this and not the
+    /// list. Labelling it "no sessions" would be a claim nothing supports.
+    func testAHostThatWasNeverConnectedIsNotAnEmptyServer() {
+        XCTAssertFalse(host(state: .disconnected, ended: nil).serverIsEmpty)
+    }
+
+    /// A dropped link leaves the sessions listed and out of reach, not gone.
+    func testADroppedLinkIsNotAnEmptyServer() {
+        let live = [TmuxSession(id: "$1", name: "work", windows: [])]
+        XCTAssertFalse(host(state: .disconnected, ended: "work", sessions: live).serverIsEmpty)
+    }
+
+    /// Only ever a reading of `.disconnected`. A connected host with no sessions yet is a different
+    /// sentence and the sidebar already has one for it.
+    func testOnlyADisconnectedHostCanBeAnEmptyServer() {
+        XCTAssertFalse(host(state: .connected, ended: "work").serverIsEmpty)
+        XCTAssertFalse(host(state: .connecting, ended: "work").serverIsEmpty)
+    }
+}

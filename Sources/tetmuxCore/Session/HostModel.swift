@@ -783,6 +783,22 @@ public struct HostState: Identifiable, Equatable, Sendable {
     /// remembered name* is legitimate: the user is reading the name and pressing the button beside it.
     public var endedSessionName: String?
 
+    /// Disconnected because the server has nothing on it, rather than because it cannot be reached.
+    ///
+    /// The two are one `ConnectionState` and completely different news, which is the same shape as
+    /// F4.15's "the session ended" versus "the link dropped". A tmux client cannot stay attached to
+    /// a server with no sessions — tmux exits — so an empty server *is* a disconnected host, and
+    /// calling that "not connected" reads as a failure on a machine that is perfectly reachable.
+    /// The local host is where it shows: it connects itself at launch and needs no credentials, so
+    /// the only way it is ever disconnected is that there is nothing to attach to.
+    ///
+    /// `endedSessionName` is what makes this answerable. An empty session list alone cannot: a host
+    /// that has never been connected has one too, and about that host we genuinely do not know.
+    public var serverIsEmpty: Bool {
+        guard case .disconnected = connectionState else { return false }
+        return endedSessionName != nil && sessions.isEmpty
+    }
+
     /// §4.6 — set when control mode is not what this host is being driven with. Non-nil is the one
     /// signal every surface asks: there is no session tree behind a passthrough host, so a view that
     /// went on drawing one would be drawing a tree of nothing.

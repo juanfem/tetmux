@@ -336,7 +336,8 @@ struct SidebarView: View {
                 RowButton(
                     glyph: .cross,
                     help: "Disconnect from \(host.config.name)",
-                    isVisible: showsActions && live
+                    // Same rule as the menu: the local host has no disconnected state to put it in.
+                    isVisible: showsActions && live && !host.config.isLocal
                 ) {
                     model.disconnect(host.id)
                 }
@@ -369,10 +370,23 @@ struct SidebarView: View {
                 // to tmux and leaves the session running for the next client; "Disconnect" also puts
                 // `window-size` back and stops the reconnect backoff, which is what the user means
                 // when they are done with a host rather than done with this client.
-                Button("Detach This Client") { model.detachThisClient(host.id) }
-                Button("Disconnect") { model.disconnect(host.id) }
+                // Not for the local host. It is connected at launch without being asked and needs
+                // no credentials, so letting go of it is an action with nothing on the other side —
+                // and New Session below reconnects it anyway, which leaves Disconnect as a control
+                // whose only effect is to make the next click do more work.
+                if !host.config.isLocal {
+                    Button("Detach This Client") { model.detachThisClient(host.id) }
+                    Button("Disconnect") { model.disconnect(host.id) }
+                }
             } else {
-                Button("Reconnect") { model.reconnect(host.id) }
+                // Reconnect is for a host that cannot currently be reached. The local host always
+                // can, so what "disconnected" means there is only that its server is empty — and
+                // New Session already attaches on its way to creating one (`createSession` routes a
+                // host with no channel through `connectHost`). Two buttons where one does the job,
+                // and the other one's name describes a problem the local host does not have.
+                if !host.config.isLocal {
+                    Button("Reconnect") { model.reconnect(host.id) }
+                }
                 Button("New Session") { model.createSessionWithDefaultName(hostId: host.id, revealIn: state) }
             }
             Divider()
@@ -430,7 +444,17 @@ struct SidebarView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         case .disconnected:
-            Text("not connected").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            // "not connected" reads as a failure, and for an empty server it is not one: the host is
+            // reachable and has nothing on it. That is the ordinary state of the local host after
+            // its last session goes, which is where the word was misleading — localhost connects
+            // itself at launch and needs no credentials, so nothing else ever disconnects it.
+            Text(host.serverIsEmpty ? "no sessions" : "not connected")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help(host.serverIsEmpty
+                    ? "This host is reachable; its tmux server has no sessions."
+                    : "Not connected to this host.")
         case .degraded(let reason), .failed(let reason):
             // §7 — tmux's or ssh's own words, in full, on hover.
             Text(host.connectionState.isActive ? "degraded" : "failed")
