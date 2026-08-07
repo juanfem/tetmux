@@ -140,6 +140,7 @@ struct PassthroughTerminalView: NSViewRepresentable {
         let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         view.terminalDelegate = context.coordinator
         view.getTerminal().changeScrollback(theme.scrollbackLines)
+        TerminalTheme.quietParserLogging(view.getTerminal())
         view.font = theme.resolvedFont()
         // The same gutter reclaim as a pane, for a plainer reason: nothing else is going to use those
         // 17 points, and SwiftTerm derives its own column count from the frame minus them.

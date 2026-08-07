@@ -60,6 +60,24 @@ public struct TerminalTheme: Equatable, Sendable {
         scrollbackLines * columns * MemoryLayout<CharData>.stride
     }
 
+    /// Stops SwiftTerm's parser writing to stdout, which in a debug build it does once per sequence
+    /// it does not implement.
+    ///
+    /// `Terminal.silentLog` defaults to `false` under `#if DEBUG` and `true` otherwise, so this
+    /// changes nothing about the packaged app and everything about `swift run`. A remote host whose
+    /// shell emits an OSC code SwiftTerm has no case for — a prompt hook is the usual source, and it
+    /// fires on every command — otherwise puts a line of parser chatter in the terminal tetmux was
+    /// launched from, and in front of `--diagnose`'s own output, which is the one place stdout is
+    /// load-bearing.
+    ///
+    /// Nothing is lost by ignoring the sequence itself: an unhandled OSC is *dropped*, not printed
+    /// into the grid, so this is a log that says "a program used a feature we do not have" over and
+    /// over. `TETMUX_TERMINAL_LOG=1` puts it back for anyone debugging the emulator, which is the
+    /// same env-var shape the measurement probes use.
+    public static func quietParserLogging(_ terminal: Terminal) {
+        terminal.silentLog = ProcessInfo.processInfo.environment["TETMUX_TERMINAL_LOG"] != "1"
+    }
+
     // MARK: - Persistence
 
     /// `UserDefaults` rather than a file beside `hosts.json`: this is application preference data,
@@ -160,6 +178,7 @@ struct TerminalPaneView: NSViewRepresentable {
         // instantiation, and it is what lets the setting apply to panes already on screen rather than
         // only to ones opened afterwards.
         view.getTerminal().changeScrollback(theme.scrollbackLines)
+        TerminalTheme.quietParserLogging(view.getTerminal())
         Self.hideReservedScroller(in: view)
         view.allowMouseReporting = true   // T5.3
         view.optionAsMetaKey = true

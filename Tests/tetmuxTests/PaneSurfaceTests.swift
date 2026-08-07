@@ -140,3 +140,33 @@ private final class NullTerminalDelegate: TerminalDelegate {
     func createImage(source: Terminal, data: Data, width: ImageSizeRequest, height: ImageSizeRequest,
                      preserveAspectRatio: Bool) {}
 }
+
+/// SwiftTerm writes parser diagnostics to stdout, and tetmux turns that off.
+///
+/// Pinned for the reason the other SwiftTerm pins exist: this is behaviour tetmux depends on but
+/// does not implement, so a dependency bump that renamed or removed `silentLog` should fail here
+/// rather than quietly restore a line of chatter per unhandled sequence — which a remote shell's
+/// prompt hook can emit on every command.
+final class TerminalLoggingTests: XCTestCase {
+
+    func testPaneTerminalsAreQuietByDefault() {
+        let terminal = Terminal(delegate: StubTerminalDelegate())
+        terminal.silentLog = false
+        TerminalTheme.quietParserLogging(terminal)
+        XCTAssertTrue(terminal.silentLog, "SwiftTerm would print to stdout on every unhandled code")
+    }
+
+    /// The default is the *debug* build's, which is the one that prints. Asserting the flag rather
+    /// than the build configuration keeps this meaningful in both.
+    func testSwiftTermStillExposesTheFlagWeSet() {
+        let terminal = Terminal(delegate: StubTerminalDelegate())
+        terminal.silentLog = true
+        XCTAssertTrue(terminal.silentLog)
+        terminal.silentLog = false
+        XCTAssertFalse(terminal.silentLog)
+    }
+}
+
+private final class StubTerminalDelegate: TerminalDelegate {
+    func send(source: Terminal, data: ArraySlice<UInt8>) {}
+}
