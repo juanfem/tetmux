@@ -1024,7 +1024,16 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   by a whole point and the hit column by several. And both the menu's Paste and middle-click go
   through `SessionService.paste`: SwiftTerm's `paste(_:)` inserts the clipboard as *keystrokes*, one
   `send-keys` per character, which is the path that wedges the channel and cannot carry a newline
-  safely. `allowsContextMenuPlugIns = false` keeps AppKit from adding AutoFill and Look Up, which it
+  safely. **Middle-click pastes the selection, not the clipboard** — this pane's if it has one, else
+  the last selection made in any pane (`PrimarySelection`), else the clipboard. It used to read the
+  clipboard first, on the reasoning that macOS has no primary selection: macOS does not, but the
+  *terminal* does, and every X11 terminal pastes it there. The old behaviour was not a missing
+  feature but a wrong paste into a shell — select a word, middle-click, and whatever was last ⌘C'd
+  went in, indistinguishably from the gesture working. `PaneTerminalView.selectionChanged` is the
+  only seam for recording it, since SwiftTerm's `selection` is internal while that method is `open`
+  and `getSelection()` is public; a *cleared* selection is deliberately not recorded, or the primary
+  would empty itself the moment you reached for the mouse.
+  `allowsContextMenuPlugIns = false` keeps AppKit from adding AutoFill and Look Up, which it
   offers because the view takes text input and which mean nothing over a remote pane.
 - **A pane's accessibility value is the viewport, not the scrollback.** SwiftTerm's accessibility
   service is an empty stub, so `PaneTerminalView` supplies the value itself, bounded by the grid — a
