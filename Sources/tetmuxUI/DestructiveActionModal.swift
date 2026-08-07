@@ -70,6 +70,18 @@ struct DestructiveActionModal: View {
 
             attachedClients
 
+            // Both buttons carry a chord, so the sheet is operable from the keyboard without
+            // depending on the system's "Keyboard navigation" preference — which is off by default
+            // and is what otherwise decides whether Tab reaches a button at all. Escape cancels;
+            // Return confirms.
+            //
+            // Making the *destructive* button the default is a deliberate departure from the usual
+            // advice, and it is safe here for a reason particular to this sheet: it is never
+            // presented except in answer to a close the user just asked for, so Return continues
+            // what they started rather than answering a question they did not ask. What the
+            // confirmation is for is that the close is a *kill* — the sheet says so, names the
+            // panes and the other clients, and none of that is weakened by being dismissible from
+            // the home row. Somebody who wants no confirmation at all already holds ⌥.
             HStack {
                 Spacer()
                 Button("Cancel", action: onCancel)
@@ -77,6 +89,7 @@ struct DestructiveActionModal: View {
                 Button(subject.confirmTitle, action: onConfirm)
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
+                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
