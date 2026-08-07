@@ -251,8 +251,9 @@ public final class TetmuxAppDelegate: NSObject, NSApplicationDelegate {
 
         // A packaged build gets its Dock icon from CFBundleIconFile, but `swift run` has no bundle to
         // read one from and comes up as a generic executable. Setting it by hand covers that case; in
-        // the .app it just re-asserts the icon already on screen.
-        if let url = Bundle.module.url(forResource: "tetmux", withExtension: "icns"),
+        // the .app it just re-asserts the icon already on screen. `PackageResources` rather than
+        // `Bundle.module`, which cannot fail without taking the process with it — see there.
+        if let url = PackageResources.url(forResource: "tetmux", withExtension: "icns"),
            let icon = NSImage(contentsOf: url) {
             NSApp.applicationIconImage = icon
         }

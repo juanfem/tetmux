@@ -146,6 +146,7 @@ Where things are, since the invariants below name symbols without saying which f
 | `ContrastPolicy.swift` | Increase Contrast, resolved once for every site that honours it. |
 | `ColorScheme.swift` | Pane colour schemes: the 16 ANSI slots and the three named colours. |
 | `LiveResizeGate.swift` | R3.7 — one macOS window's panes stop asking tmux while its edge is dragged. |
+| `PackageResources.swift` | The resource bundle, probed rather than asserted. `Bundle.module` is banned. |
 | `NotificationPolicy.swift` | F4.31 — which events earn a banner, and `WatchedWindow`. |
 | `DestructiveActionModal.swift` | The F4.10 confirmation, which says *why* the close is a kill. |
 | `CopyModeSearchSheet.swift` | Searches tmux's history, which is not what ⌘F searches. |
@@ -408,6 +409,25 @@ renders one seam where there should be two — and keying on position changes th
 resizes anything, tearing the view down mid-gesture so the pane moves exactly one cell however far the
 pointer travels. The drag baseline is captured at `mouseDown` for the same reason: the layout moves
 underneath as tmux answers, and re-reading it each frame measures from a moving origin.
+
+**`Bundle.module` is banned outright; resources go through `PackageResources`.** SwiftPM's generated
+accessor ends in `fatalError` — it aborts the process rather than returning nil — and neither place it
+looks is where a shipped `.app` keeps its resource bundles. It tries `Bundle.main.bundleURL` plus the
+bundle name, which for `swift run` is the directory holding the executable and resolves, but for an
+`.app` is the bundle *root* — a place nothing may live, since everything belongs under `Contents` and
+`codesign` seals `Contents/Resources`. Then it tries the absolute `.build/…` path of the machine that
+compiled the binary, baked in at compile time. **That second candidate is why this shipped**: on the
+machine that built it — a laptop after `package-dmg.sh`, or a CI runner — the path exists, the
+accessor resolves, and the app launches. On anybody else's machine the same binary dies inside
+`applicationDidFinishLaunching`, before a window, with `EXC_BREAKPOINT` in
+`variable initialization expression of static NSBundle.module`. 0.3.1 went out that way: mounted,
+signature-checked and run in CI, and it aborted for every user, naming
+`/Users/runner/work/tetmux/…` in the crash. SwiftTerm carries its own copy of this workaround for its
+Metal shaders, against the same accessor. So the guard is on the *source* —
+`testNoSourceFileReachesForBundleModule` scans `Sources/` — because no runtime check can see it:
+`swift test`, `swift run` and the packaging job all run the binary where it was built. For the same
+reason CI's packaged-app verification renames `.build` aside first, so the runner is standing in for
+a user's machine rather than for itself.
 
 **Window tabbing is off (`NSWindow.allowsAutomaticWindowTabbing = false`).** Otherwise a second window
 opens as a *tab* of the first, which is wrong here twice over: ⌥-clicking a session in the menu bar

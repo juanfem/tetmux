@@ -194,9 +194,17 @@ jobs:
       # Proves the bundle is more than a correctly-shaped directory: it opens the image, checks the
       # signature the way Gatekeeper does, and runs the app's own diagnostic against a real tmux —
       # which is what catches a resource bundle that did not make it into Contents/Resources.
+      #
+      # `.build` is moved aside first, and that is not tidiness. A binary compiled by SwiftPM carries
+      # the absolute path of its own build directory as a fallback for resource lookup, so a check
+      # run beside `.build` is asking whether the app works *on the machine that built it* — which is
+      # the one machine nobody downloads it to. 0.3.1 passed this step and then aborted on launch for
+      # every user. With the directory renamed the runner is standing in for theirs.
       - name: Verify the packaged app
         run: |
           brew install tmux
+          mv .build .build-hidden
+          trap 'mv .build-hidden .build' EXIT
           MOUNT="$(mktemp -d)"
           hdiutil attach "${{ steps.package.outputs.dmg }}" -nobrowse -readonly -mountpoint "$MOUNT"
           codesign --verify --deep --strict --verbose=2 "$MOUNT/tetmux.app"

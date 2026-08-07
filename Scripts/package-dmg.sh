@@ -72,11 +72,27 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BUILD_DIR/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 
 # SwiftPM emits one resource bundle per target that has resources — SwiftTerm's holds its Metal
-# shaders. `Bundle.module` looks in `Bundle.main.resourceURL` first, so Contents/Resources is where
-# these have to land. Miss this and the app builds, launches, and fails the moment a pane draws.
+# shaders, tetmuxUI's the app icon. Contents/Resources is where they have to land: it is the only
+# place inside an .app a resource bundle can live and be sealed by codesign.
+#
+# It is emphatically *not* where SwiftPM's generated `Bundle.module` looks. That accessor tries the
+# bundle root and then the absolute .build path of the machine that compiled the binary, and calls
+# fatalError rather than returning nil — so it resolves here, on the build machine, and aborts the
+# process on the user's. See Sources/tetmuxUI/PackageResources.swift; nothing in this app may use it.
+#
+# Test bundles are skipped. `swift test -c release` leaves its resources in the same directory, and
+# the glob took them: R3.6's protocol fixtures and T5.7's rendering corpus were shipping inside the
+# .app — 600 KB of recordings that no shipped code path opens. Whether they appeared depended on
+# whether release tests had been run since the last clean, which is not a thing a release should vary
+# on.
 shopt -s nullglob
 for bundle in "$BUILD_DIR"/*.bundle; do
-    echo "    resource bundle: $(basename "$bundle")"
+    name="$(basename "$bundle")"
+    if [[ "$name" == *Tests.bundle ]]; then
+        echo "    skipping test bundle: $name"
+        continue
+    fi
+    echo "    resource bundle: $name"
     cp -R "$bundle" "$APP/Contents/Resources/"
 done
 shopt -u nullglob
