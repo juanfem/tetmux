@@ -5,6 +5,13 @@ import XCTest
 /// approximations — the same rule the protocol fixtures follow. The details that matter are all
 /// things a plausible-looking fake gets wrong: the leading `\r`, the trailing space after the colon,
 /// and the absence of any newline at the end.
+///
+/// **Host identifiers in these captures are substituted** — the hostname, addresses and key
+/// fingerprint are documentation-reserved stand-ins for the real server that produced the bytes.
+/// Nothing detection depends on is carried by them: they are opaque text between the punctuation
+/// that is load-bearing, and the substitutes keep every byte of that punctuation, the bracketed
+/// `[host]:port` form ssh prints for a non-default port included. Do not "restore" a real host here
+/// when adding a case; capture against your own and substitute the same way.
 final class SshPromptDetectorTests: XCTestCase {
 
     private func bytes(_ string: String) -> [UInt8] { Array(string.utf8) }

@@ -356,9 +356,9 @@ reattach replays only a bounded `capture-pane`).
 | Host | tmux | Panes |
 |---|---|---|
 | local (M3) | 3.7b | 5 |
-| `server.example.org:2222` (Linux, WAN) | 3.5a | 5 |
-| `vm.example.net` | 3.2a | 5 |
-| `login.example.net` | 3.2a | 5 |
+| Linux server, WAN, non-default ssh port | 3.5a | 5 |
+| Linux VM on a private network, reached through a jump host | 3.2a | 5 |
+| Shared multi-user Linux login node, WAN | 3.2a | 5 |
 
 Panes were 55–112 columns × 10–12 rows, scrollback at the default 10 000 lines.
 

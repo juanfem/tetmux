@@ -89,7 +89,7 @@ changes; the entry in `TODO.md` says what to do if an account ever arrives.
 
 ```bash
 swift run tetmux --diagnose                    # local tmux
-swift run tetmux --diagnose server.example.org   # a saved host, by id or name
+swift run tetmux --diagnose server.example.org # a saved host, by id or name
 ```
 
 Connects a real channel, prints the parsed event stream to stderr and the resulting topology, version
