@@ -165,7 +165,22 @@ jobs:
       !cancelled()
       && needs.test.result == 'success'
       && (needs.matrix.result == 'success' || needs.matrix.result == 'skipped')
-    runs-on: macos-15
+    # **The SDK this links against is what the window looks like**, so the packaging job is pinned to
+    # the current OS rather than left on whatever the other jobs use. macOS 26 grants an application
+    # the Liquid Glass appearance — rounded window corners, the translucent sidebar material — only
+    # when its binary was linked against the macOS 26 SDK; a binary linked against 15.x gets the
+    # compatibility look, with square corners and an opaque grey sidebar. Nothing in the source says
+    # which, and nothing in the build says it either: 0.3.2 was built on `macos-15`, shipped
+    # `LC_BUILD_VERSION sdk 15.5`, and arrived looking like a different application than the one the
+    # same commit builds locally. It passed every check, because there is no check that can see it.
+    #
+    # `Package.swift` pins `.macOS(.v14)`, so this moves the SDK and not the deployment target:
+    # `minos` stays 14.0 and `LSMinimumSystemVersion` in the bundle stays honest.
+    #
+    # `test` and `matrix` stay on `macos-15` deliberately — they assert behaviour, which is the half
+    # that does not vary with the SDK, and running them a version behind is free coverage of the
+    # older OS. This is the one job whose output somebody installs.
+    runs-on: macos-26
     permissions:
       # Only the tagged path uses this, to create the release the .dmg is attached to.
       contents: write
@@ -190,6 +205,22 @@ jobs:
           fi
           Scripts/package-dmg.sh --version "$VERSION"
           echo "dmg=$(ls dist/*.dmg | head -1)" >> "$GITHUB_OUTPUT"
+
+      # The appearance regression above is invisible to every other check in this file: the app
+      # launches, connects, signs and verifies identically whichever SDK it was linked against, and
+      # the only symptom is that the window is drawn in the previous design language. So the SDK is
+      # asserted directly, out of the Mach-O, rather than trusted to the runner label — a runner
+      # image that ships an older Xcode, or a `Select Xcode` step that picks one, would put 15.x back
+      # with `runs-on` still reading `macos-26` and nothing to say so.
+      - name: Assert the binary linked against the current SDK
+        run: |
+          SDK="$(otool -l .build/release/tetmux | awk '/LC_BUILD_VERSION/,/ntools/ { if ($1 == "sdk") print $2 }' | head -1)"
+          echo "linked against macOS SDK $SDK"
+          MAJOR="${SDK%%.*}"
+          if [[ -z "$MAJOR" || "$MAJOR" -lt 26 ]]; then
+            echo "::error::built against macOS SDK ${SDK:-unknown}; macOS 26 grants Liquid Glass only to a binary linked against the 26 SDK, so this .dmg would ship with the compatibility appearance"
+            exit 1
+          fi
 
       # Proves the bundle is more than a correctly-shaped directory: it opens the image, checks the
       # signature the way Gatekeeper does, and runs the app's own diagnostic against a real tmux —
