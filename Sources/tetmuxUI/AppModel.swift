@@ -1666,6 +1666,22 @@ public final class AppModel {
     /// a modal in the way of one is worse than a name that can be changed later — renaming is one
     /// double-click away in the sidebar. The index is the lowest that is free rather than a count, so
     /// closing `tetmux_2` and making another gives `tetmux_2` back instead of climbing forever.
+    /// File ▸ New Session — on the host the frontmost window is showing.
+    ///
+    /// Every menu command acts on `activeScope`, and the host is the part of it that survives having
+    /// nothing to show: a window holding the ended-session offer has no session and no tab, but it
+    /// is still pointed at a host, so this keeps working in exactly the state where somebody is most
+    /// likely to reach for it.
+    ///
+    /// The session is revealed in the window that asked rather than a new one, which is what
+    /// `createSessionWithDefaultName` does with no `revealIn` — ⌥ on the menu bar's own New Session
+    /// is the way to ask for a window of its own, and it goes through the same call with
+    /// `preferNewWindow`.
+    public func createSessionFromMenu() {
+        guard let hostId = activeScope.hostId else { return }
+        createSessionWithDefaultName(hostId: hostId)
+    }
+
     public func createSessionWithDefaultName(
         hostId: String,
         revealIn state: WindowState? = nil,

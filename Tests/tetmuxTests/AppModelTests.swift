@@ -2345,3 +2345,46 @@ final class EndedSessionOfferTests: XCTestCase {
         XCTAssertNil(state.endedSessionName, "a reissued id is not an ended session")
     }
 }
+
+// MARK: - Chord uniqueness
+
+/// Two commands on one chord is not resolvable: `shortcut(for:)` breaks the tie by the enum case's
+/// spelling, so one of them silently stops working and which one depends on how it was named.
+///
+/// Pinned because a new binding is exactly when this happens and nothing else would say so — the
+/// menu still draws both items, both still show the chord, and only one of them ever fires.
+final class KeymapUniquenessTests: XCTestCase {
+
+    func testNoTwoDefaultBindingsShareAChord() {
+        let keymap = KeymapPolicy.default
+        var seen: [String: ApplicationShortcut] = [:]
+        for shortcut in ApplicationShortcut.allCases {
+            guard let binding = keymap.binding(for: shortcut) else { continue }
+            let chord = binding.storageString
+            if let other = seen[chord] {
+                XCTFail("\(shortcut) and \(other) both take \(binding.displayString)")
+            }
+            seen[chord] = shortcut
+        }
+    }
+
+    /// The one the menu bar cannot show: ⇧⌘W belongs to File ▸ Close Window, which is supplied by
+    /// `CommandGroup(replacing: .saveItem)` and so is not in this map at all.
+    func testNothingTakesTheMacOSWindowsCloseChord() {
+        let keymap = KeymapPolicy.default
+        for shortcut in ApplicationShortcut.allCases {
+            guard let binding = keymap.binding(for: shortcut) else { continue }
+            XCTAssertNotEqual(binding.storageString, "shift+cmd+w", "\(shortcut) takes ⇧⌘W")
+        }
+    }
+
+    /// New Session exists as a command with a chord, which is what the app menu was missing: the
+    /// Dock menu and the menu bar extra could both make one and the main menu could not.
+    func testNewSessionIsBoundAndDistinctFromNewWindow() {
+        let keymap = KeymapPolicy.default
+        let session = keymap.binding(for: .newSession)
+        XCTAssertEqual(session, KeyBinding("n", [.command, .shift]))
+        XCTAssertNotEqual(session, keymap.binding(for: .newAppWindow))
+        XCTAssertEqual(ApplicationShortcut.newSession.title, "New Session")
+    }
+}

@@ -10,6 +10,7 @@ import SwiftUI
 public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
     case launcher
     case newAppWindow
+    case newSession
     case newWindow
     case closeWindow
     case closePane
@@ -50,6 +51,7 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
         // tab items of its own — no "Show Tab Bar", no "Merge All Windows". If that flag ever goes
         // back to true, these two titles are the first thing to re-check.
         case .newAppWindow: return "New Window"
+        case .newSession: return "New Session"
         case .newWindow: return "New Tab"
         case .closeWindow: return "Close Tab…"
         case .closePane: return "Close Pane"
@@ -213,6 +215,10 @@ public struct KeymapPolicy: Sendable {
     public static let `default` = KeymapPolicy(bindings: [
         .launcher: KeyBinding("k"),
         .newAppWindow: KeyBinding("n"),
+        // ⇧⌘N beside ⌘N, which is the relationship: a session is the bigger unit and the macOS
+        // window is the smaller one. Free in this app and unclaimed by macOS in a terminal — it is
+        // New Folder in Finder and nothing here.
+        .newSession: KeyBinding("n", [.command, .shift]),
         .newWindow: KeyBinding("t"),
         // **⌘W closes the tab and ⇧⌘W the macOS window**, which is what they do in Safari, Chrome,
         // Terminal.app and iTerm2 — the apps whose muscle memory anyone arrives here with. They used

@@ -55,6 +55,11 @@ public struct TetmuxApp: App {
             // and tmux's own bindings do the job in that mode. They were already inert there; being
             // greyed out is the part that says so.
             Group {
+                // Ordered by what they contain: a session holds tabs, a tab holds panes. The macOS
+                // window above the divider is the app's own container and is a different kind of
+                // thing, which is why it sits apart rather than at the top of this list.
+                Button(ApplicationShortcut.newSession.title) { model.createSessionFromMenu() }
+                    .keyboardShortcut(.newSession, in: keymap)
                 Button(ApplicationShortcut.newWindow.title) { model.newWindow() }
                     .keyboardShortcut(.newWindow, in: keymap)
                 Button(ApplicationShortcut.splitRight.title) { model.split(leftRight: true) }

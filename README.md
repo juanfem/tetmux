@@ -84,6 +84,7 @@ and offering only "new window" there meant a second view of what you were alread
 |---|---|
 | `⌘K` | Launcher — one ranked list over all hosts, sessions, and tabs |
 | `⌘N` | New macOS window |
+| `⇧⌘N` | New session, on the host the window is showing |
 | `⌘T` | New tab (a tmux window) |
 | `⌘W` | Close tab — asks first when that would end what is running |
 | `⇧⌘W` | Close the macOS window — leaves everything running on the server |
