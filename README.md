@@ -73,7 +73,7 @@ first open needs right-click → Open, or
 
 ## Using it
 
-The sidebar lists hosts, their sessions, and each session's windows. `localhost` is always present
+The sidebar lists hosts, their sessions, and each session's tabs. `localhost` is always present
 and connects itself at launch; other hosts come from a conservative scan of `~/.ssh/config` plus
 anything you add in-app, and connect when you click them. There is also a menu bar item listing every
 host and session, and a Dock menu with **New Window**, **New Local Session**, and **New Remote
@@ -82,16 +82,16 @@ and offering only "new window" there meant a second view of what you were alread
 
 | Shortcut | Action |
 |---|---|
-| `⌘K` | Launcher — one ranked list over all hosts, sessions, and windows |
+| `⌘K` | Launcher — one ranked list over all hosts, sessions, and tabs |
 | `⌘N` | New macOS window |
-| `⌘T` | New tmux window |
-| `⇧⌘W` | Close tmux window — asks first when that would end it |
+| `⌘T` | New tab (a tmux window) |
+| `⇧⌘W` | Close tab — asks first when that would end what is running |
 | `⌥⌘W` | Close the focused pane |
 | `⌘D` / `⇧⌘D` | Split right / split down |
 | `⇧⌘Z` | Zoom the focused pane |
 | `⌥⌘[` / `⌥⌘]` | Previous / next pane |
-| `⇧⌘[` / `⇧⌘]` | Previous / next tmux window |
-| `⌘R` / `⇧⌘R` | Rename window / rename session |
+| `⇧⌘[` / `⇧⌘]` | Previous / next tab |
+| `⌘R` / `⇧⌘R` | Rename tab / rename session |
 | `⌘F` | Find in the focused pane's scrollback |
 | `⌃⌘F` | Search tmux's own history — further back than `⌘F` can reach |
 | `⌃⌘[` | Enter copy mode |
@@ -100,7 +100,12 @@ and offering only "new window" there meant a second view of what you were alread
 | `⌘V` | Paste into the focused pane |
 | `⌥⌘V` | Send the next chord to the pane literally, past every binding above |
 
-`⌘N` is a macOS window and `⌘T` is a tmux one, which is what those chords mean everywhere else.
+**A tmux window is called a *tab* throughout the app, and *window* always means a macOS window.**
+That is not a translation layer over tmux's model — it is what the thing is on screen, and it is
+why `⌘N` and `⌘T` mean here what they mean in every other Mac application. The tree, the tab strip
+and the menu bar all use the one word, so no control has to be read twice to work out which kind of
+window it will act on.
+
 Every default binding lives in `Cmd` space — the one real simplification of being macOS-only, since
 `Cmd` chords collide with neither readline, Emacs, nor tmux's own prefix, so every bare `Ctrl` chord
 forwards to the pane untouched. tmux's prefix key is *not* intercepted and reaches the pane, which
@@ -116,16 +121,16 @@ never streamed the overlay and a pane sitting in it otherwise looks exactly like
 keys you already use in copy mode still work — they go to tmux and are looked up in your own table —
 so the menu items add a way in and a way out to the Mac clipboard without taking anything away.
 
-Closing a tab **unlinks** the window — it never kills what is running — unless the window is linked
-to only that one session, which tmux cannot unlink, and then you are asked and told why. Holding `⌥`
+Closing a tab **unlinks** it — it never kills what is running — unless that tab is linked to only
+the one session, which tmux cannot unlink, and then you are asked and told why. Holding `⌥`
 while clicking a close or kill button skips that confirmation, and the glyph turns red while `⌥` is
 down so the modifier says what it will do before the click rather than after it. Nothing is
-remembered: the next window asks again.
+remembered: the next tab asks again.
 
-Sessions and windows can be renamed from the sidebar's context menu, from a tab's context menu, by
+Sessions and tabs can be renamed from the sidebar's context menu, from a tab's context menu, by
 double-clicking a tab, or with `⌘R`/`⇧⌘R`. Renaming is sent to tmux and the tree updates when tmux
-confirms it, so a rename made from another client looks exactly the same. A window's label is its
-name only when someone chose it; otherwise it is what is *running*, and for a split window that means
+confirms it, so a rename made from another client looks exactly the same. A tab's label is its
+name only when someone chose it; otherwise it is what is *running*, and for a split tab that means
 every pane, with the focused pane's part in medium.
 
 ### Settings
@@ -140,9 +145,9 @@ colours, so it tracks light and dark while the app runs.
 
 **Notifications** is two switches, for bells and for activity, and they are deliberately not the same
 kind of thing. A bell is a program asking for attention, so it is on for every pane. Activity is only
-"output arrived in a window nobody is reading", which for most windows is a prompt redrawing — so it
-is opt-in **per window**, from the tab's or the tree's context menu, and the windows you have opted
-into persist across launches. Both only ever notify while tetmux is in the background.
+"output arrived in a tab nobody is reading", which for most tabs is a prompt redrawing — so it is
+opt-in **per tab**, from the tab's or the tree's context menu, and the tabs you have opted into
+persist across launches. Both only ever notify while tetmux is in the background.
 
 **Keys** is the keymap table, with a chord recorder. A chord already taken is refused rather than
 silently resolved, and edits are stored as the difference from the defaults.
@@ -184,9 +189,9 @@ make every other window a still frame. Two windows showing the *same* session sh
 a second there would stream the same panes twice. If a session ends up on screen with no client behind
 it, a banner says so rather than letting the panes quietly stop moving.
 
-On tmux 2.9 and newer each window is sized individually, so a window torn into its own macOS window
-sizes its tmux window independently; below that every window shares the client's single size. When the
-same tmux window is open twice, the focused one drives the size.
+On tmux 2.9 and newer each tab is sized individually, so a tab opened into its own macOS window sizes
+itself independently; below that every tab shares the client's single size. When the same tab is open
+in two macOS windows, the focused one drives the size.
 
 ### SSH host options
 
@@ -305,7 +310,7 @@ them fail.
 | `UserDefaults` | Terminal font, size, ligatures, scrollback depth, colour scheme, and the two notification switches — the ordinary preferences the system already has a place for. |
 | Login Keychain | Per-host passwords, opt-in, as internet passwords with protocol `ssh`. |
 
-While tetmux is attached it sets `window-size manual` on the session so each window can be sized
+While tetmux is attached it sets `window-size manual` on the session so each tab can be sized
 independently, and restores the option on a deliberate disconnect and on quit. If a connection dies
 with the network instead, the option is left set; `tmux set-option -u -t <session> window-size` resets
 it.

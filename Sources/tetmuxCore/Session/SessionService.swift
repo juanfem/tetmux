@@ -2963,7 +2963,7 @@ public actor SessionService {
         withHost(hostId) { host in
             host.lastCommandFailure = CommandFailure(
                 action: "tmux \(version.raw)",
-                message: "This server is older than 2.9. Windows are sized by the smallest attached "
+                message: "This server is older than 2.9. Tabs are sized by the smallest attached "
                     + "client, and panes cannot be paused when output outruns the display."
             )
         }
@@ -3190,7 +3190,7 @@ public actor SessionService {
 
     public func newWindow(hostId: String, sessionId: String? = nil) {
         let target = sessionId.map { " -t \(TmuxCommand.quote($0))" } ?? ""
-        send("new-window\(target)", kind: .userCommand("New window"), hostId: hostId)
+        send("new-window\(target)", kind: .userCommand("New tab"), hostId: hostId)
     }
 
     public func splitPane(hostId: String, paneId: String, leftRight: Bool) {
@@ -3308,12 +3308,12 @@ public actor SessionService {
         let name = TmuxCommand.singleLine(newName)
         guard !name.isEmpty else { return }
         send("rename-window -t \(windowId) \(TmuxCommand.quote(name))",
-             kind: .userCommand("Rename window"), hostId: hostId)
+             kind: .userCommand("Rename tab"), hostId: hostId)
     }
 
     /// F4.9 — closing a tab unlinks the window from the session; it never kills what is running.
     public func unlinkWindow(hostId: String, windowId: String) {
-        send("unlink-window -t \(windowId)", kind: .userCommand("Close window"), hostId: hostId)
+        send("unlink-window -t \(windowId)", kind: .userCommand("Close tab"), hostId: hostId)
     }
 
     // MARK: - Window ordering
@@ -3371,7 +3371,7 @@ public actor SessionService {
             // it from A alone and leaves the link in B.
             send(
                 "move-window \(flag) -s \(TmuxCommand.quote("\(sessionId):\(windowId)")) -t \(anchor)",
-                kind: .userCommand("Reorder window"), hostId: hostId
+                kind: .userCommand("Reorder tab"), hostId: hostId
             )
             scheduleTopologyRefresh(hostId: hostId)
             return
@@ -3383,7 +3383,7 @@ public actor SessionService {
         let passed = to > from ? Array(remaining[from..<to]) : Array(remaining[to..<from]).reversed()
         for neighbour in passed {
             send("swap-window -d -s \(windowId) -t \(neighbour)",
-                 kind: .userCommand("Reorder window"), hostId: hostId)
+                 kind: .userCommand("Reorder tab"), hostId: hostId)
         }
         scheduleTopologyRefresh(hostId: hostId)
     }
@@ -3397,7 +3397,7 @@ public actor SessionService {
         send(
             "move-window -s \(TmuxCommand.quote("\(fromSession):\(windowId)"))"
                 + " -t \(TmuxCommand.quote("\(toSession):"))",
-            kind: .userCommand("Move window"), hostId: hostId
+            kind: .userCommand("Move tab"), hostId: hostId
         )
     }
 
@@ -3409,7 +3409,7 @@ public actor SessionService {
     public func linkWindow(hostId: String, windowId: String, toSession: String) {
         send(
             "link-window -s \(windowId) -t \(TmuxCommand.quote("\(toSession):"))",
-            kind: .userCommand("Link window"), hostId: hostId
+            kind: .userCommand("Link tab"), hostId: hostId
         )
     }
 
@@ -3419,7 +3419,7 @@ public actor SessionService {
     }
 
     public func killWindow(hostId: String, windowId: String) {
-        send("kill-window -t \(windowId)", kind: .userCommand("Kill window"), hostId: hostId)
+        send("kill-window -t \(windowId)", kind: .userCommand("Kill tab"), hostId: hostId)
     }
 
     /// The `%session-renamed` this produces is what moves `reconnectTarget` onto the new name.

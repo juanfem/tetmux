@@ -1129,12 +1129,44 @@ final class AppModelTests: XCTestCase {
             ApplicationShortcut.newAppWindow.title, ApplicationShortcut.newWindow.title,
             "two menu items with one title is not a menu"
         )
-        // AppKit manages items literally titled "New Tab"/"Close Tab" itself under automatic window
-        // tabbing; ours must not compete with it for those names.
+        XCTAssertEqual(ApplicationShortcut.newAppWindow.title, "New Window")
+        XCTAssertEqual(ApplicationShortcut.newWindow.title, "New Tab")
+    }
+
+    /// The vocabulary, which is the thing that actually broke: a tmux window is a **Tab** in every
+    /// user-facing string, and "Window" names the macOS window alone.
+    ///
+    /// It drifted twice before being pinned. The qualifier was applied to some commands and not
+    /// others — "New tmux Window" beside a bare "Close Window…" for the same object — and "New
+    /// Window" meant the macOS window in the menu bar while meaning the tmux one in the sidebar's
+    /// session menu. Both read as correct in isolation, which is why this needs a test rather than
+    /// care: the failure is only visible with two surfaces side by side.
+    ///
+    /// This deliberately replaced a check that *banned* the titles "New Tab"/"Close Tab", on the
+    /// grounds that AppKit manages them. It does — under automatic window tabbing, which this app
+    /// turns off. Confirmed against the running app: one "New Tab" in File at ⌘T, one "Close Tab…"
+    /// in Session at ⇧⌘W, both enabled, and no AppKit-injected tab items anywhere in the bar.
+    func testATmuxWindowIsCalledATabInEveryCommandTitle() {
         for shortcut in ApplicationShortcut.allCases {
+            let title = shortcut.title
             XCTAssertFalse(
-                ["New Tab", "Close Tab", "Close Tab…"].contains(shortcut.title),
-                "\(shortcut) uses a title AppKit reserves for window tabbing"
+                title.contains("tmux Window"),
+                "\(shortcut) still qualifies the old way; a tmux window is a Tab"
+            )
+            if shortcut != .newAppWindow {
+                XCTAssertFalse(
+                    title.contains("Window"),
+                    "\(shortcut) says Window, which names the macOS window and only that"
+                )
+            }
+        }
+        // The tmux-window commands, all of them, by the one name.
+        for shortcut in [
+            ApplicationShortcut.newWindow, .closeWindow, .renameWindow, .nextWindow, .previousWindow,
+        ] {
+            XCTAssertTrue(
+                shortcut.title.contains("Tab"),
+                "\(shortcut) acts on a tmux window and must say Tab"
             )
         }
     }

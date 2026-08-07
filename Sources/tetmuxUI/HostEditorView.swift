@@ -217,7 +217,7 @@ struct HostEditorView: View {
             .textFieldStyle(.roundedBorder)
             .padding(.top, 4)
 
-            Text("Where a new session's first pane opens, as `new-session -c`, and what it runs instead of a shell. Both are resolved on \(host.name.isEmpty ? "the host" : host.name), not here — and a command that exits ends the window it was given.")
+            Text("Where a new session's first pane opens, as `new-session -c`, and what it runs instead of a shell. Both are resolved on \(host.name.isEmpty ? "the host" : host.name), not here — and a command that exits ends the tab it was given.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

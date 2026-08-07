@@ -32,7 +32,7 @@ struct DestructiveActionModal: View {
 
         var confirmTitle: String {
             switch self {
-            case .window: return "Close Window"
+            case .window: return "Close Tab"
             case .session: return "Kill Session"
             }
         }
@@ -100,7 +100,7 @@ struct DestructiveActionModal: View {
         case .session:
             return Text("Killing ") + Text(targetName).bold()
                 + Text(" ends every process in its \(paneCount) "
-                       + "\(paneCount == 1 ? "window" : "windows"). tmux has no way to undo this "
+                       + "\(paneCount == 1 ? "tab" : "tabs"). tmux has no way to undo this "
                        + "and no way to reattach afterwards.")
         }
     }

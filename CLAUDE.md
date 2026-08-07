@@ -1095,11 +1095,22 @@ for is that the chord still *matches*, so that has its own test: `charactersIgno
   the others bind `.constant(nil)`. Registration order rather than focus, so the choice does not move
   mid-typing; closing that window promotes the next, because nothing able to show a prompt means a host
   stuck at "Connecting…" forever.
-- **⌘N is a macOS window and ⌘T is a tmux window.** ⌘N used to be the tmux one, which is what it means
-  in no other application. The tmux item is titled "New tmux Window" rather than "New Tab"
-  even though tmux windows are shown as tabs: AppKit manages menu items titled exactly "New Tab" and
-  "Close Tab" itself under automatic window tabbing, and a custom item competing for those names is at
-  its mercy. `NewAppWindowButton` exists because `openWindow` is an `@Environment` action and
+- **A tmux window is a "Tab" in every user-facing string, and "Window" means the macOS window and
+  nothing else.** ⌘N is the macOS window and ⌘T the tab, which is what those chords mean in every
+  other Mac application. The vocabulary drifted twice before it was pinned, and both failures read
+  as correct in isolation: the qualifier was applied to some commands and not others — "New tmux
+  Window" and "Next tmux Window" beside a bare "Close Window…" and "Rename Window…" for the same
+  object — and, worse, **"New Window" meant the macOS window in the menu bar and the tmux window in
+  the sidebar's session context menu**, the same two words for opposite objects two clicks apart.
+  Naming the thing the user is looking at removes the qualifier everywhere rather than making it
+  consistent. `testATmuxWindowIsCalledATabInEveryCommandTitle` pins it, because this is only visible
+  with two surfaces side by side and so survives any amount of care taken one file at a time.
+  "New Tab" and "Close Tab" **are** titles AppKit manages — but only under automatic window tabbing,
+  which is off here, and that was checked against the running app rather than assumed: File carries
+  one "New Tab" at ⌘T, Session one "Close Tab…" at ⇧⌘W, both enabled, and AppKit injects no tab
+  items of its own. That check is the thing to repeat if `allowsAutomaticWindowTabbing` ever changes;
+  the earlier note here recorded the hazard as a reason the name was unavailable, which measurement
+  did not support. `NewAppWindowButton` exists because `openWindow` is an `@Environment` action and
   `Commands` has no environment to read one from. ⌥⌘W closes a pane and ⇧⌘W a tmux window, kept a
   modifier apart from ⌘W's macOS window on purpose given the blast radii; ⌥⌘[ / ⌥⌘] move between panes
   in the **rendered** tree, so zoom is respected.

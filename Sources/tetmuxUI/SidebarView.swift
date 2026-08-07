@@ -512,7 +512,7 @@ struct SidebarView: View {
             rowActions {
                 RowButton(
                     glyph: .plus,
-                    help: "New window in \(session.name)",
+                    help: "New tab in \(session.name)",
                     isVisible: hoveredRow == rowKey || isSelected
                 ) {
                     model.newWindow(hostId: host.id, sessionId: session.id, revealIn: state)
@@ -538,7 +538,7 @@ struct SidebarView: View {
         // Liveness used to be a second glyph as well as a colour; the layered icon is now the same
         // shape either way, so the state it carries has to be said here in words.
         .accessibilityLabel(
-            "Session \(session.name), \(session.windows.count) windows, "
+            "Session \(session.name), \(session.windows.count) tabs, "
                 + (host.isLive(session.id) ? "attached" : "not attached")
         )
     }
@@ -564,7 +564,7 @@ struct SidebarView: View {
             Button("Rename Session…") {
                 model.requestRenameSession(in: state, hostId: host.id, sessionId: session.id)
             }
-            Button("New Window") { model.newWindow(hostId: host.id, sessionId: session.id, revealIn: state) }
+            Button("New Tab") { model.newWindow(hostId: host.id, sessionId: session.id, revealIn: state) }
             Button("Open in New Window") {
                 model.showSession(
                     hostId: host.id, sessionId: session.id,
@@ -680,7 +680,7 @@ struct SidebarView: View {
         }
         .onHover { hovering(rowKey, $0) }
         .accessibilityLabel(
-            "Window \(label), \(window.paneCount) panes"
+            "Tab \(label), \(window.paneCount) panes"
                 + (linked.count > 1 ? ", also in \(otherSessionNames(linked, excluding: session.id))" : "")
         )
     }
@@ -715,7 +715,7 @@ struct SidebarView: View {
     @ViewBuilder
     private func windowMenu(host: HostState, session: TmuxSession, window: TmuxWindow) -> some View {
         Group {
-            Button("Rename Window…") {
+            Button("Rename Tab…") {
                 model.requestRenameWindow(in: state, hostId: host.id, windowId: window.id)
             }
             Button("Open in New Window") {
@@ -731,7 +731,7 @@ struct SidebarView: View {
                 model: model, hostId: host.id, sessionId: session.id, windowId: window.id
             )
             Divider()
-            Button("Close Window…", role: .destructive) {
+            Button("Close Tab…", role: .destructive) {
                 model.select(in: state, host: host.id, session: session.id, window: window.id)
                 model.requestCloseWindow(in: state)
             }

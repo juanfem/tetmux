@@ -36,31 +36,37 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
     public var title: String {
         switch self {
         case .launcher: return "Open Launcher…"
-        // ⌘N means a window of the application in every other macOS app; it used to open a tmux
-        // window here, which is what made it surprising. The tmux one keeps ⌘T and says which kind
-        // of window it means.
+        // **A tmux window is a "Tab" everywhere in the UI; "Window" names the macOS window and
+        // nothing else.** Before this the qualifier was applied unevenly — "New tmux Window" and
+        // "Next tmux Window" but a bare "Close Window…" and "Rename Window…" for the same object —
+        // and worse, "New Window" meant the *macOS* window here and the *tmux* one in the sidebar's
+        // session menu: the same two words for opposite objects, two clicks apart. Naming the thing
+        // the user is actually looking at settles it without a qualifier anywhere.
         //
-        // Deliberately not "New Tab", even though a tmux window is shown as one: AppKit manages menu
-        // items by that exact title itself when automatic window tabbing is on, so a custom item
-        // competing for the name is at its mercy. Naming the domain object avoids the question.
+        // "New Tab" and "Close Tab" are titles AppKit manages itself, but only **under automatic
+        // window tabbing**, which is off here (`NSWindow.allowsAutomaticWindowTabbing = false`, in
+        // AppMain). Verified against the running app rather than assumed: File carries exactly one
+        // "New Tab" at ⌘T and Session one "Close Tab…" at ⇧⌘W, both enabled, and AppKit injects no
+        // tab items of its own — no "Show Tab Bar", no "Merge All Windows". If that flag ever goes
+        // back to true, these two titles are the first thing to re-check.
         case .newAppWindow: return "New Window"
-        case .newWindow: return "New tmux Window"
-        case .closeWindow: return "Close Window…"
+        case .newWindow: return "New Tab"
+        case .closeWindow: return "Close Tab…"
         case .closePane: return "Close Pane"
         case .splitRight: return "Split Right"
         case .splitDown: return "Split Down"
         case .zoomPane: return "Zoom Pane"
         case .focusNextPane: return "Select Next Pane"
         case .focusPreviousPane: return "Select Previous Pane"
-        case .nextWindow: return "Next tmux Window"
-        case .previousWindow: return "Previous tmux Window"
+        case .nextWindow: return "Next Tab"
+        case .previousWindow: return "Previous Tab"
         case .find: return "Find…"
         case .increaseFontSize: return "Bigger"
         case .decreaseFontSize: return "Smaller"
         case .resetFontSize: return "Actual Size"
         case .paste: return "Paste"
         case .sendNextLiteral: return "Send Next Chord Literally"
-        case .renameWindow: return "Rename Window…"
+        case .renameWindow: return "Rename Tab…"
         case .renameSession: return "Rename Session…"
         // One item for both directions: what it does depends on where the pane already is, and two
         // items would leave whichever one did not apply sitting there greyed out saying nothing.

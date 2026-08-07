@@ -77,7 +77,7 @@ struct LauncherOverlay: View {
                 VStack(spacing: 0) {
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Search hosts, sessions, and windows", text: $query)
+                        TextField("Search hosts, sessions, and tabs", text: $query)
                             .textFieldStyle(.plain)
                             .font(.title3)
                             .focused($isSearchFocused)

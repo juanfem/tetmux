@@ -21,7 +21,7 @@ struct CopyModeSearchSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Search History").font(.headline)
-            Text("Searches what tmux is holding, not only what this window has received.")
+            Text("Searches what tmux is holding, not only what this pane has received.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)

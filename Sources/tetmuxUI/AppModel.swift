@@ -225,7 +225,7 @@ public final class AppModel {
         public var title: String {
             switch subject {
             case .session: return "Rename Session"
-            case .window: return "Rename Window"
+            case .window: return "Rename Tab"
             }
         }
     }
@@ -593,7 +593,7 @@ public final class AppModel {
         for alert in Self.newlyActive(from: previous, to: current, watching: watchedWindows) {
             BellNotifier.shared.post(
                 title: "Activity in \(alert.label)",
-                body: "A window you are watching started printing."
+                body: "A tab you are watching started printing."
             )
         }
     }

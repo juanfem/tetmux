@@ -472,7 +472,7 @@ struct RootView: View {
         }
         .sheet(item: $state.pendingClose) { pending in
             DestructiveActionModal(
-                title: "Close Window",
+                title: "Close Tab",
                 targetName: pending.windowName,
                 paneCount: pending.paneCount,
                 runningCommands: pending.runningCommands,
@@ -658,8 +658,8 @@ struct WindowTabBar: View {
                         }
                         .buttonStyle(.borderless)
                         .padding(.leading, 2)
-                        .help("New window (⌘T)")
-                        .accessibilityLabel("New window")
+                        .help("New Tab (⌘T)")
+                        .accessibilityLabel("New Tab")
                     }
                     .padding(.horizontal, 6)
                 }
@@ -929,7 +929,7 @@ private struct WindowTab: View {
         .help(tabHelp)
         .accessibilityLabel(tabHelp)
         .contextMenu {
-            Button("Rename Window…") {
+            Button("Rename Tab…") {
                 model.requestRenameWindow(in: state, hostId: state.selectedHostId, windowId: window.id)
             }
             Button("Open in New Window") {
@@ -946,7 +946,7 @@ private struct WindowTab: View {
                 windowId: window.id
             )
             Divider()
-            Button("Close Window…", role: .destructive) {
+            Button("Close Tab…", role: .destructive) {
                 select()
                 model.requestCloseWindow(in: state)
             }
@@ -981,7 +981,7 @@ struct WindowSessionMenus: View {
                     set: { _ in model.toggleWatch(hostId: hostId, windowId: windowId) }
                 )
             )
-            .help("Post a notification when this window prints while tetmux is in the background.")
+            .help("Post a notification when this tab prints while tetmux is in the background.")
         }
         if let hostId, !others.isEmpty {
             Divider()
@@ -1212,7 +1212,7 @@ struct HostPlaceholderView: View {
                 if let endedSessionName {
                     Text("Session “\(endedSessionName)” ended.")
                         .foregroundStyle(.secondary)
-                    Text("Its windows and everything running in them are gone. Recreating makes a new, empty session under the same name.")
+                    Text("Its tabs and everything running in them are gone. Recreating makes a new, empty session under the same name.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)

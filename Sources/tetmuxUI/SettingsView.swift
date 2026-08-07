@@ -123,15 +123,15 @@ struct SettingsView: View {
         Form {
             Section {
                 Toggle("Bell", isOn: $model.notifications.bells)
-                Toggle("Activity in watched windows", isOn: $model.notifications.activity)
+                Toggle("Activity in watched tabs", isOn: $model.notifications.activity)
             } header: {
                 Text("Notify me about")
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Only while tetmux is in the background — a window you are looking at needs no banner.")
+                    Text("Only while tetmux is in the background — a tab you are looking at needs no banner.")
                     Text(
-                        "Watch a window from its tab or its row in the tree. Activity is output "
-                        + "arriving in a window nobody is reading, which is what a long job that "
+                        "Watch a tab from the tab strip or its row in the tree. Activity is output "
+                        + "arriving in a tab nobody is reading, which is what a long job that "
                         + "prints and never rings looks like."
                     )
                 }
@@ -140,7 +140,7 @@ struct SettingsView: View {
             }
 
             if !model.watchedWindows.isEmpty {
-                Section("Watched windows") {
+                Section("Watched tabs") {
                     ForEach(watchedRows, id: \.id) { row in
                         LabeledContent(row.label) {
                             Button("Stop Watching") {
