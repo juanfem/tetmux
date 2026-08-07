@@ -1111,8 +1111,19 @@ for is that the chord still *matches*, so that has its own test: `charactersIgno
   items of its own. That check is the thing to repeat if `allowsAutomaticWindowTabbing` ever changes;
   the earlier note here recorded the hazard as a reason the name was unavailable, which measurement
   did not support. `NewAppWindowButton` exists because `openWindow` is an `@Environment` action and
-  `Commands` has no environment to read one from. ⌥⌘W closes a pane and ⇧⌘W a tmux window, kept a
-  modifier apart from ⌘W's macOS window on purpose given the blast radii; ⌥⌘[ / ⌥⌘] move between panes
+  `Commands` has no environment to read one from. **The ⌘W family follows Safari and Terminal rather than blast
+  radius**: ⌘W closes the tab, ⇧⌘W the macOS window, ⌃⌘W the pane. The old ordering put the
+  least-destructive action on the easiest chord, which is a real argument that lost to being alone in
+  the inversion — F4.10's confirmation already stands between ⌘W and anything irreversible. Two
+  AppKit facts make this work and neither is optional. `CommandGroup(replacing: .saveItem)` removes
+  AppKit's own `Close`, because it owns ⌘W and the File menu is searched before ours; mutating the
+  `NSMenuItem` does not hold, since SwiftUI rebuilds that menu and restores the chord, after which
+  the duplicate costs it its key character and the window has no close chord at all. And **⌥⌘W was
+  never available**: it belongs to `Close All`, the automatic alternate of `Close`, which is why the
+  pane's binding sat there for so long with a modifier mask and no key character — advertised in the
+  Keys tab and the README, firing Close All. Replacing the group takes `Close All` out too, which is
+  what frees ⌥⌘W. Anything added to this family is checked against the **running** menu bar; the AX
+  attributes are what tell you a chord was silently dropped. ⌥⌘[ / ⌥⌘] move between panes
   in the **rendered** tree, so zoom is respected.
 - **A dropped tab lands on the side the drag came from, and the marker has to agree.** The rule every
   tab bar has is that the dragged tab takes the target's position and everything between shifts by

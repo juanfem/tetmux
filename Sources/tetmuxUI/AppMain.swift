@@ -69,6 +69,17 @@ public struct TetmuxApp: App {
         // Edit menu and let the standard one win. SwiftTerm validates `paste(_:)` as always enabled,
         // so that route fed the clipboard through per-keystroke `send-keys` and bypassed the buffer
         // chunking whose own comment says a megabyte of `send-keys` will wedge the channel.
+        // AppKit's File ▸ Close owns ⌘W, which the tab needs. Replacing `.saveItem` — the group
+        // it belongs to — is the only way to take it out; mutating the `NSMenuItem` does not hold,
+        // because SwiftUI rebuilds the File menu and restores it. Our replacement does the same job
+        // on ⇧⌘W, through the same `performClose:` the original used, so window closing is
+        // unchanged apart from the chord.
+        CommandGroup(replacing: .saveItem) {
+            Button("Close Window") {
+                NSApp.keyWindow?.performClose(nil)
+            }
+            .keyboardShortcut("w", modifiers: [.command, .shift])
+        }
         CommandGroup(replacing: .pasteboard) {
             Button(ApplicationShortcut.paste.title) { model.pasteIntoFocusedPane() }
                 .keyboardShortcut(.paste, in: keymap)

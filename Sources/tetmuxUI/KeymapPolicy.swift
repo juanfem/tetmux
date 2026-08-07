@@ -214,11 +214,28 @@ public struct KeymapPolicy: Sendable {
         .launcher: KeyBinding("k"),
         .newAppWindow: KeyBinding("n"),
         .newWindow: KeyBinding("t"),
-        .closeWindow: KeyBinding("w", [.command, .shift]),
-        // Declared since the first keymap and never bound, so its menu item rendered with no chord.
-        // ⌥⌘W rather than anything nearer ⌘W: the three of them are a window of the application, a
-        // tmux window, and one pane, in increasing order of how much they take with them.
-        .closePane: KeyBinding("w", [.command, .option]),
+        // **⌘W closes the tab and ⇧⌘W the macOS window**, which is what they do in Safari, Chrome,
+        // Terminal.app and iTerm2 — the apps whose muscle memory anyone arrives here with. They used
+        // to be the other way round, ordered by blast radius so the easiest chord destroyed nothing.
+        // That argument is real but it lost: the cost of being alone in the inversion is paid on
+        // every ⌘W by everyone, while the confirmation (F4.10) already stands between ⌘W and
+        // anything irreversible.
+        //
+        // What makes it stick is `CommandGroup(replacing: .saveItem)` in `menuCommands`, which takes
+        // AppKit's File ▸ Close out and supplies our own on ⇧⌘W. Mutating the `NSMenuItem` instead —
+        // setting `keyEquivalentModifierMask` on `performClose:` at launch and again on every
+        // activation — was tried first and does **not** hold: SwiftUI rebuilds the File menu and
+        // restores ⌘W, where it collides with this binding and loses its key character, leaving the
+        // macOS window with no close chord at all. Measured, both times.
+        .closeWindow: KeyBinding("w"),
+        // ⌃⌘W, and **not** ⌥⌘W, which AppKit owns: `Close All` is an automatic alternate of `Close`
+        // and holds ⌥⌘W in the File menu, which is searched before this one. The duplicate did not
+        // fail loudly — AppKit kept the modifier mask on our item and dropped the key character, so
+        // the Keys tab and the README both advertised a chord that fired Close All instead. Measured
+        // before the fix: ⌥⌘W with two panes in one window left the panes at two and the windows at
+        // zero. Anything added to the ⌘W family from here needs checking against the *running* menu
+        // bar, not against this file.
+        .closePane: KeyBinding("w", [.command, .control]),
         .splitRight: KeyBinding("d"),
         .splitDown: KeyBinding("d", [.command, .shift]),
         // tmux's own `prefix z`, in Cmd space. Not ⌘Z, which is Undo everywhere in macOS.

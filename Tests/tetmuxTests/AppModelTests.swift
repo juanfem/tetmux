@@ -1133,6 +1133,40 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(ApplicationShortcut.newWindow.title, "New Tab")
     }
 
+    /// The ⌘W family, which AppKit competes for and wins silently.
+    ///
+    /// ⌥⌘W belongs to `Close All`, the automatic alternate of AppKit's `Close`, and `Close Pane`
+    /// asked for it anyway. Nothing failed loudly: AppKit kept our modifier mask and dropped the key
+    /// character, so the Keys tab and the README advertised a chord that fired Close All instead.
+    /// Measured before the fix — ⌥⌘W with two panes in one window left the panes at two and the
+    /// macOS windows at zero. The app now removes AppKit's whole `.saveItem` group, which takes both
+    /// `Close` and `Close All` out and frees ⌥⌘W along with ⌘W.
+    ///
+    /// This pins the *intent*. It cannot see a chord AppKit has stolen, because that happens in a
+    /// live menu bar and not in this map — so a change here still wants checking against the running
+    /// app, reading `AXMenuItemCmdChar`: a binding with a modifier mask and no character is the
+    /// signature of exactly this bug.
+    func testTheCloseFamilyMatchesTabbedMacApps() {
+        let keymap = KeymapPolicy.default
+        // ⌘W is the tab, as in Safari, Chrome, Terminal.app and iTerm2.
+        XCTAssertEqual(keymap.binding(for: .closeWindow), KeyBinding("w"))
+        // Not ⌥⌘W, which AppKit's Close All owns.
+        XCTAssertEqual(keymap.binding(for: .closePane), KeyBinding("w", [.command, .control]))
+        XCTAssertNotEqual(
+            keymap.binding(for: .closePane), KeyBinding("w", [.command, .option]),
+            "⌥⌘W is AppKit's Close All; a binding there is dropped without a word"
+        )
+        // The macOS window's ⇧⌘W is not in this map at all — it is the replacement item in
+        // `CommandGroup(replacing: .saveItem)`, so nothing here may claim that chord either.
+        for shortcut in ApplicationShortcut.allCases {
+            guard let binding = keymap.binding(for: shortcut), binding.key == "w" else { continue }
+            XCTAssertNotEqual(
+                binding.modifiers, [.command, .shift],
+                "\(shortcut) takes ⇧⌘W, which closes the macOS window"
+            )
+        }
+    }
+
     /// The vocabulary, which is the thing that actually broke: a tmux window is a **Tab** in every
     /// user-facing string, and "Window" names the macOS window alone.
     ///
