@@ -2242,6 +2242,74 @@ final class EndedSessionOfferTests: XCTestCase {
         XCTAssertEqual(state.endedSessionName, "work")
         XCTAssertEqual(state.recreatableSessionName(in: after), "work")
         XCTAssertTrue(state.sessionEndedWhileHostLives(in: after))
+        // What the view asks. `selectedSession` falls back to the host's active session, which is
+        // the one tmux moved the client to, so the state being right is not enough.
+        XCTAssertNil(state.selectedSession(in: [after]))
+        XCTAssertNil(state.selectedWindow(in: [after]))
+    }
+
+    /// The user's report: three sessions, close the last tab of one, and the window shows a tab from
+    /// another session. Replays the snapshots tmux actually produces, including the intermediate one
+    /// where `%window-close` has been applied but `list-sessions` has not yet removed the session.
+    @MainActor
+    func testThreeSessionsClosingTheLastTabOfOne() {
+        let state = WindowState()
+        func host(_ sessions: [TmuxSession], active: String?) -> HostState {
+            HostState(
+                config: HostConfig(id: "local", name: "local", isLocal: true),
+                connectionState: .connected, sessions: sessions, activeSessionId: active
+            )
+        }
+        func sess(_ id: String, _ name: String, windows: [TmuxWindow]) -> TmuxSession {
+            TmuxSession(id: id, name: name, windows: windows, isAttached: true)
+        }
+        let w1 = TmuxWindow(id: "@1", name: "w")
+
+        // A: three sessions, this window on `work`.
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+        state.reconcile(with: [host([
+            sess("$1", "work", windows: [w1]),
+            sess("$2", "other", windows: [TmuxWindow(id: "@2", name: "w")]),
+            sess("$3", "third", windows: [TmuxWindow(id: "@3", name: "w")]),
+        ], active: "$1")])
+        XCTAssertEqual(state.lastShownSessionName, "work")
+
+        // B: %window-close applied — the session is still listed, with no windows.
+        state.reconcile(with: [host([
+            sess("$1", "work", windows: []),
+            sess("$2", "other", windows: [TmuxWindow(id: "@2", name: "w")]),
+            sess("$3", "third", windows: [TmuxWindow(id: "@3", name: "w")]),
+        ], active: "$1")])
+
+        // C: list-sessions catches up; tmux has moved the client to `other`.
+        state.reconcile(with: [host([
+            sess("$2", "other", windows: [TmuxWindow(id: "@2", name: "w")]),
+            sess("$3", "third", windows: [TmuxWindow(id: "@3", name: "w")]),
+        ], active: "$2")])
+
+        XCTAssertNil(state.selectedSessionId, "followed the client to another session")
+        XCTAssertEqual(state.endedSessionName, "work")
+        // The assertion that matters, and the one whose absence let this ship broken: the *view*
+        // asks `selectedSession(in:)`, which fell through `?? host.activeSession` to the session
+        // tmux had moved the client to. The stored selection was correct the whole time and the
+        // window still rendered another session's tabs.
+        let current = [host([
+            sess("$2", "other", windows: [TmuxWindow(id: "@2", name: "w")]),
+            sess("$3", "third", windows: [TmuxWindow(id: "@3", name: "w")]),
+        ], active: "$2")]
+        XCTAssertNil(state.selectedSession(in: current), "the view would render another session")
+        XCTAssertNil(state.selectedWindow(in: current), "and one of its tabs")
+    }
+
+    /// The fallback this suppresses is load-bearing everywhere else: a window that has never chosen
+    /// a session shows what the host has active rather than an empty detail column.
+    @MainActor
+    func testAWindowWithNoSelectionStillShowsTheActiveSession() {
+        let state = WindowState()
+        state.selectedHostId = "local"
+        let live = connectedHost(sessions: [session("$1", "work")])
+        XCTAssertEqual(state.selectedSession(in: [live])?.id, "$1")
     }
 
     /// Answering the offer — by either button, or by picking a session in the tree — clears it.

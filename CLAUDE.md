@@ -589,7 +589,14 @@ signal is that the contents changed, which is indistinguishable from the session
 under you. Now the window keeps `endedSessionName` of its own and shows F4.15's offer — Recreate,
 or New Session — which is the same answer the whole-server case already gave; anything else the
 user might want is a click away in the tree, and asking for it is a decision rather than somewhere
-they arrived. Two things hold it up. The offer is **the window's**, so `recreatableSessionName`
+they arrived. Three things hold it up, and the first shipped broken without one of them.
+**`selectedSession(in:)` has to suppress its fallback**: it resolves a nil selection through
+`?? host.activeSession`, which is *exactly* the session tmux moved the client to, so clearing
+`selectedSessionId` in `reconcile` set the state correctly and the window went on rendering the
+other session's tabs anyway. State and what the views ask are two different assertions, and a test
+on the first passed while the feature did not work. The fallback itself stays — a window that has
+never chosen a session shows what the host has active rather than an empty column — it is
+suppressed only while the offer is up. The offer is **the window's**, so `recreatableSessionName`
 answers from `WindowState` before it asks the host, and `HostPlaceholderView` reaches it from
 `.connected` as well as `.disconnected` — a live host with a dead session is the new case, and
 without that arm it said "Connected — no sessions yet." over a server with plenty. And it is gated

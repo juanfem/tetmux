@@ -298,6 +298,15 @@ public final class WindowState: Identifiable {
 
     public func selectedSession(in hosts: [HostState]) -> TmuxSession? {
         guard let host = selectedHost(in: hosts) else { return nil }
+        // A window holding the "that session ended" offer is showing nothing *deliberately*, and the
+        // fallback below would undo that: `activeSession` is exactly the session tmux moved the
+        // client to when it destroyed this one, so the window would render the thing the offer
+        // exists to stop it rendering. Clearing `selectedSessionId` in `reconcile` is not enough on
+        // its own — that sets the state, and this is what the views actually ask.
+        if endedSessionName != nil, host.id == lastShownHostId { return nil }
+        // Otherwise the fallback stands, and is load-bearing: a window that has never chosen a
+        // session — a fresh ⌘N, a host just connected — shows what the host has active rather than
+        // an empty detail column.
         return host.sessions.first { $0.id == selectedSessionId } ?? host.activeSession
     }
 
