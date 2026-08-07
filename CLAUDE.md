@@ -14,9 +14,12 @@ specific and worth consulting before changing behaviour — requirement IDs (`R3
 rationale for code that looks odd. Existing IDs are frozen: amendments change their text, never
 their number.
 
-`TODO.md` holds what is **open** — each entry with the evidence that it is open and instructions
-concrete enough to start from. Check it before concluding something is a new bug; anything the SRD
-asks for that the tree does not do belongs there, because an unlisted requirement reads as done.
+`TODO.md` holds what is **open**, and what is **parked** (`[~]` — could be done, deliberately is
+not), each entry with the evidence and instructions concrete enough to start from. It does *not*
+record what closed: finished work leaves as an invariant here, an amended requirement in the SRD, or
+a row in `docs/measurements.md`, next to the thing it constrains. Check it before concluding
+something is a new bug; anything the SRD asks for that the tree does not do belongs there, because
+an unlisted requirement reads as done.
 
 ## Commands
 

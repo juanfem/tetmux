@@ -1,107 +1,23 @@
 # TODO
 
-Rewritten from scratch on 2026-08-05 against `tetmux-srd.md` v2.1, which absorbed the audit's
-history: everything the old file recorded as done is now either an invariant in `CLAUDE.md` or an
-amended requirement in the SRD, and repeating it here would be a second copy that drifts. This file
-holds what is **open** — with the evidence that it is open and instructions concrete enough that the
-work can start from the entry alone — and what is **parked**, marked `[~]`, which is work that could
+This file holds what is **open** — with the evidence that it is open and instructions concrete enough
+that the work can start from the entry alone — and what is **parked**, marked `[~]`: work that could
 be done and deliberately is not, carrying the reason and enough of the investigation that un-parking
 it does not start from nothing. An unlisted requirement reads as done — that is the failure mode this
 file exists to prevent, so anything the SRD asks for that the tree does not do belongs here.
-As of 2026-08-06 the open list is empty and only the parked one has entries.
 
-**0 open, 5 parked by decision.** The six small items this file opened with, copy
-mode, and the integration matrix were closed on 2026-08-05, and the matrix's own follow-ups on
-2026-08-06; what they turned into is recorded in `CLAUDE.md`, not here. The five entries added on
-2026-08-06 came out of an adherence review of the tree against SRD v2.1 — a review that mostly
-found the *documents* behind the code, and amended the SRD's stale status notes in the same pass.
-The launcher's half of that batch (F4.25/F4.26) closed the same day.
+**Closed work is not recorded here, deliberately.** It leaves as an invariant in `CLAUDE.md`, an
+amended requirement in `tetmux-srd.md`, or a row in `docs/measurements.md` — where it is next to the
+thing it constrains, and where somebody will actually meet it. A second copy in this file would be a
+list nobody reads twice and one that drifts from the original the first time either is edited;
+`git log` holds the narrative. This paragraph replaced ninety lines of exactly that on 2026-08-07.
 
-**Nothing here blocks a release.** The last two entries left the open list on 2026-08-06 without
-either being implemented, and both are honest about that. P6.7's launch half was **amended to name
-warm launch**, which it passes at 268–288 ms: a cold launch is ~898 ms, the 630 ms difference is an
-empty page cache paid inside AppKit's framework first-use rather than in tetmux's code, and buying it
-back is open-ended work against a cost paid once per boot. Signing and notarisation moved from
-*blocked* to *parked*, because "blocked on an Apple Developer account" described a purchase nobody
-intends to make as though it were a queue: §1 says this is a tool for one person's daily use, and
-that person is content with the one-time right-click → Open. Both decisions are written into the SRD
-(§6 P6.7, §2.5) rather than left here, since a decision recorded only in a TODO list reads as
-outstanding work forever.
-
-**The three tests the SRD was owed closed on 2026-08-06**, and §8's status notes moved with them.
-T5.2 is asserted on both paths a pane's bytes arrive by. Sleep/wake is tested at its seam, and the
-assertion is promptness rather than recovery — a dropped link comes back on its own, so the host is
-driven to a parked retry first and the wake has to beat it. The program-level rendering corpus
-(`vim`, `htop`, `less`, `top`, a Powerline prompt) is recorded by
-`Scripts/capture-programs.py` and compared against **tmux's own** rendering of the same bytes; why
-that is the right reference, and the three ways a recording of it can be a frame or a column wrong,
-are in `CLAUDE.md`. Everything left below is a feature, a credential, or a decision.
-
-**The P6 harness closed on 2026-08-06 and paid for itself the same day.**
-`Scripts/measure-latency.sh`, `Scripts/measure-throughput.sh`, `Scripts/measure-launch.sh` and the
-`Scripts/measure-idle.md` procedure exist, and `docs/measurements.md` holds every number with the
-machine, display and power state beside it.
-
-It found one bug and two broken requirements. The bug: P6.1 missed by 2× — p95 24.43 ms against
-12 — because of an 8 ms timer of our own in the keystroke coalescer, which flushed on the trailing
-edge and so made every keystroke at typing speed wait out a window it had nothing to share. Flushing
-on the leading edge took the round trip from 19.72 ms p95 to under 1 and the whole figure to 11.54.
-The broken requirements: **P6.1 named no display**, and at 60 Hz a 12 ms budget is spent before the
-compositor can present anything, so it was unmeetable by any application; and **P6.7's memory total
-contradicted its own scrollback parenthesis**, asking for two things that could not both hold. Both
-were amended against the measurements rather than chased, which is what having numbers is for.
-
-Where that first pass left §6, and the honesty matters more than the tally — read as a snapshot of
-that pass, not as current status; the second pass and the launch amendment below supersede it.
-**P6.3 passes outright**, with
-6.5× of room. **P6.7's memory half passes the amended bound** — but that bound was drawn from these
-measurements with headroom, so it passes nearly by construction; what it buys is a regression check,
-not a validation. **P6.1's verdict is not yet knowable**: under the amended rule it passes on the
-100 Hz external monitor, and passes on the built-in panel *if* that panel is at 60 Hz while failing
-if it is at 120 — and nobody has measured which. **P6.6 and P6.7's launch half fail**, by 3.7× and
-2.5×, each with an entry below carrying its measurement as evidence.
-
-**A second pass on 2026-08-06 answered three of the four, and two of the answers were about the
-harness rather than the product.** They are recorded in `docs/measurements.md` with the numbers.
-
-*P6.1 is met on both displays, and is closed.* Every sample records the frame interval the compositor
-was on at the moment of the draw, so the script applies the amended bound instead of a flat 12 ms:
-**100.0 Hz over 4500 callbacks** on the external monitor and **60.0 Hz over 2610** on the built-in
-panel, bounds of 12.00 and 18.67 ms against p95 of 11.37 and 11.28. The two earlier built-in runs
-pass under the same rule (14.28 ms on AC, 17.84 on battery, both inside 18.67).
-
-Two things the previous entry asserted turned out to be wrong, and they are why it stayed open. The
-built-in panel is **not ProMotion** — this is a MacBook Air (Mac15,13), and
-`CGDisplayCopyAllDisplayModes` offers 18 modes for it, every one 60.0 Hz, so it was never idling its
-rate down, and the external monitor cannot have dropped it to 60 either: there is no higher mode to
-drop from. And **`CGDisplayCopyDisplayMode` does not read 0 here** — it reports 60.0, with
-`NSScreen.maximumFramesPerSecond` agreeing. That claim was the whole justification for building the
-display link, and one line of `NSScreen` would have answered what four runs had left open. The
-instrument is still the right one, because it measures the rate at the draw rather than the mode the
-display is configured for, but it was built on a premise nobody checked first.
-
-*P6.4 is closed.* The handoff is batched per display frame now, verified by counting: tmux emits
-21 934 `%output` chunks a second for a busy pane — 219 per frame at 100 Hz — and the surface calls
-`feed` exactly 100 times a second. It bought **no CPU at all** (108.2% of one core before, 106.9%
-after), which is the finding: the dispatch is not where the time goes. It was kept because the
-requirement is achievable and now achieved, not because it paid — and it cost no latency, which was
-the risk.
-
-*P6.6 is fixed and closed.* The ten-second spike was F4.29's round-trip reading living on the diffed
-`HostState`: every probe answer was a state change, and every state change rebuilds a tree holding
-every pane. It now travels on `SessionService.roundTripStream` and is read by one leaf view. On the
-arrangement the requirement actually names — **20 panes, 4 hosts, on battery** — mean **1.83% of one
-core became 0.14%** and the maximum 13.9% became 2.10%, against a 0.5% bar: inside it, where it had
-been 3.7× over. The ten-second cadence is gone rather than reduced. Memory on the same arrangement is
-unchanged at 550 MB.
-
-*P6.7's launch half splits in two, and the split is what the amendment rests on.* A third of every
-traced figure was `xctrace`: under the App Launch template `Process Creation` is ~290 ms for tetmux
-and **413 ms for Calculator**, with no main-thread samples in it at all. Untraced, the app times
-itself from the kernel's `p_starttime` to first frame and a warm launch is **268–288 ms, inside the
-400 ms floor**. Cold is a different answer: purged and untraced the median is **897.8 ms**, so the
-page cache is worth ~630 ms. **P6.7 was amended on 2026-08-06 to name warm launch**, and the entry
-that stood here is below, kept as the record of what was ruled out.
+**As of 2026-08-06: 0 open, 5 parked, and nothing here blocks a release.** The last two entries left
+the open list without being implemented, and both say so where it counts rather than here: P6.7's
+launch half was amended to name **warm** launch (SRD §6, `docs/measurements.md`), and signing moved
+from *blocked* to *parked* (SRD §2.5), because "blocked on an Apple Developer account" described a
+purchase nobody intends to make as though it were a queue. A decision recorded only in a TODO list
+reads as outstanding work forever, which is why those two sentences are in the SRD.
 
 References point into current `main`. Line numbers drift; the symbol names beside them do not.
 
@@ -113,7 +29,7 @@ References point into current `main`. Line numbers drift; the symbol names besid
   requirement now names **warm** launch, which passes at 268–288 ms (SRD §6, and the reasoning is
   there rather than here). This entry survives because it holds what was measured and what was ruled
   out, which is the expensive half and would otherwise have to be rediscovered.
-  The 711 ms and 985 ms in the table were taken under Instruments' App Launch template, and the
+  The 711 ms and 985 ms in `docs/measurements.md` were taken under Instruments' App Launch template, and the
   overhead that is inside every one of its phases was assumed small. It is not: `Process Creation`
   is ~290 ms for tetmux and **413 ms for Calculator**, an application with no scene of ours in it,
   and the time profiler records **no main-thread samples in that phase at all**. Roughly a third of
