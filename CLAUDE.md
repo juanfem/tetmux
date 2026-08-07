@@ -580,6 +580,24 @@ session of the same host gets the plain placeholder rather than an offer to recr
 session. `recreateEndedSession` is the one legitimate creation-by-remembered-name, and it is
 legitimate because the name is on screen with a button beside it.
 
+**A window whose session ends stops, rather than following the client.** tmux moves an attached
+client when its session is destroyed, and `WindowState.reconcile` used to follow it — the window
+became a view of another session with nothing said. Closing the last tab of a session is the
+ordinary way to reach that, since a session with no windows is destroyed, so the failure was
+routine: with the tree open it reads as a jumping selection, and with the tree collapsed the only
+signal is that the contents changed, which is indistinguishable from the session being replaced
+under you. Now the window keeps `endedSessionName` of its own and shows F4.15's offer — Recreate,
+or New Session — which is the same answer the whole-server case already gave; anything else the
+user might want is a click away in the tree, and asking for it is a decision rather than somewhere
+they arrived. Two things hold it up. The offer is **the window's**, so `recreatableSessionName`
+answers from `WindowState` before it asks the host, and `HostPlaceholderView` reaches it from
+`.connected` as well as `.disconnected` — a live host with a dead session is the new case, and
+without that arm it said "Connected — no sessions yet." over a server with plenty. And it is gated
+on the host being **connected**: a dropped link leaves sessions listed but unreachable and a
+restarted server reissues its ids, so a `selectedSessionId` that stops matching there means "we
+cannot see it from here", and claiming otherwise would put a Recreate button over a session that is
+still running. `pendingRestore` is what resolves that case, by id and then by name.
+
 Two consequences that are easy to miss. **Unlinking a window can destroy its session**: a session left
 with no windows is destroyed by tmux, so closing the last tab of a multi-linked window ends that
 session and moves the client elsewhere — `testUnlinkingAWindowLeavesItRunningInItsOtherSession` asserts

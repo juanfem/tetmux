@@ -86,7 +86,22 @@ public final class WindowState: Identifiable {
 
     public var selectedHostId: String?
     /// `$id`
-    public var selectedSessionId: String?
+    ///
+    /// Landing on a real session answers the "that session ended" offer, whichever way the user
+    /// answered it — Recreate, New Session, or picking another one in the tree.
+    public var selectedSessionId: String? {
+        didSet {
+            if selectedSessionId != nil { endedSessionName = nil }
+        }
+    }
+
+    /// The session *this window* was showing when it ended, which is not the same question the host
+    /// answers.
+    ///
+    /// `HostState.endedSessionName` means "the server has nothing left"; this means "the thing in
+    /// front of you is gone, while the host carries on". Closing the last tab of a session is the
+    /// ordinary way to reach it, since a session with no windows is destroyed by tmux.
+    public var endedSessionName: String?
     /// `@id`
     ///
     /// Changing it drops `focusedPaneId`, which belonged to the tab being left. Keeping it would
@@ -323,10 +338,22 @@ public final class WindowState: Identifiable {
     /// in opposite directions: too loose and every window on the host offers to recreate one session,
     /// too strict and the offer never appears at all.
     public func recreatableSessionName(in host: HostState) -> String? {
+        // This window's own, first: the host is still connected and only the session in front of
+        // the user ended, which the host has nothing to say about.
+        if let name = endedSessionName, host.id == lastShownHostId { return name }
         guard case .disconnected = host.connectionState else { return nil }
         guard let name = host.endedSessionName else { return nil }
         guard host.id == lastShownHostId, name == lastShownSessionName else { return nil }
         return name
+    }
+
+    /// Whether the offer on screen is this window's ended session rather than the whole server's.
+    ///
+    /// The two need different buttons: with the host connected there is a channel already, so
+    /// recreating is an ordinary `new-session` on it, while the disconnected case has to connect
+    /// first. Asking the window rather than the host keeps that decision in one place.
+    public func sessionEndedWhileHostLives(in host: HostState) -> Bool {
+        endedSessionName != nil && host.id == lastShownHostId && host.connectionState.isActive
     }
 
     /// What this window is showing, in the form every command takes.
@@ -355,6 +382,32 @@ public final class WindowState: Identifiable {
         guard let host = selectedHost(in: hosts) else { return }
 
         if selectedSessionId == nil || !host.sessions.contains(where: { $0.id == selectedSessionId }) {
+            // The session this window was showing is gone, and following the client to whichever
+            // one tmux moved it to is what this used to do. Closing the last tab of a session ends
+            // that session, so the window silently became a view of somebody else's work — obvious
+            // enough with the tree open, where the selection visibly jumps, and thoroughly
+            // disorienting with it collapsed, where the only signal is that the contents changed.
+            //
+            // So the window stops instead and says what happened, with the same two offers the
+            // whole-server case gets. Anything else the user might want — another session on this
+            // host — is one click away in the tree, and asking for it is a decision rather than
+            // something arrived at.
+            //
+            // Only while the host is **connected**, which is the guard that keeps this honest: a
+            // dropped link leaves sessions listed but unreachable, and a server that restarted
+            // reissues its ids, so a stale `selectedSessionId` there means "we cannot see it from
+            // here" rather than "it ended". `pendingRestore` is what resolves that case, by id and
+            // then by name.
+            if case .connected = host.connectionState,
+               host.id == lastShownHostId,
+               let ended = lastShownSessionName,
+               !host.sessions.contains(where: { $0.name == ended }) {
+                endedSessionName = ended
+                selectedSessionId = nil
+                selectedWindowId = nil
+                focusedPaneId = nil
+                return
+            }
             selectedSessionId = host.activeSession?.id
         }
         guard let session = selectedSession(in: hosts) else {

@@ -2197,3 +2197,83 @@ final class AppModelTests: XCTestCase {
         )!
     }
 }
+
+// MARK: - A session ending under a window
+
+/// Closing the last tab of a session ends that session, and the window it was in must say so
+/// rather than following the client somewhere else.
+///
+/// tmux moves an attached client when its session is destroyed, and the reconciler used to follow —
+/// the window became a view of another session with no announcement. With the tree open that reads
+/// as a jumping selection; with it collapsed the only signal is that the contents changed, which is
+/// indistinguishable from the session having been replaced under you.
+final class EndedSessionOfferTests: XCTestCase {
+
+    private func connectedHost(sessions: [TmuxSession]) -> HostState {
+        HostState(
+            config: HostConfig(id: "local", name: "local", isLocal: true),
+            connectionState: .connected,
+            sessions: sessions,
+            activeSessionId: sessions.first?.id
+        )
+    }
+
+    private func session(_ id: String, _ name: String) -> TmuxSession {
+        TmuxSession(id: id, name: name, windows: [TmuxWindow(id: "@1", name: "w")], isAttached: true)
+    }
+
+    @MainActor
+    func testTheWindowStopsRatherThanFollowingToAnotherSession() {
+        let state = WindowState()
+        let before = connectedHost(sessions: [session("$1", "work"), session("$2", "other")])
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+        state.reconcile(with: [before])
+        XCTAssertEqual(state.lastShownSessionName, "work")
+
+        // `work` ends; tmux moves the client to `other`, which is what the host now reports active.
+        let after = HostState(
+            config: before.config, connectionState: .connected,
+            sessions: [session("$2", "other")], activeSessionId: "$2"
+        )
+        state.reconcile(with: [after])
+
+        XCTAssertNil(state.selectedSessionId, "it followed the client to another session")
+        XCTAssertEqual(state.endedSessionName, "work")
+        XCTAssertEqual(state.recreatableSessionName(in: after), "work")
+        XCTAssertTrue(state.sessionEndedWhileHostLives(in: after))
+    }
+
+    /// Answering the offer — by either button, or by picking a session in the tree — clears it.
+    @MainActor
+    func testLandingOnASessionAnswersTheOffer() {
+        let state = WindowState()
+        state.selectedHostId = "local"
+        state.endedSessionName = "work"
+
+        state.selectedSessionId = "$3"
+
+        XCTAssertNil(state.endedSessionName)
+    }
+
+    /// The guard that keeps this honest. A dropped link leaves sessions listed but out of reach, and
+    /// a server that restarted reissues its ids — so a `selectedSessionId` that no longer matches
+    /// means "we cannot see it from here", not "it ended". Claiming otherwise would put a Recreate
+    /// button over a session that is still running.
+    @MainActor
+    func testADisconnectedHostIsNotAnEndedSession() {
+        let state = WindowState()
+        let live = connectedHost(sessions: [session("$1", "work")])
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+        state.reconcile(with: [live])
+
+        let dropped = HostState(
+            config: live.config, connectionState: .disconnected,
+            sessions: [session("$9", "work")], activeSessionId: "$9"
+        )
+        state.reconcile(with: [dropped])
+
+        XCTAssertNil(state.endedSessionName, "a reissued id is not an ended session")
+    }
+}

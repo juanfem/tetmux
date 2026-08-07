@@ -608,9 +608,23 @@ struct RootView: View {
                 host: host,
                 endedSessionName: state.recreatableSessionName(in: host),
                 onConnect: { model.reconnect(host.id) },
-                onRecreate: { model.recreateEndedSession(host.id) },
-                // The same path the sidebar's New Session takes, which already copes with a host
-                // that has no channel: it connects with `new-session -A -s <fresh name>`.
+                // Two ways to put a session back, and which one applies is a question about the
+                // *host*, not about the name. A session that ended under a host that is still
+                // connected is an ordinary `new-session` down the channel that is already open;
+                // `recreateEndedSession` would connect, which is right only when the whole server
+                // went away. Sending the live case through it is idempotence-guarded into doing
+                // nothing at all.
+                onRecreate: {
+                    if state.sessionEndedWhileHostLives(in: host),
+                       let name = state.recreatableSessionName(in: host) {
+                        model.createSession(hostId: host.id, name: name, revealIn: state)
+                    } else {
+                        model.recreateEndedSession(host.id)
+                    }
+                },
+                // The same path the sidebar's New Session takes, which already copes with either:
+                // on a live host it is a `new-session`, and on a dead one it connects with
+                // `new-session -A -s <fresh name>`.
                 onNewSession: {
                     model.createSessionWithDefaultName(hostId: host.id, revealIn: state)
                 }
@@ -1236,38 +1250,23 @@ struct HostPlaceholderView: View {
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
                 Button("Retry", action: onConnect).buttonStyle(.borderedProminent)
             case .connected:
-                Text("Connected — no sessions yet.").foregroundStyle(.secondary)
+                // A connected host with nothing to show is usually a server with no sessions — but
+                // it is also every window whose *own* session ended while the host carried on,
+                // which is what closing the last tab of a session does. The offer belongs to both;
+                // the only difference is whether a name is remembered.
+                if endedSessionName != nil {
+                    endedSessionOffer
+                } else {
+                    Text("Connected — no sessions yet.").foregroundStyle(.secondary)
+                }
             case .disconnected:
                 // "The session you were in ended" and "you are not connected to this host" are the
                 // same `ConnectionState` and completely different news. Said plainly, with the name,
                 // because the name is the only thing left of it — and because the button beside it
                 // is the one place recreating a session *by remembered name* is what the user asked
                 // for rather than something done behind their back (F4.15).
-                if let endedSessionName {
-                    Text("Session “\(endedSessionName)” ended.")
-                        .foregroundStyle(.secondary)
-                    Text("Its tabs and everything running in them are gone. Recreating makes an empty session under the same name; a new session gets a fresh one.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        // `lineLimit`, never `fixedSize`: a `NavigationSplitView` detail column
-                        // measures its content at an unspecified width, which a fixed-size text
-                        // answers by wrapping at one character per line — and the whole window ends
-                        // up taller than itself with both columns pushed off the top.
-                        .lineLimit(4)
-                        .frame(maxWidth: 420)
-                    // **Not "Connect"**, which is what stood here and could not do what it said. This
-                    // branch is only reached when `attachAny` found nothing, so there is nothing on
-                    // the server to connect *to*: the button fell through to creating a session
-                    // under the host's default name, which was the constant `tetmux-main` — the
-                    // very name beside it on the Recreate button. Two buttons, one outcome, and a
-                    // verb that described neither. The real choice here is what the session about
-                    // to be made should be called, so that is what the two buttons offer.
-                    HStack(spacing: 10) {
-                        Button("Recreate “\(endedSessionName)”", action: onRecreate)
-                            .buttonStyle(.borderedProminent)
-                        Button("New Session", action: onNewSession)
-                    }
+                if endedSessionName != nil {
+                    endedSessionOffer
                 } else {
                     Button("Connect", action: onConnect).buttonStyle(.borderedProminent)
                 }
@@ -1275,6 +1274,36 @@ struct HostPlaceholderView: View {
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Shared by both states that can reach it, so the sentence and the two buttons cannot drift
+    /// apart depending on whether the host outlived the session.
+    @ViewBuilder
+    private var endedSessionOffer: some View {
+        if let endedSessionName {
+            Text("Session “\(endedSessionName)” ended.")
+                .foregroundStyle(.secondary)
+            Text("Its tabs and everything running in them are gone. Recreating makes an empty session under the same name; a new session gets a fresh one.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                // `lineLimit`, never `fixedSize`: a `NavigationSplitView` detail column measures its
+                // content at an unspecified width, which a fixed-size text answers by wrapping at one
+                // character per line — and the whole window ends up taller than itself with both
+                // columns pushed off the top.
+                .lineLimit(4)
+                .frame(maxWidth: 420)
+            // **Neither of these is "Connect"**, which is what stood here and could not do what it
+            // said. Whichever state reached this, there is nothing to connect *to*: either the
+            // server had nothing left, or it is connected already and only this window's session
+            // went away. The real choice at this point is what the session about to be made should
+            // be called, so that is what the two buttons offer.
+            HStack(spacing: 10) {
+                Button("Recreate “\(endedSessionName)”", action: onRecreate)
+                    .buttonStyle(.borderedProminent)
+                Button("New Session", action: onNewSession)
+            }
+        }
     }
 }
 
