@@ -1147,9 +1147,13 @@ for is that the chord still *matches*, so that has its own test: `charactersIgno
   it has no window and is not frontmost, and it used to offer New Window alone — which reconciles to
   the first host's *active* session and window, i.e. very often the window already on screen, so the
   one thing the Dock could do was make a second view of what you were already looking at. **New
-  Window** now seeds `sidebar: .shown`: someone reaching for the Dock has nothing in front of them
+  Window** seeds `sidebar: .shown`: someone reaching for the Dock has nothing in front of them
   and needs a window to navigate *from*, and `.automatic` is AppKit deciding rather than an
-  instruction. **New Local Session** and **New Remote Session ▸ host** create a session and open a
+  instruction. **⌘N goes through the same `openNewAppWindow`**, and that is the point rather than an
+  implementation detail: it used to open a bare window with no seed, so the tree fell to
+  `.automatic` and ⌘N came up collapsed while the Dock's identically-titled item came up expanded —
+  two menu items, one title, one meaning, two behaviours. A New Window command that gains a seed
+  needs it in that one method, not at a call site. **New Local Session** and **New Remote Session ▸ host** create a session and open a
   window onto it with the tree collapsed. Neither can simply open a window — control mode's
   `new-session` answers with no id, so the window can only be opened once the topology says what it
   should show, which is exactly what `RevealRequest` exists for; they go through

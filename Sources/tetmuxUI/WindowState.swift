@@ -20,9 +20,14 @@ public struct WindowSeed: Equatable, Sendable {
     ///
     /// Three states rather than a `collapseSidebar` flag, because there are genuinely three answers.
     /// A window opened *onto a session* hides the tree (item 12) — it has one thing to show and the
-    /// tree is in the way. A window opened to *navigate from* — the Dock's New Window — must show it,
-    /// and cannot rely on `.automatic` to decide, since that is AppKit's judgement and not an
-    /// instruction. And ⌘N asks for neither and leaves the window's own default alone.
+    /// tree is in the way. A window opened to *navigate from* — New Window, from ⌘N or the Dock —
+    /// must show it, and cannot rely on `.automatic` to decide, since that is AppKit's judgement and
+    /// not an instruction. `.unchanged` is for a window that is being seeded with a session but not
+    /// told what to do about its tree, and is the default the seed carries when nobody says.
+    ///
+    /// ⌘N used to be a fourth answer by accident: it opened a bare window with no seed at all, so
+    /// the tree fell to `.automatic` and came up collapsed while the Dock's identically-titled item
+    /// came up expanded. Both now go through `AppModel.openNewAppWindow`.
     public enum SidebarIntent: Equatable, Sendable {
         case unchanged
         case collapsed

@@ -48,7 +48,7 @@ public struct TetmuxApp: App {
         CommandGroup(replacing: .newItem) {
             // A second window of the application, which is what ⌘N means everywhere else. The
             // `newWindow` item below it is the tmux one, which this app shows as a tab (item 11).
-            NewAppWindowButton(title: ApplicationShortcut.newAppWindow.title)
+            NewAppWindowButton(title: ApplicationShortcut.newAppWindow.title, model: model)
                 .keyboardShortcut(.newAppWindow, in: keymap)
             Divider()
             // F4.27 — a passthrough host has no tmux window and no pane tree for these to act on,
@@ -210,10 +210,19 @@ public struct TetmuxApp: App {
 /// window with nothing to seed it with.
 private struct NewAppWindowButton: View {
     let title: String
+    @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button(title) { openWindow(id: RootScene.mainWindowId) }
+        Button(title) {
+            // The Dock's New Window and this one are the same command and now take the same path,
+            // seed included. They did not: this opened a bare window and let the tree fall to
+            // `.automatic`, which is AppKit's judgement rather than an instruction, so ⌘N came up
+            // without a sidebar while the Dock's came up with one. Whichever is right, they cannot
+            // differ — the two items have the same title and mean the same thing.
+            model.openAppWindow = { openWindow(id: RootScene.mainWindowId) }
+            model.openNewAppWindow()
+        }
     }
 }
 

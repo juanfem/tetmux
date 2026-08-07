@@ -1739,6 +1739,9 @@ public final class AppModel {
     /// to be one they can find their way around from — and `.automatic` is AppKit deciding, which is
     /// not the same as asking. The selection is deliberately left to `reconcile`: the first host and
     /// what it has active, which is the state the app starts in.
+    ///
+    /// Both New Window items call this — ⌘N and the Dock's. ⌘N used to open a bare window instead,
+    /// which is how two menu items with one title came to differ in whether the tree was showing.
     public func openNewAppWindow() {
         openWindow(WindowSeed(sidebar: .shown))
     }
