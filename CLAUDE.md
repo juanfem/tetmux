@@ -1149,11 +1149,14 @@ for is that the chord still *matches*, so that has its own test: `charactersIgno
   one thing the Dock could do was make a second view of what you were already looking at. **New
   Window** seeds `sidebar: .shown`: someone reaching for the Dock has nothing in front of them
   and needs a window to navigate *from*, and `.automatic` is AppKit deciding rather than an
-  instruction. **⌘N goes through the same `openNewAppWindow`**, and that is the point rather than an
-  implementation detail: it used to open a bare window with no seed, so the tree fell to
-  `.automatic` and ⌘N came up collapsed while the Dock's identically-titled item came up expanded —
-  two menu items, one title, one meaning, two behaviours. A New Window command that gains a seed
-  needs it in that one method, not at a call site. **New Local Session** and **New Remote Session ▸ host** create a session and open a
+  instruction. **⌘N is a different rule and not an
+  inconsistency**: `openNewAppWindowFromMenu` takes after the window it was pressed in — collapsed
+  from a collapsed one, showing from a showing one — because a second window of what you are looking
+  at should look like what you are looking at, while the Dock has no window to take after. What
+  neither may do is send no seed, which is what ⌘N used to do: the tree then falls to `.automatic`
+  and comes up collapsed whatever the asking window looked like. Both read `sidebarVisibility !=
+  .detailOnly`, the rule `workspace.json` already stores `sidebarShown` by — `.automatic` is a tree
+  that is *showing*, and `== .all` would hide one the user can see. **New Local Session** and **New Remote Session ▸ host** create a session and open a
   window onto it with the tree collapsed. Neither can simply open a window — control mode's
   `new-session` answers with no id, so the window can only be opened once the topology says what it
   should show, which is exactly what `RevealRequest` exists for; they go through

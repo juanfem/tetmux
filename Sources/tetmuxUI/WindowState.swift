@@ -25,9 +25,12 @@ public struct WindowSeed: Equatable, Sendable {
     /// not an instruction. `.unchanged` is for a window that is being seeded with a session but not
     /// told what to do about its tree, and is the default the seed carries when nobody says.
     ///
-    /// ⌘N used to be a fourth answer by accident: it opened a bare window with no seed at all, so
-    /// the tree fell to `.automatic` and came up collapsed while the Dock's identically-titled item
-    /// came up expanded. Both now go through `AppModel.openNewAppWindow`.
+    /// The two New Window items resolve to different intents on purpose. The Dock's is always
+    /// `.shown` — it is reached from outside the app, often with nothing on screen, so there is no
+    /// window to take after. ⌘N takes after the window it was pressed in, so a second window of what
+    /// you are looking at looks like what you are looking at. Neither may go back to sending no seed
+    /// at all, which is what ⌘N did: the tree then falls to `.automatic` and comes up collapsed
+    /// regardless of either rule.
     public enum SidebarIntent: Equatable, Sendable {
         case unchanged
         case collapsed

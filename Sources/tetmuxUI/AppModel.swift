@@ -1740,10 +1740,28 @@ public final class AppModel {
     /// not the same as asking. The selection is deliberately left to `reconcile`: the first host and
     /// what it has active, which is the state the app starts in.
     ///
-    /// Both New Window items call this — ⌘N and the Dock's. ⌘N used to open a bare window instead,
-    /// which is how two menu items with one title came to differ in whether the tree was showing.
+    /// The Dock's item only. ⌘N has its own rule — `openNewAppWindowFromMenu` — because it is
+    /// pressed inside a window and there is something to take after.
     public func openNewAppWindow() {
         openWindow(WindowSeed(sidebar: .shown))
+    }
+
+    /// ⌘N and File ▸ New Window: the new window's tree matches the window it was asked from.
+    ///
+    /// Deliberately *not* the Dock's rule, and the difference is where the request comes from. The
+    /// Dock is reached from outside the app, often with nothing on screen, so there is no window to
+    /// take after and the answer has to be "something you can navigate from". ⌘N is pressed *in* a
+    /// window, and a second window of what you are looking at should look like what you are looking
+    /// at — asking for another window is not asking for a differently-configured one.
+    ///
+    /// `!= .detailOnly` rather than `== .all`, which is the same rule `WorkspaceWindow` stores
+    /// `sidebarShown` by: `.automatic` is a tree that is showing, and comparing against `.all` would
+    /// read it as collapsed and hide a sidebar the user could see. With no window to ask — ⌘N from
+    /// the menu bar with everything closed — it falls to shown, which is the Dock's case arrived at
+    /// by another route.
+    public func openNewAppWindowFromMenu() {
+        let shown = activeWindowState.map { $0.sidebarVisibility != .detailOnly } ?? true
+        openWindow(WindowSeed(sidebar: shown ? .shown : .collapsed))
     }
 
     /// Asks for a new window showing `seed`. The request is picked up by whichever window is on screen.

@@ -215,13 +215,13 @@ private struct NewAppWindowButton: View {
 
     var body: some View {
         Button(title) {
-            // The Dock's New Window and this one are the same command and now take the same path,
-            // seed included. They did not: this opened a bare window and let the tree fall to
-            // `.automatic`, which is AppKit's judgement rather than an instruction, so ⌘N came up
-            // without a sidebar while the Dock's came up with one. Whichever is right, they cannot
-            // differ — the two items have the same title and mean the same thing.
+            // Takes after the window it was asked from, which the Dock's identically-titled item
+            // deliberately does not — see `openNewAppWindowFromMenu`. What it must not do is what it
+            // did before: open a bare window with no seed, leaving the tree to `.automatic`, which
+            // is AppKit's judgement rather than an instruction and came up collapsed however the
+            // asking window looked.
             model.openAppWindow = { openWindow(id: RootScene.mainWindowId) }
-            model.openNewAppWindow()
+            model.openNewAppWindowFromMenu()
         }
     }
 }

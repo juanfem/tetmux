@@ -313,6 +313,63 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.defaultSessionName(hostId: "local"), "tetmux_2")
     }
 
+    // MARK: - New Window
+
+    /// ⌘N takes after the window it was pressed in; the Dock's identically-titled item always shows
+    /// the tree. Different rules on purpose — the Dock is reached from outside the app, often with
+    /// nothing on screen, so there is no window to take after.
+    ///
+    /// The bug this replaces was neither rule: ⌘N sent no seed at all, so the tree fell to
+    /// `.automatic` and came up collapsed however the asking window looked. Worth a test because
+    /// both paths are one line and read as obviously right in isolation — the failure is only
+    /// visible with the two windows side by side.
+    func testCommandNTakesTheAskingWindowsSidebar() {
+        let model = makeModel()
+
+        let collapsed = WindowState()
+        collapsed.sidebarVisibility = .detailOnly
+        model.focus(collapsed)
+        model.openNewAppWindowFromMenu()
+        XCTAssertEqual(model.consumeSeed()?.sidebar, .collapsed)
+
+        let shown = WindowState()
+        shown.sidebarVisibility = .all
+        model.focus(shown)
+        model.openNewAppWindowFromMenu()
+        XCTAssertEqual(model.consumeSeed()?.sidebar, .shown)
+    }
+
+    /// `.automatic` is a tree that is *showing*, so it inherits as shown. Comparing against `.all`
+    /// instead would read it as collapsed and hide a sidebar the user can see — and `.automatic` is
+    /// what a window has before anything sets it, so that would be the common case. It is the same
+    /// rule `WorkspaceWindow` stores `sidebarShown` by.
+    func testAutomaticCountsAsShowing() {
+        let model = makeModel()
+        let automatic = WindowState()
+        automatic.sidebarVisibility = .automatic
+        model.focus(automatic)
+        model.openNewAppWindowFromMenu()
+        XCTAssertEqual(model.consumeSeed()?.sidebar, .shown)
+    }
+
+    /// ⌘N from the menu bar with every window closed has nothing to take after, which is the Dock's
+    /// situation reached another way: somewhere to navigate from.
+    func testCommandNWithNoWindowShowsTheTree() {
+        let model = makeModel()
+        model.openNewAppWindowFromMenu()
+        XCTAssertEqual(model.consumeSeed()?.sidebar, .shown)
+    }
+
+    /// The Dock's rule does not inherit, even when there is a window to inherit from.
+    func testTheDocksNewWindowAlwaysShowsTheTree() {
+        let model = makeModel()
+        let collapsed = WindowState()
+        collapsed.sidebarVisibility = .detailOnly
+        model.focus(collapsed)
+        model.openNewAppWindow()
+        XCTAssertEqual(model.consumeSeed()?.sidebar, .shown)
+    }
+
     /// Sessions the user named themselves are not in the way of the generated series.
     func testDefaultSessionNameIgnoresUnrelatedNames() {
         let model = makeModel()
