@@ -1224,6 +1224,10 @@ struct HostPlaceholderView: View {
     let onRecreate: () -> Void
     let onNewSession: () -> Void
 
+    /// Which of the two offers has the keyboard. Starts on New Session (`defaultFocus` below).
+    private enum EndedSessionChoice: Hashable { case recreate, newSession }
+    @FocusState private var focus: EndedSessionChoice?
+
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: host.config.isLocal ? "laptopcomputer" : "server.rack")
@@ -1298,11 +1302,36 @@ struct HostPlaceholderView: View {
             // server had nothing left, or it is connected already and only this window's session
             // went away. The real choice at this point is what the session about to be made should
             // be called, so that is what the two buttons offer.
+            // **New Session is the default**, and Recreate is the deliberate one. Recreate was
+            // prominent first, on the reasoning that it answers the sentence above it — but the
+            // sentence says the session's contents are gone, so recreating it makes an *empty*
+            // session wearing a name whose meaning left with the panes. Starting fresh is the
+            // commoner intent and the one that surprises nobody; wanting the name back is worth a
+            // deliberate press.
+            //
+            // Return activates New Session wherever focus is, since it is the default. Both buttons
+            // are focusable so ⇥ and the arrow keys move between them and Space activates the one
+            // with the ring — ⇥ between controls is the system's "Keyboard navigation" preference
+            // and off by default, which is why Return is not the only way in.
             HStack(spacing: 10) {
                 Button("Recreate “\(endedSessionName)”", action: onRecreate)
-                    .buttonStyle(.borderedProminent)
+                    .focusable()
+                    .focused($focus, equals: .recreate)
                 Button("New Session", action: onNewSession)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .focusable()
+                    .focused($focus, equals: .newSession)
             }
+            .onMoveCommand { direction in
+                // Arrow keys move between the two without needing the system preference above.
+                switch direction {
+                case .left: focus = .recreate
+                case .right: focus = .newSession
+                default: break
+                }
+            }
+            .defaultFocus($focus, .newSession)
         }
     }
 }
