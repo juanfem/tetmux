@@ -122,6 +122,15 @@ never streamed the overlay and a pane sitting in it otherwise looks exactly like
 keys you already use in copy mode still work — they go to tmux and are looked up in your own table —
 so the menu items add a way in and a way out to the Mac clipboard without taking anything away.
 
+**Hold `⇧` to select in a program that is using the mouse.** vim, htop and most modern TUIs — Claude
+Code among them — turn on mouse reporting, which means the *program* receives clicks and drags and
+the terminal does not, so dragging to select appears to do nothing. That is the program working as
+intended rather than a bug, and it happens in Terminal.app and iTerm2 too; each of them just picks a
+different modifier to escape it (`Fn` and `⌥` respectively). Here it is `⇧`, the xterm convention.
+For anything longer than a line, copy mode is the better tool: it does not involve the mouse at all,
+so mouse reporting cannot interfere, and it reaches tmux's scrollback rather than only what this side
+was sent. Middle-click pastes whatever you last selected, by either route, rather than the clipboard.
+
 Closing a tab **unlinks** it — it never kills what is running — unless that tab is linked to only
 the one session, which tmux cannot unlink, and then you are asked and told why. Holding `⌥`
 while clicking a close or kill button skips that confirmation, and the glyph turns red while `⌥` is
