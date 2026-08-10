@@ -129,6 +129,43 @@ final class PaneInputTests: XCTestCase {
         // as two characters.
         XCTAssertEqual(recorder.bytes.count, 1, "the commit was split across writes: \(recorder.bytes)")
     }
+
+    /// Press-and-hold — holding `n` for `ñ` — replaces the base character instead of following it.
+    ///
+    /// The two tests above are the composition contract, and press-and-hold is deliberately *not*
+    /// that: nothing is ever marked. The base character is committed at once, and the accent picked
+    /// from the popup arrives as a second `insertText` whose `replacementRange` covers the first —
+    /// captured from a logging `NSTextInputClient` as `{NSNotFound, 0}` then `{0, 1}`. SwiftTerm
+    /// discards that range, which is what put `nñ` in the pane.
+    ///
+    /// The range's *length* is what is honoured and its location is deliberately ignored: it is an
+    /// offset into whatever the client reported as its selection, and SwiftTerm's is a terminal
+    /// coordinate (`row × cols + col`) rather than an index into anything we hold.
+    func testPressAndHoldReplacesTheBaseCharacterRatherThanFollowingIt() {
+        let (view, recorder) = makeView()
+
+        view.insertText("n", replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertEqual(recorder.text, "n", "the base character of a long press did not reach the pane")
+
+        view.insertText("ñ", replacementRange: NSRange(location: 0, length: 1))
+        XCTAssertEqual(
+            recorder.text, "n\u{7f}ñ",
+            "the accent did not take back the base character — this is the pane receiving `nñ`"
+        )
+    }
+
+    /// …and an ordinary keystroke erases nothing.
+    ///
+    /// The failure this exists for is the opposite one and is far worse than the duplicate: an
+    /// erasure keyed on something other than a non-empty replacement range would put a Delete in
+    /// front of every character the user types.
+    func testAnOrdinaryInsertionErasesNothing() {
+        let (view, recorder) = makeView()
+
+        view.insertText("a", replacementRange: NSRange(location: NSNotFound, length: 0))
+        view.insertText("b", replacementRange: NSRange(location: 0, length: 0))
+        XCTAssertEqual(recorder.text, "ab", "an insertion with no replacement range erased something")
+    }
 }
 
 /// Records what the emulator hands to its delegate, which is the seam bytes cross to reach the

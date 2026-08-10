@@ -137,7 +137,9 @@ struct PassthroughTerminalView: NSViewRepresentable {
     let service: SessionService
 
     func makeNSView(context: Context) -> TerminalView {
-        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        // `ComposingTerminalView` rather than a bare `TerminalView`: this surface has the same input
+        // system in front of it, so press-and-hold would deliver `nñ` here exactly as it did to a pane.
+        let view = ComposingTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         view.terminalDelegate = context.coordinator
         view.getTerminal().changeScrollback(theme.scrollbackLines)
         TerminalTheme.quietParserLogging(view.getTerminal())

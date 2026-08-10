@@ -149,7 +149,7 @@ Where things are, since the invariants below name symbols without saying which f
 | `AppModel.swift` | App-wide model; the decisions that need no channel. |
 | `WindowState.swift` | Everything that belongs to one macOS window. |
 | `TerminalContainerView.swift` | The pane-tree renderer and `PaneDivider`. |
-| `TerminalSurface.swift` | `TerminalView` wrapper, `TerminalTheme`, bell, OSC handling, `PaneTerminalView`. |
+| `TerminalSurface.swift` | `TerminalView` wrapper, `TerminalTheme`, bell, OSC handling, `ComposingTerminalView`, `PaneTerminalView`. |
 | `PassthroughView.swift` | §4.6's whole surface: the mode indicator, the offer, and the one terminal. |
 | `SidebarView.swift` · `StatusBarView.swift` | Host/session/window tree (drawn glyphs); F4.28 footer. |
 | `LauncherOverlay.swift` | ⌘K fuzzy launcher over hosts, sessions and windows (F4.25/F4.26). |
@@ -1118,6 +1118,23 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   notice if a SwiftTerm bump turned that off, hence `PaneLinkTests`. Both routes are held to one
   scheme allowlist — `http`, `https`, `mailto`, `ftp` — because pane contents are remote text and
   `NSWorkspace.open` launches whatever application claimed a scheme.
+- **Press-and-hold is a replacement, not a composition, and the base character has already been
+  sent.** Holding `n` for `ñ` looks like the dead-key path and is nothing like it: no text is ever
+  marked. Captured from a logging `NSTextInputClient`, macOS commits the base character at once —
+  `insertText 'n' replacementRange={NSNotFound, 0}` — emits *no* `insertText` for the repeat events
+  that open the popup, and delivers the accent as a second commit whose range covers the first:
+  `insertText 'ñ' replacementRange={0, 1}`. SwiftTerm discards that range, so both characters reached
+  the pane and the user typed `nñ`. `ComposingTerminalView` honours it the only way a terminal can,
+  by sending `0x7f` — the byte SwiftTerm already sends for the Delete key, so the pane sees the same
+  erase it would if the character had been taken back by hand — for each character being replaced,
+  ahead of the new text. Three things about it. There is **no way to hold the base character back**:
+  nothing distinguishes the first `insertText` of a long press from an ordinary keystroke, so
+  deferring would mean deferring every keystroke, which is the whole of P6.1's budget spent on this.
+  Only the range's **length** is honoured and its location is ignored — the location indexes whatever
+  the client called its selection, and SwiftTerm's is a terminal coordinate (`row × cols + col`)
+  rather than an offset into anything we hold. And it is a **base class** rather than a method on
+  `PaneTerminalView`, because §4.6's passthrough surface is a `TerminalView` with the same input
+  system in front of it and had the identical bug.
 - **There are two searches, over two different bodies of text.** ⌘F is SwiftTerm's find bar and
   searches what the *emulator* is holding — the local scrollback, capped by the theme and reset by
   every repaint. ⌃⌘F is tmux's, and reaches the history the emulator never received, which is the
@@ -1626,6 +1643,17 @@ with a shell script has to put the matrix binary on its own `PATH` (`matrixPathE
 scripts share this machine's `TMUX_TMPDIR`, so a stand-in running the system tmux starts a server of
 the wrong version on the socket every later test is using, and a tmux client cannot speak to a server
 of another version.
+
+**…and `TMUX_TMPDIR` does not isolate anything from inside a tmux pane, which is where this app's
+own author works.** A tmux client given neither `-S` nor `-L` derives its socket from **`$TMUX`**
+when that is set, and only falls back to `$TMUX_TMPDIR/tmux-<uid>/` when it is not — so the whole
+per-test isolation above silently inverts for a suite run from a pane. That is not a hypothetical:
+it is exactly how a debug build launched with a scratch `TMUX_TMPDIR`, to keep it away from the
+installed one, attached to the real server instead and detached nothing it was supposed to. The
+sharp edge is `tearDown`'s `kill-server`, which under a leaked `$TMUX` names the user's own server.
+Run the suite and the measurement scripts as `env -u TMUX swift test`; a stray `SIGKILL` of a
+tetmux under test also leaves `window-size manual` on whatever session it was attached to, which is
+the ordinary graceful-teardown promise going unkept and wants `set-option -u window-size` by hand.
 
 Three things keep a capture a record of a **version** rather than of a machine, and each was a real
 leak before it was fixed: `-f /dev/null` so nobody's `~/.tmux.conf` gets in; every pane running

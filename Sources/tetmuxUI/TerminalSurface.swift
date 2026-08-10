@@ -548,13 +548,61 @@ struct TerminalPaneView: NSViewRepresentable {
     }
 }
 
+/// A terminal view that honours the `replacementRange` the input system hands `insertText`.
+///
+/// macOS press-and-hold — holding `n` for `ñ`, `e` for `è` — is not a composition: the base
+/// character is inserted *immediately*, and the accent picked from the popup arrives as a second
+/// `insertText` carrying a range covering the first. Verified against a logging `NSTextInputClient`:
+///
+///     insertText 'n'  replacementRange={NSNotFound, 0}
+///     …popup; the repeat events produce no insertText at all…
+///     insertText 'ñ'  replacementRange={0, 1}
+///
+/// SwiftTerm discards that range, so both characters reached the pane and the user typed `nñ`.
+/// There is no way to hold the base character back and find out: nothing distinguishes the first
+/// `insertText` of a long press from an ordinary keystroke, so deferring would mean deferring every
+/// keystroke, which is P6.1's whole budget spent on a feature almost nobody uses.
+///
+/// So the replacement is honoured the only way a terminal can honour one — by asking the program to
+/// erase what it was already sent. `0x7f` is what SwiftTerm sends for the Delete key, so this is the
+/// same byte the pane would receive if the user had erased the character by hand; choosing `0x08`
+/// here would be a second, quieter answer to a question the emulator has already settled.
+///
+/// It is a base class rather than something on `PaneTerminalView` because §4.6's passthrough surface
+/// is a `TerminalView` too and has the same input system in front of it.
+class ComposingTerminalView: TerminalView {
+    /// What the last `insertText` was given, so a replacement knows how many characters — rather
+    /// than how many UTF-16 units — it is being asked to take back.
+    private var lastInsertedText: String?
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        let text = (string as? NSString) as String? ?? (string as? NSAttributedString)?.string
+        if replacementRange.length > 0 {
+            send(Array(repeating: 0x7f, count: erasures(replacing: replacementRange.length)))
+        }
+        lastInsertedText = text
+        super.insertText(string, replacementRange: replacementRange)
+    }
+
+    /// How many Deletes take back `units` UTF-16 units of what we last sent.
+    ///
+    /// The two counts differ for anything outside the BMP, and the pane counts characters — so the
+    /// text we actually sent is the better answer whenever the range is exactly it, which for a
+    /// press-and-hold it always is. When it is not, the input system's count is all there is to go
+    /// on: it is the number of units it believes this client is holding.
+    private func erasures(replacing units: Int) -> Int {
+        guard let lastInsertedText, lastInsertedText.utf16.count == units else { return units }
+        return lastInsertedText.count
+    }
+}
+
 /// The pane surface, with the three things a terminal is expected to do with a mouse that SwiftTerm
 /// leaves to its host: a context menu, opening what is under the pointer, and middle-click paste.
 ///
 /// A subclass rather than a gesture layered on top, for the same reason `PaneDivider` is an
 /// `NSView`: this view tracks the mouse for selection, and a SwiftUI gesture over it never sees an
 /// event whatever the z-order says.
-final class PaneTerminalView: TerminalView, NSMenuItemValidation {
+final class PaneTerminalView: ComposingTerminalView, NSMenuItemValidation {
     weak var coordinator: TerminalPaneView.Coordinator?
 
     /// SwiftTerm's own cell size, read back rather than recomputed.
