@@ -131,7 +131,57 @@ final class TmuxCommandTests: XCTestCase {
     func testLocalArgumentsRequestControlMode() {
         let args = TmuxCommand.localArguments(mode: .createOrAttach(sessionName: "work"))
         XCTAssertEqual(Array(args[0..<3]), ["-CC", "-2", "-u"])
-        XCTAssertEqual(args, ["-CC", "-2", "-u", "new-session", "-A", "-s", "work"])
+        XCTAssertEqual(
+            args, ["-CC", "-2", "-u", "new-session", "-A", "-s", "work", "-c", "#{HOME}"]
+        )
+    }
+
+    /// F4.11 on the connect line. The channel's own `new-session -A` is where the *first* session on
+    /// a host comes from, and it used to be the one session that ignored the host's start directory
+    /// — locally, that meant every session on the machine started in whatever directory the `.app`
+    /// was launched from, which for Finder is `/`.
+    func testTheConnectLineStartsASessionWhereTheHostSays() {
+        XCTAssertEqual(
+            TmuxCommand.localArguments(
+                mode: .createOrAttach(sessionName: "work"), startDirectory: "/srv/app"
+            ),
+            ["-CC", "-2", "-u", "new-session", "-A", "-s", "work", "-c", "/srv/app"]
+        )
+        let remote = TmuxCommand.remoteCommand(
+            mode: .createOrAttach(sessionName: "work"), startDirectory: "~/projects"
+        )
+        XCTAssertTrue(remote.contains("new-session -A -s 'work' -c '#{HOME}/projects'"), remote)
+    }
+
+    /// `-c` belongs to `new-session` and to nothing else: the attaching modes have no session to
+    /// apply it to, and passing it would be a flag `attach-session` does not take.
+    func testOnlyTheCreatingModeCarriesAStartDirectory() {
+        for mode in [TmuxCommand.AttachMode.attach(sessionName: "work"), .attachAny] {
+            let args = TmuxCommand.localArguments(mode: mode, startDirectory: "/srv/app")
+            XCTAssertFalse(args.contains("-c"), "\(mode) must not carry -c")
+            let remote = TmuxCommand.remoteCommand(mode: mode, startDirectory: "/srv/app")
+            XCTAssertFalse(remote.contains(" -c "), remote)
+        }
+    }
+
+    /// tmux does **not** expand a tilde in `-c`, and the way it fails is the reason this is pinned:
+    /// `new-session -c '~/work'` does not error, it lands in the home directory, because the literal
+    /// path does not exist and tmux falls back to `$HOME`. Verified on 3.0, 3.2a, 3.3a, 3.4, 3.5 and
+    /// 3.7b. `#{HOME}` is a format, and an unrecognised format name is looked up in the environment
+    /// of the server — which on a remote host is the only side that knows where home is.
+    func testAStartDirectoryResolvesTildeItselfAndDefaultsToHome() {
+        XCTAssertEqual(TmuxCommand.sessionStartDirectory(nil), "#{HOME}")
+        XCTAssertEqual(TmuxCommand.sessionStartDirectory(""), "#{HOME}")
+        XCTAssertEqual(TmuxCommand.sessionStartDirectory("   "), "#{HOME}")
+        XCTAssertEqual(TmuxCommand.sessionStartDirectory("~"), "#{HOME}")
+        XCTAssertEqual(TmuxCommand.sessionStartDirectory("~/projects"), "#{HOME}/projects")
+        XCTAssertEqual(TmuxCommand.sessionStartDirectory("/srv/app"), "/srv/app")
+        // Not a home directory of ours to rewrite: `~ada` is ssh's and the shell's spelling for
+        // somebody else's, and tmux would not expand it either. Passed on as typed rather than
+        // turned into a path under *this* user's home, which is the one wrong answer available.
+        XCTAssertEqual(TmuxCommand.sessionStartDirectory("~ada/src"), "~ada/src")
+        // The framing rule every user value gets: a line break would end the command early.
+        XCTAssertEqual(TmuxCommand.sessionStartDirectory("/srv\nkill-server"), "/srv kill-server")
     }
 
     func testLocalAttachOnlyDoesNotCreate() {
@@ -164,7 +214,9 @@ final class TmuxCommandTests: XCTestCase {
 
     func testRemoteCommandLaunchesTmuxInControlMode() {
         let command = TmuxCommand.remoteCommand(mode: .createOrAttach(sessionName: "work"))
-        XCTAssertTrue(command.contains("exec tmux -CC -2 -u new-session -A -s 'work'"), command)
+        XCTAssertTrue(
+            command.contains("exec tmux -CC -2 -u new-session -A -s 'work' -c '#{HOME}'"), command
+        )
         XCTAssertTrue(command.contains("command -v tmux"), "a missing remote tmux must say so")
         XCTAssertTrue(command.contains("/opt/homebrew/bin"), "non-interactive shells miss Homebrew")
     }
@@ -341,7 +393,7 @@ final class TmuxCommandTests: XCTestCase {
     func testPassthroughIsControlModeWithoutTheControlFlag() {
         let passthrough = TmuxCommand.localPassthroughArguments(mode: .createOrAttach(sessionName: "work"))
         let control = TmuxCommand.localArguments(mode: .createOrAttach(sessionName: "work"))
-        XCTAssertEqual(passthrough, ["-2", "-u", "new-session", "-A", "-s", "work"])
+        XCTAssertEqual(passthrough, ["-2", "-u", "new-session", "-A", "-s", "work", "-c", "#{HOME}"])
         XCTAssertEqual(passthrough, control.filter { $0 != "-CC" })
     }
 

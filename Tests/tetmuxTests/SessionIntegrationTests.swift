@@ -271,6 +271,120 @@ final class SessionIntegrationTests: XCTestCase {
         )
     }
 
+    /// F4.11 — a host with no start directory starts its sessions in the user's home directory.
+    ///
+    /// Non-vacuous by construction: the *attached* session is put somewhere else first, because what
+    /// tmux does with no `-c` is inherit the attached session's directory, so a test whose two
+    /// sessions share a starting point would pass with the `-c` deleted. That inheritance is the
+    /// whole defect — a locally launched `.app` starts in `/`, its first session with it, and every
+    /// session made afterwards took `/` from that one.
+    func testANewSessionWithNoStartDirectoryOpensAtHome() async throws {
+        let elsewhere = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-elsewhere-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: elsewhere) }
+
+        let created = "\(sessionName)-home"
+        defer { runTmux(["kill-session", "-t", created]) }
+
+        let service = SessionService()
+        await service.addHost(HostConfig(
+            id: "local", name: "localhost", isLocal: true, startDirectory: elsewhere.path
+        ))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let attached = sessionName
+        _ = try await waitForHost(service) { $0.sessions.contains { $0.name == attached } }
+
+        // No start directory of its own, which is the case under test — the host's is what put the
+        // attached session in `elsewhere`, and this asks for the default instead.
+        await service.newSession(hostId: "local", name: created)
+
+        let home = URL(fileURLWithPath: NSHomeDirectory()).resolvingSymlinksInPath().path
+        // `waitFor` and an explicit assertion: `waitForHost` skips on timeout, which is as green as
+        // a pass, and this test exists to fail.
+        let arrived = try await waitFor(seconds: 15) {
+            let path = await service.getHost("local")?
+                .sessions.first { $0.name == created }?
+                .activeWindow?.panes.first?.currentPath
+            return path?.isEmpty == false
+        }
+        XCTAssertTrue(arrived, "the new session's pane never reported a working directory")
+
+        let host = await service.getHost("local")
+        let path = try XCTUnwrap(
+            host?.sessions.first { $0.name == created }?.activeWindow?.panes.first?.currentPath
+        )
+        XCTAssertEqual(URL(fileURLWithPath: path).resolvingSymlinksInPath().path, home)
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// A tab and a split open where the pane they came from is, not where its session started.
+    ///
+    /// tmux's own default is the session's directory, which for a session that has been open all
+    /// week is nowhere the user still is — so both commands carry `-c '#{pane_current_path}'`. The
+    /// divergence is what makes this test mean anything: the pane is `cd`'d somewhere the session
+    /// has never been, so the session's own directory is available as the wrong answer.
+    ///
+    /// The `cd` is confirmed through the pane's *output* rather than by waiting on the model: a `cd`
+    /// renames nothing and moves no pane, so nothing schedules the `list-panes` that would report it,
+    /// and a test waiting for the model to notice would be waiting for a notification tmux has no
+    /// reason to send. The marker is quoted so that the *typed* line does not contain it — a pane
+    /// echoes what is typed into it, so a marker that survives the echo is matched the instant the
+    /// keystrokes land and says nothing about whether the shell has run them yet. That is a race
+    /// that passes on an idle machine: it first failed on tmux 3.0, which looked like a version
+    /// difference and was three test bundles compiling in the background.
+    func testANewTabAndASplitOpenWhereTheCurrentPaneIs() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-cwd-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let resolved = directory.resolvingSymlinksInPath().path
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let sessionId = try XCTUnwrap(host.activeSession?.id)
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
+        let collected = collect(stream, until: "tetmux-cwd-ready")
+        try await Task.sleep(for: .milliseconds(500))
+        await service.sendKeys(
+            hostId: "local", paneId: paneId, text: "cd \(resolved) && echo tetmux-\"cwd\"-ready\r"
+        )
+        let output = await collected.value
+        XCTAssertTrue(output.contains("tetmux-cwd-ready"), "the pane never changed directory:\n\(output)")
+
+        await service.newWindow(hostId: "local", sessionId: sessionId)
+        await service.splitPane(hostId: "local", paneId: paneId, leftRight: true)
+
+        @Sendable func path(of pane: TmuxPane?) -> String? {
+            pane.map { URL(fileURLWithPath: $0.currentPath).resolvingSymlinksInPath().path }
+        }
+        let arrived = try await waitFor(seconds: 15) {
+            guard let session = await service.getHost("local")?
+                .sessions.first(where: { $0.id == sessionId }), session.windows.count >= 2
+            else { return false }
+            let split = session.windows[0].panes.first { $0.id != paneId }
+            return path(of: session.windows[1].panes.first) == resolved
+                && path(of: split) == resolved
+        }
+
+        let finalHost = await service.getHost("local")
+        let session = try XCTUnwrap(finalHost?.sessions.first { $0.id == sessionId })
+        XCTAssertTrue(
+            arrived,
+            "tab opened in \(path(of: session.windows.last?.panes.first) ?? "nowhere") and split in "
+                + "\(path(of: session.windows[0].panes.first { $0.id != paneId }) ?? "nowhere"), "
+                + "rather than \(resolved)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     /// F4.11 — a host's initial command is what the new session's first pane runs.
     ///
     /// Asserted through `pane_current_command` rather than against the command string, for the same

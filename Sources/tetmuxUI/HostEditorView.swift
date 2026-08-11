@@ -121,7 +121,7 @@ struct HostEditorView: View {
             }
             .textFieldStyle(.roundedBorder)
 
-            Text("Where a new session's first pane opens, as `new-session -c`, and what it runs instead of a shell. Left blank, tmux uses whatever it would have used anyway.")
+            Text("Where a new session's first pane opens, as `new-session -c`, and what it runs instead of a shell. Left blank, sessions start in your home directory. New tabs and splits open where the pane they came from is, whatever this says.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -188,9 +188,10 @@ struct HostEditorView: View {
 
             // Here rather than behind a dialog at creation time, which is the whole reason it can
             // exist: New Session deliberately puts nothing between wanting a shell and having one,
-            // and where a session starts is a thing you decide once per machine anyway. tmux resolves
-            // the path on the far side, so `~` and a directory that only exists on the remote both
-            // work — and there is no folder picker for the same reason.
+            // and where a session starts is a thing you decide once per machine anyway. The path is
+            // resolved on the far side, so a directory that only exists on the remote works — and
+            // there is no folder picker for the same reason. `~` works too, but not because tmux
+            // expands it: it does not, and `TmuxCommand.sessionStartDirectory` rewrites it.
             Grid(alignment: .leading, verticalSpacing: 8) {
                 GridRow {
                     Text("Start in").gridColumnAlignment(.trailing)
@@ -217,7 +218,7 @@ struct HostEditorView: View {
             .textFieldStyle(.roundedBorder)
             .padding(.top, 4)
 
-            Text("Where a new session's first pane opens, as `new-session -c`, and what it runs instead of a shell. Both are resolved on \(host.name.isEmpty ? "the host" : host.name), not here — and a command that exits ends the tab it was given.")
+            Text("Where a new session's first pane opens, as `new-session -c`, and what it runs instead of a shell. Both are resolved on \(host.name.isEmpty ? "the host" : host.name), not here — and a command that exits ends the tab it was given. Left blank, sessions start in your home directory there; new tabs and splits open where the pane they came from is either way.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

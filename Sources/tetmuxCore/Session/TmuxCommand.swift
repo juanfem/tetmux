@@ -256,6 +256,46 @@ public enum TmuxCommand {
         "refresh-client -A \(quote("\(paneId):\(paused ? "pause" : "continue")"))"
     }
 
+    // MARK: - Where things start (F4.11)
+
+    /// The server's own `$HOME`, in the only form that survives the trip.
+    ///
+    /// tmux expands a format in `-c`, and a format name it does not recognise is looked up in the
+    /// environment — so this is answered by the machine tmux is running on, which is the whole
+    /// point: nothing on this side can know a remote host's home directory without asking.
+    /// Verified on 3.0, 3.2a, 3.3a, 3.4 and 3.5 as well as 3.7b.
+    public static let homeDirectory = "#{HOME}"
+
+    /// Where a *window or pane* opened from an existing one starts: wherever that pane is sitting.
+    ///
+    /// tmux's own default is the **session's** directory — where the session was created, which for
+    /// a session that has been open all day is rarely anywhere the user still is. Every `new-window`
+    /// and `split-window` therefore carries this. It is a format, so tmux resolves it at the moment
+    /// the command runs: for `split-window -t %7` against pane `%7`, and for `new-window -t $2`
+    /// against that session's current pane, which tetmux keeps pointed at the focused one with
+    /// `select-pane`.
+    public static let inheritedWorkingDirectory = "#{pane_current_path}"
+
+    /// Where a *session* starts: the host's start directory, or the user's home directory.
+    ///
+    /// Home rather than tmux's own answer, which is inherited twice over: a client that is not yet
+    /// attached hands tmux the directory its *process* is in, and one that is attached hands it the
+    /// *attached session's*. So the first session on a host fixes the directory for every session
+    /// made afterwards — and for a `.app` launched from Finder the process starts at `/`, which is
+    /// why a locally attached tetmux opened every shell it ever made in the root directory.
+    ///
+    /// A leading `~` is rewritten rather than passed on, because **tmux does not expand a tilde
+    /// here**: verified on 3.0 through 3.7b, `new-session -c '~/work'` lands in the home directory
+    /// itself — the literal path `~/work` does not exist, and tmux answers a directory it cannot use
+    /// by silently falling back to `$HOME`. Which is indistinguishable from having worked, and is
+    /// why this was believed to work for so long.
+    public static func sessionStartDirectory(_ configured: String?) -> String {
+        let directory = singleLine(configured ?? "")
+        if directory.isEmpty || directory == "~" { return homeDirectory }
+        if directory.hasPrefix("~/") { return homeDirectory + directory.dropFirst() }
+        return directory
+    }
+
     // MARK: - Transport invocation
 
     /// What a channel should do about a session when it opens.
@@ -273,22 +313,29 @@ public enum TmuxCommand {
         /// when the server is gone, which is exactly the signal that there is nothing left to show.
         case attachAny
 
-        /// The tmux sub-command and its arguments, already quoted for a remote shell.
-        var arguments: [String] {
+        /// The tmux sub-command and its arguments.
+        ///
+        /// `startDirectory` is the host's, and it reaches only the case that can *create* a session:
+        /// `-c` is an argument to `new-session`, and the two attaching cases have nothing to apply it
+        /// to. `new-session -A` that lands on an existing session ignores it, which is right — the
+        /// session already started somewhere.
+        func arguments(startDirectory: String?) -> [String] {
             switch self {
-            case .createOrAttach(let name): return ["new-session", "-A", "-s", name]
+            case .createOrAttach(let name):
+                return ["new-session", "-A", "-s", name,
+                        "-c", TmuxCommand.sessionStartDirectory(startDirectory)]
             case .attach(let name): return ["attach-session", "-t", name]
             case .attachAny: return ["attach-session"]
             }
         }
     }
 
-    /// Local channel: `tmux -CC -2 -u new-session -A -s <name>`.
+    /// Local channel: `tmux -CC -2 -u new-session -A -s <name> -c <dir>`.
     ///
     /// `-2` forces 256-colour and `-u` UTF-8 (T5.1/T5.2); `new-session -A` attaches if the session
     /// exists and creates it otherwise, which is the behaviour the launcher wants.
-    public static func localArguments(mode: AttachMode) -> [String] {
-        ["-CC", "-2", "-u"] + mode.arguments
+    public static func localArguments(mode: AttachMode, startDirectory: String? = nil) -> [String] {
+        ["-CC", "-2", "-u"] + mode.arguments(startDirectory: startDirectory)
     }
 
     /// The same channel without `-CC` — §4.6's passthrough, where tmux draws itself.
@@ -297,8 +344,10 @@ public enum TmuxCommand {
     /// transport or a second code path, it is the same process spawned to talk to a person instead of
     /// to a parser. `-2` and `-u` stay because they are about the terminal, which is now the surface
     /// the user is looking at.
-    public static func localPassthroughArguments(mode: AttachMode) -> [String] {
-        ["-2", "-u"] + mode.arguments
+    public static func localPassthroughArguments(
+        mode: AttachMode, startDirectory: String? = nil
+    ) -> [String] {
+        ["-2", "-u"] + mode.arguments(startDirectory: startDirectory)
     }
 
     /// A login shell and nothing else — R3.8's "tmux absent" row.
@@ -356,15 +405,21 @@ public enum TmuxCommand {
     /// - Parameter controlMode: `false` builds §4.6's passthrough invocation, which is this command
     ///   without `-CC`. Everything else about it — the PATH repair, the `command -v` check whose
     ///   message is what tells the user tmux is missing, the `exec` — is wanted just as much there.
-    public static func remoteCommand(mode: AttachMode, controlMode: Bool = true) -> String {
+    public static func remoteCommand(
+        mode: AttachMode, controlMode: Bool = true, startDirectory: String? = nil
+    ) -> String {
         // Homebrew and ~/.local are common tmux locations that a non-interactive shell misses.
         let path = "PATH=\"$PATH:/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin\""
-        // The sub-command and its flags are ours; only the session name is user data, and it is the
-        // one thing quoted. Spelling that out per case rather than filtering the argument list keeps
-        // the rule visible — a name that happens to look like a flag must still be a name.
+        // The sub-command and its flags are ours; only the session name and the start directory are
+        // user data, and they are the things quoted. Spelling that out per case rather than filtering
+        // the argument list keeps the rule visible — a name that happens to look like a flag must
+        // still be a name. Single quotes leave `#{HOME}` for tmux to expand: it is a format, not a
+        // shell variable, and the remote shell must not touch it.
         let tmuxArgs: String
         switch mode {
-        case .createOrAttach(let name): tmuxArgs = "new-session -A -s \(quote(name))"
+        case .createOrAttach(let name):
+            tmuxArgs = "new-session -A -s \(quote(name))"
+                + " -c \(quote(sessionStartDirectory(startDirectory)))"
         case .attach(let name): tmuxArgs = "attach-session -t \(quote(name))"
         case .attachAny: tmuxArgs = "attach-session"
         }

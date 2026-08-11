@@ -945,8 +945,8 @@ Keep it that way — it is the only reason the protocol layer is testable agains
 - **A start directory and an initial command are properties of the host, not questions at creation
   time.** `new-session` takes `-c` and a trailing `shell-command`, and both are fed from `HostConfig`
   rather than from a dialog: New Session deliberately puts nothing between wanting a shell and having
-  one, which is why it has no name prompt either. tmux resolves both on its own side, so `~`, a
-  directory that only exists remotely, and `srun --pty bash` all work — and that is also why there is
+  one, which is why it has no name prompt either. tmux resolves both on its own side, so a directory
+  that only exists remotely and `srun --pty bash` both work — and that is also why there is
   no folder picker, which could only ever browse this machine. Both go through
   `TmuxCommand.singleLine` as well as `quote`, like every other user value: the fields take pasted
   text, and a line break ends the command before the closing quote and hands tmux the remainder to
@@ -955,6 +955,24 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   nothing. It is quoted whole rather than split, because the far-side shell is what parses it. A
   command that exits takes its window and then its session with it; that is `new-session <command>`
   for anybody, and `remain-on-exit` is an option on the user's server rather than ours to set.
+- **Every command that opens something says where it opens, because tmux's defaults inherit and what
+  they inherit from is invisible.** With no `-c`, a session created over an attached channel takes
+  the *attached session's* directory and a window or split takes its *own session's* — verified on
+  3.0 through 3.7b. Both defaults compound into the same failure: the first session on a host fixes
+  the directory for everything opened afterwards, and a `.app` launched from Finder has cwd `/`, so
+  a locally attached tetmux opened every shell it ever made in the root directory. Three rules, and
+  they are all in `TmuxCommand`. A **session** starts at `sessionStartDirectory` — the host's start
+  directory, else `#{HOME}` — on every path that can create one, `invocation`'s connect line
+  included; that line used to be exempt on the reasoning that a host reached for the first time is
+  not being given a working directory, which made the *first* session the one that ignored the
+  setting. A **tab or split** starts at `inheritedWorkingDirectory`, which is
+  `#{pane_current_path}`: exact for `split-window -t %p`, and for `new-window -t $s` resolved
+  against the session's current pane, which is the focused one because `select-pane` follows focus
+  and `select-window` follows the tab. And **`~` is expanded here, not by tmux**: tmux does not
+  expand a tilde in `-c`, it takes `~/work` literally, finds no such directory and falls back to
+  `$HOME` — a wrong answer that looks like a right one, which is how the SRD came to claim tildes
+  worked. `#{HOME}` is a format, and an unrecognised format name is looked up in the *server's*
+  environment, which is the only side that knows where home is on a remote host.
 - **The local host is persisted only as the difference from a baseline, and its editor is a different
   editor.** `HostConfigStore.localBaseline` is what "localhost, unedited" means; `saveHosts` keeps
   the `local` entry only when it differs, which is the same rule discovered `ssh-` hosts already had

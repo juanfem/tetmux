@@ -1638,15 +1638,16 @@ public final class AppModel {
             ))
         }
         let host = hosts.first { $0.id == hostId }
-        // The host's start directory, if it has one. Only on the `new-session` path: the other branch
-        // connects the channel, and the session it attaches or creates is tmux's own `new-session -A`
-        // inside the ssh command, which has nowhere to put a `-c` and no reason to — a host that is
-        // not yet connected is being reached for the first time, not given a working directory.
+        // The host's start directory, if it has one — and home if it has not, which `newSession`
+        // resolves rather than this. The other branch needs neither: `invocation` reads the same
+        // field for the `new-session -A` it puts on the connect line, so a host reached for the
+        // first time starts its session in the same place a host already connected does.
         let startDirectory = host?.config.startDirectory
-        // Same branch and the same reason (F4.11). A host being connected for the first time has its
-        // session made by `new-session -A` inside the ssh command line, which is the attach the user
-        // asked for rather than a session created here — the initial command applies where the `-c`
-        // does, and to nothing else.
+        // The initial command, unlike the directory, really does apply to this branch alone (F4.11).
+        // A host being connected for the first time has its session made by `new-session -A` inside
+        // the ssh command line, which is the attach the user asked for rather than a session created
+        // here — and a command that exits takes the session it was given with it, which is not what
+        // a connect should be able to do.
         let initialCommand = host?.config.initialCommand
         Task {
             if host?.connectionState.isActive == true {

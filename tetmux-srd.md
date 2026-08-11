@@ -430,10 +430,19 @@ re-read `list-clients` as the fallback).
   and the modifier is read at click time, not from a display monitor that may be a frame behind.
 - **F4.11** Session operations: new, rename, kill, detach-others, detach-this-client. New session
   deliberately puts no dialog between wanting a shell and having one: the start directory and
-  optional initial command are **host properties**, resolved on tmux's side (`~` and
-  remote-only paths work; there is no folder picker because one could only browse this machine).
+  optional initial command are **host properties**, resolved on tmux's side (a remote-only path
+  works; there is no folder picker because one could only browse this machine).
   The initial command goes last on the `new-session` line — tmux stops reading flags at the first
   non-flag word — and is quoted whole, because the far-side shell parses it.
+  *(Amended:)* **where things start is stated, never inherited.** A session starts in the host's
+  start directory, or in `$HOME` when it has none — as `-c`, on every path that can create one,
+  the connect line included. A **tab or split starts where the pane it came from is**, as
+  `-c '#{pane_current_path}'`. Both replace a tmux default that inherits: with no `-c`, a session
+  takes the *attached session's* directory and a window takes its *own session's*, so every shell on
+  a host ended up where its first session happened to open — `/` for a `.app` launched from Finder.
+  `~` is expanded by tetmux (to `#{HOME}`, which the far side answers) and not by tmux, which does
+  not expand a tilde in `-c` and instead falls back to `$HOME` when the literal path is missing —
+  indistinguishable from having worked, and why v2.1 claimed it did.
 - **F4.12** *(Rewritten — both halves of v2.0's row are superseded by decisions.)* macOS window
   tabbing is **off** (`allowsAutomaticWindowTabbing = false`): a row of macOS tabs directly above
   the tab bar of tmux windows — the tabs this app is about — was confusion shipped as a feature,

@@ -1346,8 +1346,14 @@ public actor SessionService {
                 throw PtyError.executableNotFound("tmux")
             }
             switch flavour {
-            case .controlMode: return (tmux, TmuxCommand.localArguments(mode: mode))
-            case .passthroughTmux: return (tmux, TmuxCommand.localPassthroughArguments(mode: mode))
+            case .controlMode:
+                return (tmux, TmuxCommand.localArguments(
+                    mode: mode, startDirectory: config.startDirectory
+                ))
+            case .passthroughTmux:
+                return (tmux, TmuxCommand.localPassthroughArguments(
+                    mode: mode, startDirectory: config.startDirectory
+                ))
             case .discovery: return (tmux, TmuxCommand.discoveryArguments())
             case .plainShell: break  // handled above
             }
@@ -1358,7 +1364,15 @@ public actor SessionService {
         case .plainShell: remoteCommand = TmuxCommand.remoteShellCommand
         case .discovery: remoteCommand = TmuxCommand.remoteDiscoveryCommand()
         case .controlMode, .passthroughTmux:
-            remoteCommand = TmuxCommand.remoteCommand(mode: mode, controlMode: flavour == .controlMode)
+            remoteCommand = TmuxCommand.remoteCommand(
+                mode: mode, controlMode: flavour == .controlMode,
+                // F4.11 — the session this channel may create is a session like any other, and the
+                // host's start directory is where the user said its sessions begin. It was left out
+                // of this path on the reasoning that a host being reached for the first time is not
+                // being given a working directory; what that produced was the *first* session on a
+                // host being the one that ignored the setting, and locally starting in `/`.
+                startDirectory: config.startDirectory
+            )
         }
 
         if let custom = config.customCommand, !custom.isEmpty {
@@ -3198,13 +3212,23 @@ public actor SessionService {
 
     // MARK: - Session and window operations
 
+    /// A tab, opened where the pane it was opened from is sitting.
+    ///
+    /// tmux would otherwise start it in the *session's* directory — see
+    /// `TmuxCommand.inheritedWorkingDirectory`. The format is resolved against the target session's
+    /// current pane, which is the focused one: `select-pane` follows focus and `select-window`
+    /// follows the tab.
     public func newWindow(hostId: String, sessionId: String? = nil) {
         let target = sessionId.map { " -t \(TmuxCommand.quote($0))" } ?? ""
-        send("new-window\(target)", kind: .userCommand("New tab"), hostId: hostId)
+        send("new-window\(target) -c \(TmuxCommand.quote(TmuxCommand.inheritedWorkingDirectory))",
+             kind: .userCommand("New tab"), hostId: hostId)
     }
 
+    /// A split, opened where the pane being split is sitting. Exact rather than inferred: the format
+    /// is resolved against `-t`, which is this pane.
     public func splitPane(hostId: String, paneId: String, leftRight: Bool) {
-        send("split-window \(leftRight ? "-h" : "-v") -t \(paneId)",
+        send("split-window \(leftRight ? "-h" : "-v") -t \(paneId)"
+             + " -c \(TmuxCommand.quote(TmuxCommand.inheritedWorkingDirectory))",
              kind: .userCommand("Split pane"), hostId: hostId)
     }
 
@@ -3459,14 +3483,17 @@ public actor SessionService {
         let name = TmuxCommand.singleLine(name)
         guard !name.isEmpty else { return }
         var command = "new-session -d -s \(TmuxCommand.quote(name))"
-        // `singleLine` as well as `quote`, exactly as the name gets: control-mode commands are
-        // newline-framed, so a value carrying a line break ends the command before tmux's parser
-        // reaches the closing quote and the remainder arrives as a *new* command that tmux runs.
-        // Quoting cannot defend against that. This is a text field that accepts a pasted path.
-        let directory = TmuxCommand.singleLine(startDirectory ?? "")
-        if !directory.isEmpty {
-            command += " -c \(TmuxCommand.quote(directory))"
-        }
+        // Always, and never left to tmux: with no `-c` a session created over an attached channel
+        // inherits the *attached session's* directory (verified on 3.0 through 3.7b), so every
+        // session on a host ends up wherever the first one happened to start — `/` for a locally
+        // launched `.app`, and someone's old project directory on a remote host.
+        //
+        // `sessionStartDirectory` puts the value through `singleLine` for the reason every name gets
+        // it: control-mode commands are newline-framed, so a value carrying a line break ends the
+        // command before tmux's parser reaches the closing quote and the remainder arrives as a
+        // *new* command that tmux runs. Quoting cannot defend against that, and this is a text field
+        // that accepts a pasted path.
+        command += " -c \(TmuxCommand.quote(TmuxCommand.sessionStartDirectory(startDirectory)))"
         // Last, and after every option: `shell-command` is `new-session`'s trailing positional
         // argument, and tmux stops reading flags at the first word that is not one. It is a single
         // argument that the far-side shell parses, so it is quoted whole rather than split here —
