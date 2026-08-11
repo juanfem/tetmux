@@ -865,7 +865,11 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   never presents one. The local host's menu drops **Disconnect**, **Detach This Client** and
   **Reconnect** for the same reason the label changed: it is connected at launch, needs no
   credentials, and New Session attaches on its way to creating one (`createSession` routes a host
-  with no channel through `connectHost`), so all three name problems it does not have.
+  with no channel through `connectHost`), so all three name problems it does not have. **The menu
+  bar extra's Connect goes with them**, and it is the same rule arriving one surface late: that
+  item is shown for a host with no browsable sessions that is not active, which for the local host
+  is the ordinary empty-server state above rather than anything to connect. It sat directly beside
+  a New Session that does strictly more, named after a problem this host cannot have.
 - **The local host connects itself at launch; remote ones wait to be asked.** Not a general
   auto-connect policy. Local tmux is always reachable, needs no credentials and cannot prompt for
   anything, so the click was a step with no decision in it. A remote host connecting unbidden can

@@ -1461,7 +1461,16 @@ struct MenuBarContent: View {
                 }
                 // Item 10 — a host with no sessions still needs a way to get one, and a host with
                 // sessions still needs another.
-                if host.browsableSessions.isEmpty && !host.connectionState.isActive {
+                //
+                // Not for the local host, for the reason the tree's menu drops Reconnect: there is
+                // no connection to make. Local tmux is on this machine, needs no credentials and
+                // cannot be unreachable, so "disconnected" there means only that its server is
+                // empty — and New Session below attaches on its way to creating one
+                // (`createSession` routes a host with no channel through `connectHost`). Connect
+                // beside it was a second button doing less, named after a problem this host has not
+                // got.
+                if host.browsableSessions.isEmpty && !host.connectionState.isActive
+                    && !host.config.isLocal {
                     Button("Connect") { model.connect(host.id) }
                 }
                 Button {
