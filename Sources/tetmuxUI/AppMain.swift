@@ -413,6 +413,11 @@ struct RootView: View {
     @Environment(\.controlActiveState) private var controlActiveState
     @Environment(\.openWindow) private var openWindow
 
+    /// The toolbar's copy acknowledgement, and the task that withdraws it. Per window, like every
+    /// other piece of state a window can be in on its own.
+    @State private var copiedAttachCommand = false
+    @State private var copyConfirmation: Task<Void, Never>?
+
     private var host: HostState? { state.selectedHost(in: model.hosts) }
     private var session: TmuxSession? { state.selectedSession(in: model.hosts) }
     private var window: TmuxWindow? { state.selectedWindow(in: model.hosts) }
@@ -543,6 +548,53 @@ struct RootView: View {
         // distinction only matters when it does.
         .navigationTitle(session?.name ?? "tetmux")
         .navigationSubtitle(host?.config.name ?? "")
+        .toolbar { attachCommandItem }
+    }
+
+    /// The window's copy of the tree's Copy Attach Command, next to the title that names the session
+    /// it acts on.
+    ///
+    /// The title bar is where this window says which session it is showing, so it is where the
+    /// command reaching that session from a shell belongs — and it is the one action here that is
+    /// about leaving this application, which no context menu in a collapsed tree can offer.
+    ///
+    /// A copy that says nothing is indistinguishable from a click that missed, and this one has no
+    /// visible result anywhere: the clipboard is not on screen. So the glyph becomes a tick for a
+    /// moment. The task is cancelled and restarted on each copy rather than left to overlap, or a
+    /// second click inside the window would be acknowledged and then un-acknowledged early by the
+    /// first one's timer.
+    @ToolbarContentBuilder
+    private var attachCommandItem: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            let command = session.flatMap { session in
+                host.flatMap { model.attachCommand(hostId: $0.id, sessionName: session.name) }
+            }
+            Button {
+                guard let host, let session else { return }
+                guard model.copyAttachCommand(hostId: host.id, sessionName: session.name) else { return }
+                copyConfirmation?.cancel()
+                copyConfirmation = Task {
+                    copiedAttachCommand = true
+                    try? await Task.sleep(for: .seconds(1.6))
+                    // The cancelled task still gets here — `try?` swallows the `CancellationError`
+                    // — and would clear the tick the *new* one has just set, which is the exact
+                    // early withdrawal cancelling was meant to prevent.
+                    guard !Task.isCancelled else { return }
+                    copiedAttachCommand = false
+                }
+            } label: {
+                Image(systemName: copiedAttachCommand ? "checkmark" : "terminal")
+            }
+            // The command itself, because the point of copying it is to run it somewhere else and
+            // the tooltip is the only chance to see what is being copied before it replaces the
+            // clipboard. Both states are named: a bare tick is a result with no subject.
+            .help(
+                command.map { copiedAttachCommand ? "Copied: \($0)" : "Copy attach command: \($0)" }
+                    ?? "Copy attach command"
+            )
+            .disabled(command == nil)
+            .accessibilityLabel("Copy attach command")
+        }
     }
 
     @ViewBuilder

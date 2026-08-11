@@ -432,6 +432,59 @@ public enum TmuxCommand {
         """
     }
 
+    // MARK: - The command to type instead
+
+    /// What somebody would type in a terminal to reach this session without tetmux.
+    ///
+    /// Deliberately **not** any invocation this app runs. Every one above spawns `tmux -CC` and
+    /// speaks the protocol to a parser, so a person pasting one gets a screenful of `%output` and a
+    /// terminal they cannot type into. This is the same session reached the ordinary way, which is
+    /// the only form worth putting on somebody's clipboard.
+    ///
+    /// One rule decides what it carries: anything that says how to **reach the host** is in — the
+    /// destination, a non-default port, the user's own ssh options, which is where a `ProxyJump` or
+    /// an `IdentityFile` lives — and anything belonging to tetmux's own channel is out.
+    /// `ControlMaster` is this application's socket, the port forwards are already bound by the
+    /// connection it is holding open (a second `-L` on the same port fails), and `-X` is about what
+    /// the far side may draw rather than about getting there. The ssh options keep the order
+    /// `sshArguments` puts them in, for the reason given there: ssh takes the first value it
+    /// obtains, so the user's own come first.
+    ///
+    /// `-t` is not optional. tmux refuses to attach without a tty, and `ssh host tmux attach` — no
+    /// tty, because a command was given — fails with `open terminal failed: not a terminal`.
+    public static func attachCommandLine(host: HostConfig, sessionName: String) -> String {
+        // `attach` rather than the `attach-session` every other line here uses: they are the same
+        // command, and this one is read by a person rather than by tmux.
+        let attach = "tmux attach -t \(shellWord(sessionName))"
+        if host.isLocal { return attach }
+        // A wrapper takes the remote command as its last argument, exactly as `invocation` hands it
+        // one — so a host reached through a jump script is described by that script, rather than by
+        // an ssh line that is not how this host is reached at all.
+        if let custom = host.customCommand, !custom.isEmpty {
+            return "\(custom) \(shellWord(attach))"
+        }
+        var line = "ssh -t"
+        let extras = host.extraSshArguments.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !extras.isEmpty { line += " \(extras)" }
+        if let port = host.port, port != 22 { line += " -p \(port)" }
+        return "\(line) \(shellWord(host.sshDestination)) \(shellWord(attach))"
+    }
+
+    /// A value as one word of a shell command line, quoted only when it would not survive unquoted.
+    ///
+    /// `quote` is the right answer for everything going to a parser, and the wrong one here: this
+    /// text is read before it is run, and `tmux attach -t 'work'` says "this name needed quoting"
+    /// about a name that did not. The safe set is small on purpose — letters, digits, and the
+    /// punctuation that turns up in host names, paths and session names — because quoting something
+    /// that did not need it costs two apostrophes and the reverse costs a command that does not run.
+    /// `=` and `~` are left out although a shell would take them in the middle of a word: zsh
+    /// expands both at the *start* of one, and this word can be a session name.
+    public static func shellWord(_ value: String) -> String {
+        let safe = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./:@+,")
+        guard !value.isEmpty, value.allSatisfy({ safe.contains($0) }) else { return quote(value) }
+        return value
+    }
+
     /// Standard ssh invocation from §2.3. Never weakens host-key checking.
     ///
     /// `forwards` become `-L`/`-R`/`-D` arguments. `ExitOnForwardFailure` is deliberately left at

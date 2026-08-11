@@ -644,6 +644,113 @@ final class TmuxCommandTests: XCTestCase {
         )
         XCTAssertFalse(args.contains("-p"), "port 22 is the default; ~/.ssh/config may override it")
     }
+
+    // MARK: - The copyable attach command
+
+    func testTheLocalAttachCommandIsWhatSomebodyWouldType() {
+        let local = HostConfig(id: "local", name: "local", isLocal: true)
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(host: local, sessionName: "work"),
+            "tmux attach -t work"
+        )
+    }
+
+    /// The whole point of the line is that it is *not* the invocation this app makes. A person
+    /// pasting `tmux -CC` gets a screenful of protocol and a terminal they cannot type into.
+    func testTheAttachCommandIsNeverControlMode() {
+        let remote = HostConfig(id: "r", name: "devbox", hostname: "devbox.example.org")
+        for command in [
+            TmuxCommand.attachCommandLine(host: remote, sessionName: "work"),
+            TmuxCommand.attachCommandLine(
+                host: HostConfig(id: "l", name: "local", isLocal: true), sessionName: "work"
+            ),
+        ] {
+            XCTAssertFalse(command.contains("-CC"))
+            XCTAssertFalse(command.contains("%begin"))
+        }
+    }
+
+    /// tmux refuses to attach without a tty, and ssh gives no tty when it is handed a command.
+    func testTheRemoteAttachCommandForcesATty() {
+        let remote = HostConfig(id: "r", name: "devbox", user: "ada")
+        let command = TmuxCommand.attachCommandLine(host: remote, sessionName: "work")
+        XCTAssertEqual(command, "ssh -t ada@devbox 'tmux attach -t work'")
+    }
+
+    func testTheAttachCommandCarriesANonDefaultPortAndTheUsersOwnOptions() {
+        let remote = HostConfig(
+            id: "r", name: "devbox", hostname: "devbox.example.org", port: 2222,
+            extraSshArguments: "-o \"ProxyJump=bastion\""
+        )
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(host: remote, sessionName: "work"),
+            "ssh -t -o \"ProxyJump=bastion\" -p 2222 devbox.example.org 'tmux attach -t work'"
+        )
+    }
+
+    /// Port 22 is ssh's own default and `~/.ssh/config` may say otherwise — the same rule the real
+    /// invocation follows.
+    func testTheAttachCommandLeavesTheDefaultPortToSsh() {
+        let remote = HostConfig(id: "r", name: "devbox", port: 22)
+        XCTAssertFalse(TmuxCommand.attachCommandLine(host: remote, sessionName: "work").contains("-p"))
+    }
+
+    /// Forwards and X11 belong to tetmux's channel, not to reaching the host: the ports are already
+    /// bound by the connection this app is holding open, so a pasted duplicate would fail.
+    func testTheAttachCommandCarriesNothingBelongingToThisApplicationsChannel() {
+        let remote = HostConfig(
+            id: "r", name: "devbox",
+            forwards: [PortForward(kind: .local, listenPort: 8080, destinationHost: "localhost", destinationPort: 80)],
+            forwardsX11: true
+        )
+        let command = TmuxCommand.attachCommandLine(host: remote, sessionName: "work")
+        XCTAssertFalse(command.contains("-L"))
+        XCTAssertFalse(command.contains("-X"))
+        XCTAssertFalse(command.contains("ControlMaster"), "that socket is this application's")
+    }
+
+    /// A wrapper replaces ssh entirely, so describing that host with an ssh line would describe a
+    /// route nobody takes. It takes the remote command last, exactly as `invocation` hands it one.
+    func testAWrappedHostIsDescribedByItsOwnWrapper() {
+        let wrapped = HostConfig(id: "w", name: "container", customCommand: "docker exec -it dev sh -c")
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(host: wrapped, sessionName: "work"),
+            "docker exec -it dev sh -c 'tmux attach -t work'"
+        )
+    }
+
+    /// A session name is user data here as everywhere else, and this line ends up in a shell.
+    func testASessionNameIsQuotedWhenItNeedsToBe() {
+        let local = HostConfig(id: "local", name: "local", isLocal: true)
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(host: local, sessionName: "my session"),
+            "tmux attach -t 'my session'"
+        )
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(host: local, sessionName: "$(id)"),
+            "tmux attach -t '$(id)'"
+        )
+        // Both layers: the remote shell parses the name, and the local one parses the whole word.
+        let remote = HostConfig(id: "r", name: "devbox")
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(host: remote, sessionName: "my session"),
+            #"ssh -t devbox 'tmux attach -t '\''my session'\'''"#
+        )
+    }
+
+    /// Quoting a word that did not need it is what makes a copied command read like machine output.
+    /// The exceptions are the ones a shell would expand at the *start* of a word.
+    func testAnOrdinaryWordIsLeftUnquotedAndAnExpandableOneIsNot() {
+        for plain in ["work", "build-2", "a_b.c", "user@host", "/tmp/x", "1:2"] {
+            XCTAssertEqual(TmuxCommand.shellWord(plain), plain)
+        }
+        for quoted in ["", "a b", "~work", "=work", "a'b", "a;b", "$x", "a*b", "a\nb"] {
+            XCTAssertTrue(
+                TmuxCommand.shellWord(quoted).hasPrefix("'"),
+                "\(quoted) must not reach a shell as a bare word"
+            )
+        }
+    }
 }
 
 final class TmuxVersionTests: XCTestCase {

@@ -596,6 +596,22 @@ tmux's prefix.
   commands time out, and every path that could strand a waiter resumes it. The failure of an
   unbounded wait is "Connecting…" forever, which is the worst diagnostic there is.
 
+### 4.9 Reaching a session without tetmux
+
+- **F4.36** Any session can be copied as the **command line that reaches it from a shell** —
+  offered on the session's context menu and in the showing window's toolbar. It is deliberately
+  *not* any invocation this application makes: those all spawn `tmux -CC`, and a person pasting one
+  gets a screenful of `%output` in a terminal they cannot type into. One rule decides what it
+  carries — anything that says how to *reach the host* is in (destination, non-default port, the
+  user's own ssh options, which is where a `ProxyJump` or `IdentityFile` lives), anything belonging
+  to tetmux's own channel is out (`ControlMaster` is this app's socket, the forwards are already
+  bound by the connection it holds open, `-X` is not about getting there). `-t` is not optional:
+  tmux refuses to attach without a tty and ssh gives none when handed a command. A host reached by
+  a wrapper is described by that wrapper. Values are quoted only where a shell needs it, so the
+  line reads as something a person would have typed. It is built from the host's configuration and
+  needs no channel, so a session found by discovery (F4.4) on a host nothing is attached to can
+  still be copied.
+
 ---
 
 ## 5. Terminal fidelity contract

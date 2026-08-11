@@ -829,6 +829,33 @@ public final class AppModel {
         }
     }
 
+    /// The command that reaches this session from a terminal, or nil when there is no such host.
+    ///
+    /// Built from the host's own configuration rather than from what the channel happens to be doing,
+    /// so it answers for a session on a host nothing is attached to — which is most of the reason to
+    /// want it: the session is on screen in the tree because a probe found it (F4.4), and reaching it
+    /// from a shell needs no connection here at all.
+    public func attachCommand(hostId: String, sessionName: String) -> String? {
+        guard let host = hosts.first(where: { $0.id == hostId }) else { return nil }
+        return TmuxCommand.attachCommandLine(host: host.config, sessionName: sessionName)
+    }
+
+    /// The same, on the pasteboard. `false` when there was nothing to copy, so a control can say so
+    /// rather than reporting a copy that did not happen.
+    ///
+    /// The pasteboard is a parameter for the same reason `AppModel` takes a directory: `.general` is
+    /// the user's own clipboard, and a test asserting what was copied would replace whatever they had
+    /// on it. The default is what every caller uses.
+    @discardableResult
+    public func copyAttachCommand(
+        hostId: String, sessionName: String, to pasteboard: NSPasteboard = .general
+    ) -> Bool {
+        guard let command = attachCommand(hostId: hostId, sessionName: sessionName) else { return false }
+        pasteboard.clearContents()
+        pasteboard.setString(command, forType: .string)
+        return true
+    }
+
     /// §4.6 — start the fallback this host has been offered.
     public func startPassthrough(_ hostId: String) {
         Task { await service.startPassthrough(hostId: hostId) }

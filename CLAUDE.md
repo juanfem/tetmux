@@ -876,6 +876,26 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   trusting a shared box you ssh into, and an application-wide flag makes both at once. It is passed
   down to the pane from the host rather than read from the theme, and a missing key in `hosts.json`
   means denied — so a file written before the field existed gets the safe answer.
+- **The copyable attach command is the one line here that is not an invocation (F4.36).**
+  `TmuxCommand.attachCommandLine` answers what somebody would *type* to reach a session without
+  tetmux, and every other command string in that file is the opposite thing: they spawn `tmux -CC`
+  and speak to a parser, so a pasted one gives a screenful of `%output` and a terminal that cannot
+  be typed into. One rule sorts the arguments — what says how to **reach the host** is in (the
+  destination, a non-default port, `extraSshArguments`, which is where a `ProxyJump` lives) and
+  what belongs to **this application's channel** is out: `ControlMaster` names tetmux's own socket,
+  the forwards are already bound by the connection being held open so a duplicate `-L` would fail,
+  and `-X` is about what the far side may draw. `-t` is not optional — ssh gives no tty when handed
+  a command, and tmux then refuses with `open terminal failed: not a terminal`. A host with a
+  `customCommand` is described by that wrapper, since an ssh line would describe a route nobody
+  takes. Three further things. It is built from `HostConfig` and **not** from a live channel, which
+  is most of the point: a session found by discovery (F4.4) on a host nothing is attached to is
+  exactly the one somebody wants to reach from a shell. Quoting is `shellWord`, not `quote` —
+  `tmux attach -t 'work'` says "this name needed quoting" about a name that did not, and text that
+  is read before it is run has to look like something a person wrote; `~` and `=` are excluded from
+  the safe set although a shell takes them mid-word, because zsh expands both at the *start* of one
+  and this word can be a session name. And `copyAttachCommand` takes its `NSPasteboard` as a
+  defaulted parameter for the same reason `AppModel` takes a directory: `.general` is the user's
+  clipboard, and a test asserting what was copied would take whatever they were carrying.
 - **Workspace restoration is `pendingRestore` on each window, not `@SceneStorage`.** What has to come
   back is a relationship between a macOS window and a tmux session, and that session does not exist
   until the host has connected and answered `list-sessions` — a round trip after the window is

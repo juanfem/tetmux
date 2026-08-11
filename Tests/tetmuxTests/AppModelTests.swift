@@ -2243,6 +2243,75 @@ final class AppModelTests: XCTestCase {
             keyCode: 0
         )!
     }
+
+    // MARK: - The copyable attach command
+
+    /// A pasteboard of this test's own. `.general` is the user's clipboard, and a suite that replaces
+    /// it takes something they were carrying — the same class of side effect as the per-test
+    /// Application Support directory above.
+    private func scratchPasteboard() -> NSPasteboard {
+        NSPasteboard(name: NSPasteboard.Name("tetmux-tests-\(UUID().uuidString)"))
+    }
+
+    func testTheAttachCommandIsBuiltFromTheHostThatOwnsTheSession() {
+        let model = makeModel()
+        model.hosts = [
+            host(sessions: [TmuxSession(id: "$1", name: "work", windows: [window("@1")])]),
+            remoteHost(id: "devbox", sessions: [TmuxSession(id: "$1", name: "work")]),
+        ]
+
+        XCTAssertEqual(model.attachCommand(hostId: "local", sessionName: "work"), "tmux attach -t work")
+        XCTAssertEqual(
+            model.attachCommand(hostId: "devbox", sessionName: "work"),
+            "ssh -t devbox 'tmux attach -t work'",
+            "the same session name on two hosts is two different commands"
+        )
+    }
+
+    /// The main reason to want the line: the session is in the tree because a probe found it (F4.4),
+    /// and reaching it from a shell needs no channel here at all. Built from the host's configuration,
+    /// so a disconnected host still answers.
+    func testADiscoveredSessionOnADisconnectedHostStillHasACommand() {
+        var state = HostState(
+            config: HostConfig(id: "devbox", name: "devbox", user: "ada"),
+            connectionState: .disconnected
+        )
+        state.discoveredSessions = [TmuxSession(id: "$0", name: "build")]
+        let model = makeModel()
+        model.hosts = [state]
+
+        XCTAssertEqual(
+            model.attachCommand(hostId: "devbox", sessionName: "build"),
+            "ssh -t ada@devbox 'tmux attach -t build'"
+        )
+    }
+
+    /// A control that reports a copy which did not happen is worse than one that is disabled.
+    func testCopyingForAnUnknownHostReportsFailureAndTouchesNoPasteboard() {
+        let model = makeModel()
+        model.hosts = [host(sessions: [TmuxSession(id: "$1", name: "work")])]
+        let pasteboard = scratchPasteboard()
+        pasteboard.clearContents()
+        pasteboard.setString("untouched", forType: .string)
+
+        XCTAssertNil(model.attachCommand(hostId: "gone", sessionName: "work"))
+        XCTAssertFalse(model.copyAttachCommand(hostId: "gone", sessionName: "work", to: pasteboard))
+        XCTAssertEqual(pasteboard.string(forType: .string), "untouched")
+    }
+
+    func testCopyingPutsExactlyTheCommandOnThePasteboard() {
+        let model = makeModel()
+        model.hosts = [host(sessions: [TmuxSession(id: "$1", name: "my work")])]
+        let pasteboard = scratchPasteboard()
+
+        XCTAssertTrue(model.copyAttachCommand(hostId: "local", sessionName: "my work", to: pasteboard))
+        XCTAssertEqual(
+            pasteboard.string(forType: .string),
+            model.attachCommand(hostId: "local", sessionName: "my work"),
+            "the control's tooltip shows this string; it must be the one that is copied"
+        )
+        XCTAssertEqual(pasteboard.string(forType: .string), "tmux attach -t 'my work'")
+    }
 }
 
 // MARK: - A session ending under a window

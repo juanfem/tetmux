@@ -596,6 +596,16 @@ struct SidebarView: View {
                 )
             }
             Divider()
+            // The way out of this application, and it belongs on the row rather than in a settings
+            // pane: what a person needs when tetmux is not in front of them is the one line that
+            // gets to *this* session from a shell — over ssh, with the tty tmux insists on, with the
+            // name quoted. It is worth copying for a host nothing is attached to as well, which is
+            // why the command is built from the host's configuration and not from a live channel.
+            Button("Copy Attach Command") {
+                model.copyAttachCommand(hostId: host.id, sessionName: session.name)
+            }
+            .help(model.attachCommand(hostId: host.id, sessionName: session.name) ?? "")
+            Divider()
             Button("Kill Session…", role: .destructive) {
                 model.requestKillSession(in: state, hostId: host.id, sessionId: session.id)
             }
