@@ -184,6 +184,33 @@ final class TmuxCommandTests: XCTestCase {
         XCTAssertEqual(TmuxCommand.sessionStartDirectory("/srv\nkill-server"), "/srv kill-server")
     }
 
+    /// A tab or a split starts where a *named* pane is, and the name goes to `display-message`
+    /// rather than into `-c`: tmux expands a `-c` format against the session's current pane on every
+    /// version from 3.0 to 3.7b, so `-t` on the spawn itself buys nothing.
+    func testAPaneIsAskedWhereItIsRatherThanToldToExpandAFormat() {
+        XCTAssertEqual(
+            TmuxCommand.paneCurrentPath(target: "%7"),
+            "display-message -p -t '%7' '#{pane_current_path}'"
+        )
+        // A session is a legal target and answers for its current pane — the sidebar's `+`.
+        XCTAssertTrue(TmuxCommand.paneCurrentPath(target: "$2").contains("-t '$2'"))
+    }
+
+    /// An answer that is not a usable directory produces no `-c` at all, and that is the whole point
+    /// of the check. `-c ''` is not a no-op: tmux fails the `chdir` and opens the pane in `$HOME`,
+    /// which is a plausible-looking wrong answer nothing reports. Its default — the session's
+    /// directory — is somewhere the user has at least been.
+    func testAnUnusableAnswerMeansNoStartDirectoryRatherThanAnEmptyOne() {
+        XCTAssertEqual(TmuxCommand.startDirectoryArgument("/srv/app"), " -c '/srv/app'")
+        XCTAssertEqual(TmuxCommand.startDirectoryArgument("/srv/it's"), " -c '/srv/it'\\''s'")
+        XCTAssertEqual(TmuxCommand.startDirectoryArgument(nil), "")
+        XCTAssertEqual(TmuxCommand.startDirectoryArgument(""), "")
+        XCTAssertEqual(TmuxCommand.startDirectoryArgument("   "), "")
+        // Relative is what a pane whose child has not yet taken its terminal can answer, once the
+        // empty string has been joined onto something by tmux 3.3a and after.
+        XCTAssertEqual(TmuxCommand.startDirectoryArgument("srv/app"), "")
+    }
+
     func testLocalAttachOnlyDoesNotCreate() {
         // F4.15: reconnection must never create a session.
         let args = TmuxCommand.localArguments(mode: .attach(sessionName: "work"))

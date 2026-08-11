@@ -373,8 +373,11 @@ public actor SessionService {
             /// the point is that the command has been *dealt with*, not that it succeeded.
             case acknowledged(UUID)
             /// Somebody is waiting for the block's *contents*, and a refusal is not an answer. The
-            /// label is a `userCommand`'s, so a failure is still reported as one (§7).
-            case awaitedResult(UUID, action: String)
+            /// label is a `userCommand`'s, so a failure is still reported as one (§7) — unless there
+            /// is none, which is for a question asked on the way to a command the user *did* ask for.
+            /// That command reports its own refusal, and two banners for one act, the first of them
+            /// naming an internal question, is worse than one.
+            case awaitedResult(UUID, action: String?)
         }
     }
 
@@ -1571,6 +1574,7 @@ public actor SessionService {
                 // A refusal is *not* an answer here — the caller wanted the contents — so it is both
                 // resumed with nothing and reported, because the user asked for this one.
                 resumeResult(id, with: nil, connection: connection)
+                guard let action else { break }
                 withHost(hostId) { host in
                     host.lastCommandFailure = CommandFailure(
                         action: action,
@@ -2511,17 +2515,19 @@ public actor SessionService {
     ///
     /// The same shape as `sendAndAwait` and for the same reasons — bounded, and resumed from every
     /// path that could strand it — but it hands back the body rather than only the fact of an answer.
-    /// Exactly one caller so far, `show-buffer`, and that one needs it: the buffer's *contents* are
-    /// the whole point, and there is no notification that carries them.
+    /// Two callers: `show-buffer`, whose *contents* are the whole point and which no notification
+    /// carries, and the pane-directory question a spawn asks before it can name one.
     ///
     /// `nil` for a refusal rather than an empty array, because an empty buffer and a missing one are
     /// different answers and a caller about to write the Mac's pasteboard must not confuse them.
     /// The waiter's id is minted here and put into the kind here, deliberately: they are two halves
     /// of one correlation, and a caller that built the kind itself could hand over one that names a
     /// different waiter — which resolves as a command that never answers.
+    ///
+    /// A nil `action` is a question of our own rather than something the user asked for; see the kind.
     private func sendAndAwaitResult(
         _ text: String,
-        action: String,
+        action: String?,
         hostId: String,
         connection: Connection,
         timeout: Duration = .seconds(5)
@@ -3215,21 +3221,40 @@ public actor SessionService {
     /// A tab, opened where the pane it was opened from is sitting.
     ///
     /// tmux would otherwise start it in the *session's* directory — see
-    /// `TmuxCommand.inheritedWorkingDirectory`. The format is resolved against the target session's
-    /// current pane, which is the focused one: `select-pane` follows focus and `select-window`
-    /// follows the tab.
-    public func newWindow(hostId: String, sessionId: String? = nil) {
+    /// `TmuxCommand.inheritedWorkingDirectoryFormat`, which also says why the directory is asked for
+    /// and passed on rather than left to `-c` to expand. `fromPaneId` is the pane the tab is being
+    /// opened *from*; without one the session is asked instead and answers for its current pane,
+    /// which is what the sidebar's `+` means — it names a session the user is not looking at, whose
+    /// panes are not the ones on screen.
+    public func newWindow(hostId: String, sessionId: String? = nil, fromPaneId: String? = nil) async {
         let target = sessionId.map { " -t \(TmuxCommand.quote($0))" } ?? ""
-        send("new-window\(target) -c \(TmuxCommand.quote(TmuxCommand.inheritedWorkingDirectory))",
-             kind: .userCommand("New tab"), hostId: hostId)
+        let directory = await startDirectory(hostId: hostId, target: fromPaneId ?? sessionId)
+        send("new-window\(target)\(directory)", kind: .userCommand("New tab"), hostId: hostId)
     }
 
-    /// A split, opened where the pane being split is sitting. Exact rather than inferred: the format
-    /// is resolved against `-t`, which is this pane.
-    public func splitPane(hostId: String, paneId: String, leftRight: Bool) {
-        send("split-window \(leftRight ? "-h" : "-v") -t \(paneId)"
-             + " -c \(TmuxCommand.quote(TmuxCommand.inheritedWorkingDirectory))",
+    /// A split, opened where the pane being split is sitting.
+    public func splitPane(hostId: String, paneId: String, leftRight: Bool) async {
+        let directory = await startDirectory(hostId: hostId, target: paneId)
+        send("split-window \(leftRight ? "-h" : "-v") -t \(paneId)\(directory)",
              kind: .userCommand("Split pane"), hostId: hostId)
+    }
+
+    /// `-c <where that pane is>`, or nothing when there is nothing to ask about or tmux did not
+    /// answer with a usable directory.
+    ///
+    /// The round trip is what makes the answer the *target's*: `-c` would expand a format against the
+    /// session's current pane instead, which is a different pane whenever a tab was just opened or a
+    /// second macOS window is showing another one. It costs one RTT before the pane appears, on top of
+    /// the one the spawn already waits for — opening a pane is a deliberate act, and landing it in the
+    /// wrong directory is the thing the user notices.
+    private func startDirectory(hostId: String, target: String?) async -> String {
+        guard let target, let connection = connections[hostId] else { return "" }
+        let lines = await sendAndAwaitResult(
+            TmuxCommand.paneCurrentPath(target: target),
+            action: nil, hostId: hostId, connection: connection
+        )
+        let path = lines?.first.map { String(decoding: $0, as: UTF8.self) }
+        return TmuxCommand.startDirectoryArgument(path)
     }
 
     public func killPane(hostId: String, paneId: String) {

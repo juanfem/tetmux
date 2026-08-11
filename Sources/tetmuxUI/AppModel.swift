@@ -1033,12 +1033,21 @@ public final class AppModel {
     public func newWindow() {
         let scope = activeScope
         guard let hostId = scope.hostId, let sessionId = scope.sessionId else { return }
-        newWindow(hostId: hostId, sessionId: sessionId)
+        newWindow(hostId: hostId, sessionId: sessionId,
+                  from: scope.paneId ?? window(in: scope)?.preferredPaneId)
     }
 
     /// A window in a named session rather than in the frontmost one — what the sidebar's `+` means,
     /// where the row under the pointer says which session is intended (item 3).
-    public func newWindow(hostId: String, sessionId: String, revealIn state: WindowState? = nil) {
+    ///
+    /// `from` is the pane the tab inherits its directory from, and the sidebar has none to give: the
+    /// row it acts on names a session the user is not looking at, whose panes are not the ones on
+    /// screen. Passing the frontmost window's pane there would open a tab in a directory belonging to
+    /// a different session.
+    public func newWindow(
+        hostId: String, sessionId: String, from paneId: String? = nil,
+        revealIn state: WindowState? = nil
+    ) {
         if let target = state ?? activeWindowState {
             let existing = hosts.first { $0.id == hostId }?
                 .sessions.first { $0.id == sessionId }?
@@ -1048,7 +1057,7 @@ public final class AppModel {
                 sessionId: sessionId, knownWindowIds: Set(existing), madeAt: .now
             ))
         }
-        Task { await service.newWindow(hostId: hostId, sessionId: sessionId) }
+        Task { await service.newWindow(hostId: hostId, sessionId: sessionId, fromPaneId: paneId) }
     }
 
     /// Splits the focused pane, and focuses what comes back.

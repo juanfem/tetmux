@@ -322,9 +322,10 @@ final class SessionIntegrationTests: XCTestCase {
     /// A tab and a split open where the pane they came from is, not where its session started.
     ///
     /// tmux's own default is the session's directory, which for a session that has been open all
-    /// week is nowhere the user still is — so both commands carry `-c '#{pane_current_path}'`. The
-    /// divergence is what makes this test mean anything: the pane is `cd`'d somewhere the session
-    /// has never been, so the session's own directory is available as the wrong answer.
+    /// week is nowhere the user still is — so both commands carry a `-c` naming where the pane they
+    /// came from is. The divergence is what makes this test mean anything: the pane is `cd`'d
+    /// somewhere the session has never been, so the session's own directory is available as the
+    /// wrong answer.
     ///
     /// The `cd` is confirmed through the pane's *output* rather than by waiting on the model: a `cd`
     /// renames nothing and moves no pane, so nothing schedules the `list-panes` that would report it,
@@ -334,12 +335,29 @@ final class SessionIntegrationTests: XCTestCase {
     /// keystrokes land and says nothing about whether the shell has run them yet. That is a race
     /// that passes on an idle machine: it first failed on tmux 3.0, which looked like a version
     /// difference and was three test bundles compiling in the background.
+    ///
+    /// The tab is opened first and then sent *somewhere else*, which is what makes the split's half
+    /// of this mean anything. tmux expands a `-c` format against the session's current pane and never
+    /// against `-t` (`TmuxCommand.inheritedWorkingDirectoryFormat`), and after `new-window` the
+    /// session's current pane is the tab's. While both sit in the same directory the two readings
+    /// agree and a wrong one passes; with the tab moved to a second directory, only a split that
+    /// asked about the pane it is splitting can land in the first.
+    ///
+    /// It was found the other way round, by the reading that does not need a second directory: the
+    /// newborn pane of a tab has not yet claimed its terminal, `pane_current_path` reads the
+    /// foreground process group and so expands to nothing, and tmux 3.0 and 3.2a answer an unusable
+    /// `-c` by opening the pane in `$HOME`. That is a race, it needs a loaded machine, and it only
+    /// ever failed in CI.
     func testANewTabAndASplitOpenWhereTheCurrentPaneIs() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tetmux-cwd-\(UUID().uuidString.prefix(8))", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let resolved = directory.resolvingSymlinksInPath().path
+        func makeDirectory(_ prefix: String) throws -> String {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(prefix)-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+            return directory.resolvingSymlinksInPath().path
+        }
+        let resolved = try makeDirectory("tetmux-cwd")
+        let elsewhere = try makeDirectory("tetmux-elsewhere")
 
         let service = SessionService()
         await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
@@ -349,37 +367,67 @@ final class SessionIntegrationTests: XCTestCase {
         let sessionId = try XCTUnwrap(host.activeSession?.id)
         let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
 
-        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
-        let collected = collect(stream, until: "tetmux-cwd-ready")
-        try await Task.sleep(for: .milliseconds(500))
-        await service.sendKeys(
-            hostId: "local", paneId: paneId, text: "cd \(resolved) && echo tetmux-\"cwd\"-ready\r"
-        )
-        let output = await collected.value
-        XCTAssertTrue(output.contains("tetmux-cwd-ready"), "the pane never changed directory:\n\(output)")
-
-        await service.newWindow(hostId: "local", sessionId: sessionId)
-        await service.splitPane(hostId: "local", paneId: paneId, leftRight: true)
-
         @Sendable func path(of pane: TmuxPane?) -> String? {
             pane.map { URL(fileURLWithPath: $0.currentPath).resolvingSymlinksInPath().path }
         }
+
+        /// Walks `pane` into `directory` and returns once its shell says it is there. `word` is the
+        /// middle of the marker, and is quoted in the typed line so the echo of the line itself does
+        /// not match it.
+        func changeDirectory(of pane: String, to directory: String, word: String) async throws {
+            let stream = await service.subscribeToPane(hostId: "local", paneId: pane).stream
+            let collected = collect(stream, until: "tetmux-\(word)-ready")
+            try await Task.sleep(for: .milliseconds(500))
+            await service.sendKeys(
+                hostId: "local", paneId: pane,
+                text: "cd \(directory) && echo tetmux-\"\(word)\"-ready\r"
+            )
+            let output = await collected.value
+            XCTAssertTrue(
+                output.contains("tetmux-\(word)-ready"),
+                "\(pane) never changed directory:\n\(output)"
+            )
+        }
+        try await changeDirectory(of: paneId, to: resolved, word: "cwd")
+
+        await service.newWindow(hostId: "local", sessionId: sessionId)
+
+        // Both halves of the tab, not just its existence: `%window-add` arrives before the
+        // `list-panes` that says what is in it, so a window with no panes yet is a window nothing can
+        // be asked about.
+        let opened = try await waitForHost(service) { host in
+            guard let windows = host.sessions.first(where: { $0.id == sessionId })?.windows,
+                  windows.count >= 2 else { return false }
+            return windows[1].panes.first?.currentPath.isEmpty == false
+        }
+        let tabPane = try XCTUnwrap(
+            opened.sessions.first { $0.id == sessionId }?.windows[1].panes.first
+        )
+        XCTAssertEqual(
+            path(of: tabPane), resolved,
+            "the tab opened in \(path(of: tabPane) ?? "nowhere") rather than \(resolved)"
+        )
+
+        // The tab, which is now the session's current pane, is moved out of the way: while it sits in
+        // the same directory as the pane being split, a split that resolved against it would pass.
+        try await changeDirectory(of: tabPane.id, to: elsewhere, word: "elsewhere")
+
+        await service.splitPane(hostId: "local", paneId: paneId, leftRight: true)
+
         let arrived = try await waitFor(seconds: 15) {
             guard let session = await service.getHost("local")?
                 .sessions.first(where: { $0.id == sessionId }), session.windows.count >= 2
             else { return false }
-            let split = session.windows[0].panes.first { $0.id != paneId }
-            return path(of: session.windows[1].panes.first) == resolved
-                && path(of: split) == resolved
+            return path(of: session.windows[0].panes.first { $0.id != paneId }) == resolved
         }
 
         let finalHost = await service.getHost("local")
         let session = try XCTUnwrap(finalHost?.sessions.first { $0.id == sessionId })
         XCTAssertTrue(
             arrived,
-            "tab opened in \(path(of: session.windows.last?.panes.first) ?? "nowhere") and split in "
-                + "\(path(of: session.windows[0].panes.first { $0.id != paneId }) ?? "nowhere"), "
-                + "rather than \(resolved)"
+            "the split opened in "
+                + "\(path(of: session.windows[0].panes.first { $0.id != paneId }) ?? "nowhere") "
+                + "rather than \(resolved), where the pane it was split from is"
         )
 
         await service.disconnectHost(hostId: "local")

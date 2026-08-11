@@ -270,11 +270,47 @@ public enum TmuxCommand {
     ///
     /// tmux's own default is the **session's** directory — where the session was created, which for
     /// a session that has been open all day is rarely anywhere the user still is. Every `new-window`
-    /// and `split-window` therefore carries this. It is a format, so tmux resolves it at the moment
-    /// the command runs: for `split-window -t %7` against pane `%7`, and for `new-window -t $2`
-    /// against that session's current pane, which tetmux keeps pointed at the focused one with
-    /// `select-pane`.
-    public static let inheritedWorkingDirectory = "#{pane_current_path}"
+    /// and `split-window` therefore carries this, as a **literal path** that `paneCurrentPath`
+    /// resolved a round trip earlier.
+    ///
+    /// Not as the format itself, which is the trap this exists to name. **`-c`'s format is expanded
+    /// against the session's current pane, never against `-t`** — `spawn_pane` calls
+    /// `format_single(item, sc->cwd, c, s, NULL, NULL)`, and `format_defaults` fills those two NULLs
+    /// with `s->curw` and its active pane. Verified on 3.0, 3.2a, 3.3a, 3.4, 3.5 and 3.7b: with the
+    /// target pane in one directory and the session's current pane in another,
+    /// `split-window -t %0 -c '#{pane_current_path}'` lands in the *current* pane's, on every one of
+    /// them. `display-message -p -t` does scope to its target, which is why the path is fetched
+    /// rather than passed through.
+    ///
+    /// This is only invisible while the two panes agree. What made it visible: a `new-window`
+    /// immediately followed by a `split-window` makes the session's current pane the one that was
+    /// just born, whose shell has not yet claimed the pty's foreground process group — so
+    /// `pane_current_path`, which reads `tcgetpgrp` in `osdep_get_cwd`, expands to nothing. tmux 3.0
+    /// and 3.2a then `chdir("")`, fail, and land the pane in `$HOME`; 3.3a and after join the empty
+    /// string onto the client's working directory instead. Both are wrong and neither says so.
+    static let inheritedWorkingDirectoryFormat = "#{pane_current_path}"
+
+    /// Asks where one *named* pane is sitting, which is the question `-c` cannot ask for itself.
+    ///
+    /// `display-message` expands its format against `-t` — verified on 3.0, 3.2a and 3.5 with the
+    /// target pane and the session's current pane in different directories — so this answers for the
+    /// pane meant rather than for whichever one the session is currently on. A session id is a legal
+    /// target too, and answers for that session's current pane: the question the sidebar's `+` asks,
+    /// about a session nobody is looking at.
+    public static func paneCurrentPath(target: String) -> String {
+        "display-message -p -t \(quote(target)) '\(inheritedWorkingDirectoryFormat)'"
+    }
+
+    /// `-c <dir>` for a spawn that should start where an existing pane is, or nothing at all.
+    ///
+    /// Empty for an answer that is not a usable directory — an empty or relative reply, which is what
+    /// a pane whose child has not yet taken its terminal gives. Omitting `-c` leaves tmux to its own
+    /// default, which is the session's directory: not where the user is, but somewhere they have
+    /// been, and a great deal better than the `$HOME` an unusable `-c` silently becomes.
+    public static func startDirectoryArgument(_ path: String?) -> String {
+        guard let path = path.map(singleLine), path.hasPrefix("/") else { return "" }
+        return " -c \(quote(path))"
+    }
 
     /// Where a *session* starts: the host's start directory, or the user's home directory.
     ///

@@ -299,10 +299,25 @@ locally attached tetmux opened every shell it ever made in the root directory. T
   on every path that can create one, `invocation`'s connect line included. That line used to be
   exempt, on the reasoning that a host reached for the first time is not being given a working
   directory — which made the *first* session the one that ignored the setting.
-- A **tab or split** starts at `inheritedWorkingDirectory`, which is `#{pane_current_path}`: exact
-  for `split-window -t %p`, and for `new-window -t $s` resolved against the session's current
-  pane — which is the focused one, because `select-pane` follows focus and `select-window` follows
-  the tab.
+- A **tab or split** starts where an existing pane is, as a literal path that `paneCurrentPath`
+  asked tmux for a round trip earlier — never as a format left for `-c` to expand, for the reason
+  below. `splitPane` asks about the pane being split; `newWindow` about the pane it was opened from,
+  or, when the caller has none to name, about the session, which answers for its current pane. That
+  last case is the sidebar's `+`: it names a session the user is not looking at, whose panes are not
+  the ones on screen.
+- **`-c`'s format is expanded against the session's current pane, never against `-t`.** `spawn_pane`
+  calls `format_single(item, sc->cwd, c, s, NULL, NULL)` and `format_defaults` fills those NULLs
+  with `s->curw` and its active pane — so `split-window -t %0 -c '#{pane_current_path}'` lands
+  wherever the session's *current* pane is, on 3.0, 3.2a, 3.3a, 3.4, 3.5 and 3.7b alike. The two
+  panes agree while nothing has moved, which is why this held for so long. What broke it was a
+  `new-window` immediately followed by a `split-window`: the tab is now current, its newborn shell
+  has not yet claimed the pty's foreground process group, `pane_current_path` reads that through
+  `tcgetpgrp` and expands to nothing, and tmux 3.0 and 3.2a answer an unusable `-c` by opening the
+  pane in `$HOME` (3.3a and after join the empty string onto the client's cwd instead). It surfaced
+  as a matrix failure on a loaded CI machine and passed on every idle one.
+  `testANewTabAndASplitOpenWhereTheCurrentPaneIs` pins it without the race, by sending the tab to a
+  second directory before splitting. `display-message -p -t` *does* scope to its target, which is
+  what makes the round trip worth its RTT.
 - **`~` is expanded here, not by tmux.** tmux does not expand a tilde in `-c`: it takes `~/work`
   literally, finds no such directory, and falls back to `$HOME` — a wrong answer that looks like a
   right one, which is how the SRD came to claim tildes worked. `#{HOME}` is a format, and an

@@ -17,6 +17,17 @@ is what somebody installs. `package` therefore needs `matrix` under an explicit
 `success || skipped` condition: a skipped dependency skips its dependents by default, so a bare
 `needs:` would stop producing a .dmg on every ordinary push and say nothing about why.
 
+**A break in what tmux resolves surfaces at a tag, against whatever commit the tag names.** The
+matrix is the only job that runs an old tmux, and it runs on the cron, the button, and a `v*` tag —
+so between two Mondays, the commit that breaks a version and the run that reports it need have
+nothing to do with each other. `v0.5.0` failed on 3.0 and 3.2a for a `-c '#{pane_current_path}'`
+added five commits earlier (`afa1234`), on a code path every version disagrees with and only a
+loaded machine exposed; the tag's own commit changed one paragraph of this file. Same shape as the
+toolchain skew above and the same rule: **read the failing test, not the commit message the run is
+named after.** The remedy when touching anything tmux resolves on its side — a format, a `-c`, a
+flag whose meaning moved between versions — is `Scripts/test-matrix.sh` before the push, not after
+the tag.
+
 **The manifest declares the AppKit half of the package only on macOS**, and that is what makes the
 Linux test job possible at all. `--filter` chooses which tests *run*, never which targets are
 built: `swift test` builds one product out of every test target, so a Linux job asking only for

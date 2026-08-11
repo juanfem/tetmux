@@ -449,8 +449,12 @@ re-read `list-clients` as the fallback).
   non-flag word — and is quoted whole, because the far-side shell parses it.
   *(Amended:)* **where things start is stated, never inherited.** A session starts in the host's
   start directory, or in `$HOME` when it has none — as `-c`, on every path that can create one,
-  the connect line included. A **tab or split starts where the pane it came from is**, as
-  `-c '#{pane_current_path}'`. Both replace a tmux default that inherits: with no `-c`, a session
+  the connect line included. A **tab or split starts where the pane it came from is**, as a `-c`
+  path that `display-message -p -t <pane>` answered a round trip earlier: `-c` expands a format
+  against the session's *current* pane and not against `-t`, on every tmux from 3.0 to 3.7b, so
+  `-c '#{pane_current_path}'` follows the wrong pane the moment the two differ — as they do for the
+  whole width of a `new-window`, whose newborn pane cannot yet say where it is and whose empty
+  answer opens the next pane in `$HOME`. Both replace a tmux default that inherits: with no `-c`, a session
   takes the *attached session's* directory and a window takes its *own session's*, so every shell on
   a host ended up where its first session happened to open — `/` for a `.app` launched from Finder.
   `~` is expanded by tetmux (to `#{HOME}`, which the far side answers) and not by tmux, which does
