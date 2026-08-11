@@ -154,6 +154,80 @@ final class PaneInputTests: XCTestCase {
         )
     }
 
+    // MARK: - Who the bytes came from
+
+    /// A query the program asks its terminal is answered, and is not input.
+    ///
+    /// `TerminalViewDelegate.send` carries the user's keystrokes and the emulator's own replies
+    /// through one method, and tetmux focuses the pane for the former. Reading a reply as input is
+    /// what let a program take the keyboard by asking a question: split a window with Claude Code in
+    /// a background pane and the resize makes it re-query, so the pane the split just created lost
+    /// the keyboard to a pane nobody had touched.
+    ///
+    /// `CSI 6n` is the ordinary one — a cursor position report, which every full-screen program uses
+    /// to find out where it is. What is pinned is that the answer still goes out (the program is
+    /// waiting for it) and that it is marked as the emulator's.
+    func testTheAnswerToAProgramsQueryIsMarkedAsTheEmulatorsOwn() {
+        let (view, recorder) = makeView()
+
+        view.getTerminal().feed(text: "\u{1b}[6n")
+
+        XCTAssertEqual(recorder.bytes.count, 1, "the cursor position report was never answered")
+        XCTAssertTrue(
+            recorder.text.hasSuffix("R"),
+            "the answer is not a cursor position report: \(recorder.text.debugDescription)"
+        )
+        XCTAssertEqual(
+            recorder.answeringQuery, [true],
+            "a terminal reply reached the delegate looking like something the user typed — this is a "
+                + "background pane stealing the keyboard from the one the user is in"
+        )
+    }
+
+    /// …and what the user types is not marked, which is the half that keeps focus working.
+    ///
+    /// The failure this exists for is the opposite one and is silent: a flag that was set for
+    /// everything would leave the pane the keyboard is already in unable to say so, and nothing on
+    /// screen would look wrong until a command acted on the wrong pane.
+    func testWhatTheUserTypesIsNotMarkedAsTheEmulatorsOwn() {
+        let (view, recorder) = makeView()
+
+        view.insertText("a", replacementRange: NSRange(location: NSNotFound, length: 0))
+
+        XCTAssertEqual(recorder.text, "a")
+        XCTAssertEqual(recorder.answeringQuery, [false], "a keystroke was read as a terminal reply")
+    }
+
+    /// A mouse report is the emulator's too, and that is deliberate rather than incidental.
+    ///
+    /// It is encoded by `Terminal.sendEvent` and leaves by the same door as a query's answer, so it
+    /// carries the mark — which is right: a report can be produced by the pointer merely crossing a
+    /// pane, and motion is not a statement about where the keyboard belongs. A *click* is, and
+    /// `PaneTerminalView.mouseDown` says so directly instead.
+    func testAMouseReportIsTheEmulatorsOwnAndTheClickIsWhatFocuses() {
+        let (view, recorder) = makeView()
+        view.getTerminal().feed(text: "\u{1b}[?1000h")
+
+        guard let click = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: 40, y: 40),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ) else { return XCTFail("could not synthesise a click") }
+        view.mouseDown(with: click)
+
+        XCTAssertFalse(recorder.bytes.isEmpty, "the click was not reported to the program at all")
+        XCTAssertFalse(
+            recorder.answeringQuery.contains(false),
+            "a mouse report reached the delegate as though it were typed"
+        )
+    }
+
     /// …and an ordinary keystroke erases nothing.
     ///
     /// The failure this exists for is the opposite one and is far worse than the duplicate: an
@@ -175,10 +249,16 @@ final class PaneInputTests: XCTestCase {
 /// would not compile. The tests drive it from one thread.
 private final class RecordingDelegate: TerminalViewDelegate, @unchecked Sendable {
     private(set) var bytes: [[UInt8]] = []
+    /// What the view claimed about each write *at the moment it was made*, which is the only moment
+    /// the answer exists: the flag is cleared as the call returns.
+    private(set) var answeringQuery: [Bool] = []
 
     var text: String { bytes.map { String(decoding: $0, as: UTF8.self) }.joined() }
 
-    func send(source: TerminalView, data: ArraySlice<UInt8>) { bytes.append(Array(data)) }
+    func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        bytes.append(Array(data))
+        answeringQuery.append((source as? ComposingTerminalView)?.isAnsweringQuery ?? false)
+    }
 
     func scrolled(source: TerminalView, position: Double) {}
     func setTerminalTitle(source: TerminalView, title: String) {}

@@ -493,6 +493,26 @@ so "scroll up to see what that build printed" worked right up until you looked a
 really have and keeps asking tmux for that grid; dropped from the tree it would resize its tmux window
 to nothing and reflow everything running in it.
 
+**Not everything leaving the emulator is the user, and only the user may move the keyboard.**
+`TerminalViewDelegate.send` is the single exit for every byte going back to a pane, and it carries
+two things that are identical by the time they arrive: what was typed, and what the terminal
+answered by itself — a cursor position report (`CSI 6n`), a device attributes reply, OSC 11's
+background colour, a mouse report. Focusing the pane for both let a *program* take the keyboard by
+asking its terminal a question, which is what any full-screen TUI does on a redraw. A split is where
+it shows, because a split resizes every pane in the window: the program in a background pane
+re-queries and takes the focus off the pane the split just made, a fraction of a second after tmux
+gave it. It hid for as long as it did because the pane being split *from* is exempt by accident —
+`focus` is a no-op for the pane that already has it — so it only ever reproduced with the querying
+program somewhere other than the pane in front of you. The two are tellable apart at the source and
+nowhere else: user input goes through `TerminalView.send(data:)`, which calls the delegate directly,
+while everything the emulator generates reaches it through the `TerminalDelegate` conformance, which
+is `Terminal.sendResponse`'s only exit — hence `ComposingTerminalView.isAnsweringQuery`. Sniffing the
+bytes would be guessing, since a reply is ordinary text. **And a click has to say so itself**: with
+mouse reporting on — every full-screen program — click-to-focus was riding on the mouse report
+reaching that same `send`, so gating it there would have taken the click with it.
+`PaneTerminalView.mouseDown` states it, which is also the right answer for a shell pane that reports
+no mouse, and leaves *motion* over a background pane meaning nothing about where the keyboard is.
+
 **Pane subscriptions outlive the channel.** `outputSubscribers` is a registry of what is on screen,
 not a property of the connection, so `teardown` must leave it alone — `completeHandshakeIfNeeded`
 repaints those panes on the next attach instead. A view subscribes exactly once, when its `NSView` is

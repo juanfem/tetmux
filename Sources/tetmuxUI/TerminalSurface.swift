@@ -465,8 +465,27 @@ struct TerminalPaneView: NSViewRepresentable {
             Task { await service.paste(hostId: hostId, paneId: paneId, text: text) }
         }
 
+        /// A click focuses the pane, said by `PaneTerminalView.mouseDown` rather than inferred.
+        func requestFocus() {
+            parent.onFocusRequest()
+        }
+
         // MARK: TerminalViewDelegate
 
+        /// Bytes leaving the emulator for the pane — and only *some* of them are the user.
+        ///
+        /// This one method carries two things that look identical by the time they arrive: what was
+        /// typed, and what the terminal answered on its own. Focusing the pane for both is what let
+        /// a program steal the keyboard by asking its terminal a question — a cursor position report
+        /// (`CSI 6n`), a device attributes reply, the background colour OSC 11 asks for, a mouse
+        /// report from a pane the pointer merely passed over. A split is where it shows, because a
+        /// split resizes every pane in the window: the program in a *background* pane redraws,
+        /// re-queries, and takes the keyboard off the pane the split just made, a fraction of a
+        /// second after it was given it. It went unnoticed for the pane being split *from*, where
+        /// `focus` is already a no-op for the pane that has it.
+        ///
+        /// `isAnsweringQuery` is what tells them apart, at the source rather than by guessing from
+        /// the bytes — see `ComposingTerminalView`.
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             // Raw bytes, not a String round trip: an Alt-chord or a non-UTF-8 key sequence must
             // reach the pane byte-for-byte.
@@ -474,7 +493,9 @@ struct TerminalPaneView: NSViewRepresentable {
             let hostId = parent.hostId
             let paneId = parent.paneId
             let service = parent.service
-            parent.onFocusRequest()
+            if (source as? ComposingTerminalView)?.isAnsweringQuery != true {
+                parent.onFocusRequest()
+            }
             Task { await service.sendKeys(hostId: hostId, paneId: paneId, bytes: bytes) }
         }
 
@@ -574,6 +595,27 @@ class ComposingTerminalView: TerminalView {
     /// What the last `insertText` was given, so a replacement knows how many characters — rather
     /// than how many UTF-16 units — it is being asked to take back.
     private var lastInsertedText: String?
+
+    /// True only while the *emulator* is writing back, rather than the user.
+    ///
+    /// `TerminalViewDelegate.send` is the single exit for every byte that goes to the pane, and it
+    /// carries both kinds — see the comment there for what treating them alike costs. They are
+    /// tellable apart one layer down and nowhere else: what the user types goes through
+    /// `TerminalView.send(data:)`, which calls the view's delegate directly, while everything the
+    /// emulator generates by itself reaches that delegate through *this* method — the sole exit of
+    /// `Terminal.sendResponse`, which is what answers every query and encodes every mouse report.
+    ///
+    /// Sniffing the bytes instead would be guessing: a reply is ordinary text, and `\u{1b}[6n`'s
+    /// answer is indistinguishable from somebody pasting one.
+    private(set) var isAnsweringQuery = false
+
+    override func send(source: Terminal, data: ArraySlice<UInt8>) {
+        // Synchronous the whole way — `sendResponse` calls straight through — so the flag covers
+        // exactly this delegate call and nothing that follows it.
+        isAnsweringQuery = true
+        defer { isAnsweringQuery = false }
+        super.send(source: source, data: data)
+    }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
         let text = (string as? NSString) as String? ?? (string as? NSAttributedString)?.string
@@ -749,6 +791,21 @@ final class PaneTerminalView: ComposingTerminalView, NSMenuItemValidation {
         return (0..<terminal.rows)
             .compactMap { terminal.getLine(row: $0)?.translateToString(trimRight: true) }
             .joined(separator: "\n")
+    }
+
+    /// A click on a pane focuses it, stated here rather than left to the bytes it produces.
+    ///
+    /// With mouse reporting on — which is every full-screen program, Claude Code included — a click
+    /// used to focus the pane as a side effect of the mouse report reaching the delegate's `send`,
+    /// which is the route the emulator's own query answers take and so is not one to read intent
+    /// from. A click is the unambiguous statement, and it says the same thing for a pane running a
+    /// shell, which reports no mouse at all.
+    ///
+    /// Ahead of `super`, which is what tracks the selection and what forwards the report, so nothing
+    /// about the click itself changes. `focus` is a no-op for the pane that already has it.
+    override func mouseDown(with event: NSEvent) {
+        coordinator?.requestFocus()
+        super.mouseDown(with: event)
     }
 
     /// Middle-click pastes the **selection**, the way it does everywhere else a terminal is used.
