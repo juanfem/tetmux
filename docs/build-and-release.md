@@ -50,8 +50,13 @@ is on 6.3. Actor-isolation diagnostics moved between them in the permissive dire
 is one-way: **a green `swift test` locally does not mean the tree compiles on CI, while the reverse
 holds.** `91f0329` made a test delegate read `isAnsweringQuery` — main-actor state, because the
 property belongs to an `NSView` subclass — from a witness of `TerminalViewDelegate`, which is a
-plain protocol and so gives its witnesses no isolation. 6.3 accepts that and 6.1.2 rejects it, and
-the tree stayed red for four commits while every local run passed. The fix is a `@preconcurrency`
+plain protocol and so gives its witnesses no isolation. 6.3 accepts that and 6.1.2 rejects it, so
+every local run passed. **It surfaced against an unrelated commit, five pushes later**, because
+`91f0329` and the four after it sat unpushed: CI had never compiled them, and the break rode in on
+the next push — a rename of an attach-command parameter, which is what the failing run was named
+after and what it had nothing to do with. A local commit is not a tested commit; when a red run
+names a change that cannot explain it, check what else that push was carrying. The fix is a
+`@preconcurrency`
 conformance (SE-0423), which both toolchains accept: the witness may be `@MainActor` and the
 requirement stays nonisolated, with a runtime main-thread check that traps loudly instead of
 racing. **When a build failure is a concurrency-isolation error, check the two Swift versions before
