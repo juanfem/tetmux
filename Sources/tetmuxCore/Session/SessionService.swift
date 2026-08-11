@@ -3435,6 +3435,59 @@ public actor SessionService {
         )
     }
 
+    /// The same move, into a session that does not exist yet — three commands, because tmux has no
+    /// one command for it.
+    ///
+    /// `move-window -t <a name nothing answers to>:` is an error on every version (`can't find
+    /// session`, verified on 3.0 and 3.5), and `new-session` cannot be handed an existing window. So
+    /// the session is made, the window is moved in, and the window `new-session` had to create is
+    /// killed — it exists for the length of a round trip and runs a shell nobody sees.
+    ///
+    /// Three things make the sequence safe to send blind, which is the only way to send it: control
+    /// mode answers `new-session` with no id, so waiting to learn one would mean waiting for a
+    /// topology refresh with the user's window in limbo. tmux runs the commands **in order** on the
+    /// one channel, so the session exists by the time the move names it. The placeholder is killed
+    /// **by its own name**, never with `kill-window -a` (kill everything except the target), which
+    /// reads as the tidier command and destroys the user's other tabs on the one occasion the move
+    /// did not happen. And a failed move leaves the placeholder as the session's only window, so
+    /// killing it takes the empty session with it — nothing is left behind and nothing was lost.
+    ///
+    /// `-A` is deliberately absent from the `new-session`: a name that is somehow taken must be a
+    /// refusal rather than an attach, or the kill would land in a session somebody is using.
+    public func moveWindowToNewSession(
+        hostId: String,
+        windowId: String,
+        fromSession: String,
+        name: String,
+        startDirectory: String? = nil
+    ) {
+        let name = TmuxCommand.singleLine(name)
+        guard !name.isEmpty else { return }
+        send(
+            "new-session -d -s \(TmuxCommand.quote(name))"
+                + " -n \(TmuxCommand.quote(Self.placeholderWindowName))"
+                + " -c \(TmuxCommand.quote(TmuxCommand.sessionStartDirectory(startDirectory)))",
+            kind: .userCommand("Move tab to a new session"), hostId: hostId
+        )
+        send(
+            "move-window -s \(TmuxCommand.quote("\(fromSession):\(windowId)"))"
+                + " -t \(TmuxCommand.quote("\(name):"))",
+            kind: .userCommand("Move tab to a new session"), hostId: hostId
+        )
+        send(
+            "kill-window -t \(TmuxCommand.quote("\(name):\(Self.placeholderWindowName)"))",
+            // Not a `userCommand`: if the move failed the user is already reading why, and a second
+            // banner about the window we made to hold it explains nothing they can act on.
+            kind: .ignore, hostId: hostId
+        )
+    }
+
+    /// The window `new-session` insists on creating, named so it can be killed by name.
+    ///
+    /// Distinctive on purpose — the kill is scoped to the new session, so this only has to be a name
+    /// the window being moved in is unlikely to have.
+    static let placeholderWindowName = "tetmux-new-session"
+
     /// Links a window into a second session, leaving it in the first.
     ///
     /// The inverse of `unlinkWindow`, and the thing that makes F4.9's unlink path reachable at all: a

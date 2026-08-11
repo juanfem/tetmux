@@ -996,7 +996,8 @@ private struct WindowTab: View {
                 model: model,
                 hostId: state.selectedHostId,
                 sessionId: session.id,
-                windowId: window.id
+                windowId: window.id,
+                revealIn: state
             )
             Divider()
             Button("Close Tab…", role: .destructive) {
@@ -1011,13 +1012,18 @@ private struct WindowTab: View {
 /// listed — the tab strip and the sidebar's window row.
 ///
 /// Both are non-destructive and neither has a keyboard route, so they live in the context menu with
-/// the other things done *to* a window. Absent entirely when the host has only the one session:
-/// a submenu whose only content is "no other sessions" is a worse answer than not offering it.
+/// the other things done *to* a window. **Link** is absent when the host has only the one session:
+/// a submenu whose only content is "no other sessions" is a worse answer than not offering it, and
+/// there is nothing to link to. **Move** is always there, because its first item makes the session
+/// it moves into.
 struct WindowSessionMenus: View {
     @Bindable var model: AppModel
     let hostId: String?
     let sessionId: String
     let windowId: String
+    /// The window this menu was opened in, for the one item that has something to show afterwards.
+    /// Named rather than inferred from focus, like every other item here that acts on a window.
+    var revealIn: WindowState?
 
     var body: some View {
         let others = hostId.map { model.otherSessions(hostId: $0, excluding: sessionId) } ?? []
@@ -1036,9 +1042,19 @@ struct WindowSessionMenus: View {
             )
             .help("Post a notification when this tab prints while tetmux is in the background.")
         }
-        if let hostId, !others.isEmpty {
+        if let hostId {
             Divider()
+            // Offered whether or not the host has another session, unlike Link below: a new one is
+            // always somewhere to go, and a host with a single session is exactly where wanting a
+            // second is most likely. First in the menu because it is the item that needs no reading —
+            // the rest are names to pick between.
             Menu("Move to Session") {
+                Button("New Session") {
+                    model.moveWindowToNewSession(
+                        hostId: hostId, windowId: windowId, from: sessionId, revealIn: revealIn
+                    )
+                }
+                if !others.isEmpty { Divider() }
                 ForEach(others) { target in
                     Button(target.name) {
                         model.moveWindowToSession(
@@ -1047,6 +1063,8 @@ struct WindowSessionMenus: View {
                     }
                 }
             }
+        }
+        if let hostId, !others.isEmpty {
             Menu("Link to Session") {
                 ForEach(others) { target in
                     Button(target.name) {

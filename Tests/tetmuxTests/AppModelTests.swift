@@ -743,6 +743,53 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(state.selectedWindowId, "@2", "selected the active window instead of the new one")
     }
 
+    /// Moving a tab into a new session shows the result, and waits for the *tab* to get there.
+    ///
+    /// The wait is the point. The session is made by `new-session`, which insists on making a window
+    /// of its own, so between the two commands there is a real snapshot in which the session exists
+    /// and holds a stray shell — selecting on that one would put the placeholder on screen for a
+    /// moment and then leave the window selecting a window that has been killed.
+    func testMovingATabToANewSessionShowsItOnceTheTabIsThere() {
+        let source = TmuxSession(
+            id: "$1", name: "work",
+            windows: [window("@1", panes: ["%1"]), window("@2", name: "two", panes: ["%2"])],
+            isAttached: true
+        )
+        let model = makeModel()
+        model.hosts = [host(sessions: [source])]
+        let state = WindowState()
+        model.registerWindow(state)
+        model.select(in: state, host: "local", session: "$1", window: "@1")
+
+        model.moveWindowToNewSession(hostId: "local", windowId: "@2", from: "$1", revealIn: state)
+
+        // The session has arrived; the window has not. tmux's placeholder is what is in it.
+        var shrunk = source
+        shrunk.windows.removeAll { $0.id == "@2" }
+        publish(model, [host(sessions: [
+            shrunk,
+            TmuxSession(
+                id: "$2", name: "tetmux_1",
+                windows: [window("@3", name: "tetmux-new-session", panes: ["%3"])], isAttached: false
+            ),
+        ])])
+        XCTAssertEqual(state.selectedSessionId, "$1", "selected a session holding only the placeholder")
+
+        publish(model, [host(sessions: [
+            shrunk,
+            TmuxSession(
+                id: "$2", name: "tetmux_1",
+                windows: [window("@2", name: "two", panes: ["%2"])], isAttached: false
+            ),
+        ])])
+        XCTAssertEqual(state.selectedSessionId, "$2")
+        XCTAssertEqual(state.selectedWindowId, "@2", "showed the session but not the tab that was moved")
+        XCTAssertTrue(
+            model.takeSessionExpansion(hostId: "local", sessionId: "$2"),
+            "the tree should open the session the tab was moved into"
+        )
+    }
+
     // MARK: - The Dock menu
     //
     // The Dock is the app's only surface while it has no window and is not frontmost, and it used to

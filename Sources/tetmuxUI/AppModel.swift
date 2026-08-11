@@ -1413,6 +1413,39 @@ public final class AppModel {
         Task { await service.moveWindow(hostId: hostId, windowId: windowId, fromSession: from, toSession: to) }
     }
 
+    /// Moves a window into a session made for it, named the way New Session names one.
+    ///
+    /// The item that makes "Move to Session" worth opening on a host with one session, which is when
+    /// wanting a second one is most likely — until now the submenu was absent there, so the only way
+    /// to put a tab in a session of its own was to make the session, find it, and move the tab in a
+    /// second gesture.
+    ///
+    /// No name prompt, for the reason New Session has none (F4.11): a modal between wanting this and
+    /// having it is worse than a name that is one double-click away in the tree. And unlike the moves
+    /// beside it, this one *shows* the result — the destination is a session that did not exist a
+    /// moment ago and is nowhere on screen, so a tab that simply vanished from the strip would be the
+    /// whole of the feedback. The reveal names the window as well as the session, which is what makes
+    /// it wait for the move to land rather than for the session to appear with tmux's placeholder
+    /// still in it.
+    public func moveWindowToNewSession(
+        hostId: String, windowId: String, from sessionId: String, revealIn state: WindowState? = nil
+    ) {
+        let name = defaultSessionName(hostId: hostId)
+        let startDirectory = hosts.first { $0.id == hostId }?.config.startDirectory
+        if let state = state ?? activeWindowState {
+            pendingReveals.append(RevealRequest(
+                state: state, opensNewWindow: false, hostId: hostId, sessionName: name,
+                sessionId: nil, knownWindowIds: [], windowId: windowId, madeAt: .now
+            ))
+        }
+        Task {
+            await service.moveWindowToNewSession(
+                hostId: hostId, windowId: windowId, fromSession: sessionId,
+                name: name, startDirectory: startDirectory
+            )
+        }
+    }
+
     /// Links a window into a second session, leaving it in this one.
     ///
     /// The inverse of the unlink behind ⇧⌘W (F4.9), and what makes that path reachable: a window
@@ -1535,6 +1568,11 @@ public final class AppModel {
         let sessionId: String?
         /// The windows that existed when we asked, so the new one can be told from its siblings.
         let knownWindowIds: Set<String>
+        /// A window whose id we already know — a *move*, where tmux allocated nothing and the window
+        /// kept the id it always had. It is also what makes the request wait for the move rather than
+        /// for the session: a session that exists but does not hold this window yet is not resolved,
+        /// which is exactly the moment the placeholder window is still in it.
+        var windowId: String? = nil
         let madeAt: Date
     }
 
@@ -1584,7 +1622,8 @@ public final class AppModel {
             let window: TmuxWindow?
             if let name = request.sessionName {
                 session = host.sessions.first { $0.name == name }
-                window = session?.activeWindow ?? session?.windows.first
+                window = request.windowId.map { id in session?.windows.first { $0.id == id } }
+                    ?? (session?.activeWindow ?? session?.windows.first)
             } else if let sessionId = request.sessionId {
                 session = host.sessions.first { $0.id == sessionId }
                 // The one that was not there before, rather than whichever tmux made active — a

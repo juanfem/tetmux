@@ -785,6 +785,23 @@ Keep it that way — it is the only reason the protocol layer is testable agains
   refresh re-reads the list as well), plus one more read on the way to raising the sheet — which the
   sheet picks up because it reads the model rather than a snapshot. `client_user` is empty below 3.3
   and the row keeps its tty.
+- **Moving a tab into a session that does not exist takes three commands, and the third one is the
+  dangerous one.** tmux has no command for it: `move-window -t <unknown>:` is `can't find session`
+  on every version, and `new-session` cannot be handed an existing window. So
+  `SessionService.moveWindowToNewSession` sends `new-session -d -s <name> -n tetmux-new-session`,
+  then the `move-window`, then a `kill-window` of the placeholder **by that name** — never
+  `kill-window -a` (everything *except* the target), which is the tidier-looking command and
+  destroys the user's other tabs on the one occasion the move did not land. They go out blind and in
+  order on the one channel, because control mode answers `new-session` with no id and waiting for a
+  topology refresh would leave the tab in limbo; a failed move leaves the placeholder as the
+  session's only window, so killing it takes the empty session with it and nothing is left behind.
+  The `new-session` deliberately has no `-A`: a name that is somehow taken must be a refusal rather
+  than an attach, or the kill lands in a session somebody is using. The kill alone is `.ignore` —
+  §7 would otherwise put a second banner in front of somebody already reading why the move failed.
+  Unlike the moves beside it in the menu this one *reveals* its destination, and the reveal names
+  the **window** as well as the session (`RevealRequest.windowId`): a session that exists but still
+  holds only the placeholder is a real snapshot, and selecting on it shows a stray shell and then a
+  window that has been killed.
 - **A linked window says so, because the link is what decides whether closing it is reversible.**
   `AppModel.closeOutcome` is the single decision and both the action and the tooltips ask it, so a
   control cannot promise something the click will not do. That matters most with ⌥ held, which skips

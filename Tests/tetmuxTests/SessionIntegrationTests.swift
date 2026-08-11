@@ -2404,6 +2404,105 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// Moving a tab into a session that does not exist yet: the window arrives, alone, and the
+    /// window tmux made to hold the session up is gone.
+    ///
+    /// Three commands with no round trip between them, so what this asserts is that they land in
+    /// order and that the placeholder is really killed — a session left holding a stray shell beside
+    /// the moved tab is the failure, and it is one nothing else would notice. The moved window is
+    /// identified by id, which survives a move: `move-window` relocates the window rather than
+    /// making one.
+    func testMovingATabToANewSessionLeavesItAloneThere() async throws {
+        let created = "\(sessionName)-broken-out"
+        defer { runTmux(["kill-session", "-t", created]) }
+        runTmux(["new-session", "-d", "-s", sessionName, "-n", "one"])
+        runTmux(["new-window", "-t", sessionName, "-n", "two"])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let attached = sessionName
+        let host = try await waitForHost(service) {
+            ($0.sessions.first { $0.name == attached }?.windows.count ?? 0) == 2
+        }
+        let session = try XCTUnwrap(host.sessions.first { $0.name == attached })
+        let moved = try XCTUnwrap(session.windows.first { $0.name == "two" }?.id)
+        let paneId = try XCTUnwrap(session.windows.first { $0.name == "two" }?.preferredPaneId)
+        let pid = try XCTUnwrap(
+            tmuxQuery(["display-message", "-p", "-t", paneId, "#{pane_pid}"]),
+            "could not read the pane's pid"
+        )
+
+        await service.moveWindowToNewSession(
+            hostId: "local", windowId: moved, fromSession: session.id, name: created
+        )
+
+        // The window is in the new session and it is the *only* thing there — the placeholder
+        // `new-session` had to create is what the second half of that is about.
+        let arrived = try await waitFor(seconds: 15) {
+            guard let host = await service.getHost("local"),
+                  let session = host.sessions.first(where: { $0.name == created })
+            else { return false }
+            return session.windows.map(\.id) == [moved]
+        }
+        let finalHost = await service.getHost("local")
+        let names = finalHost?.sessions.first { $0.name == created }?.windows.map(\.name) ?? []
+        XCTAssertTrue(arrived, "the new session holds \(names) rather than the moved tab alone")
+
+        // Nothing was recreated on the way: the same process is still behind the pane, and the
+        // window has left the session it came from.
+        XCTAssertEqual(
+            tmuxQuery(["display-message", "-p", "-t", paneId, "#{pane_pid}"]), pid,
+            "the move restarted what was running in the tab"
+        )
+        XCTAssertFalse(
+            sessionContainsWindow(moved, session: attached),
+            "the window is still listed in the session it was moved out of"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// The failure the sequence has to survive: the move does not happen, and the placeholder is
+    /// killed anyway. Nothing may be left behind — killing a session's only window destroys the
+    /// session — and above all nothing of the user's may be killed, which is what
+    /// `kill-window -a` (everything *except* the target) would have done here.
+    func testAMoveToANewSessionThatFailsLeavesNothingBehind() async throws {
+        let created = "\(sessionName)-doomed"
+        defer { runTmux(["kill-session", "-t", created]) }
+        runTmux(["new-session", "-d", "-s", sessionName, "-n", "one"])
+        runTmux(["new-window", "-t", sessionName, "-n", "two"])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let attached = sessionName
+        _ = try await waitForHost(service) {
+            ($0.sessions.first { $0.name == attached }?.windows.count ?? 0) == 2
+        }
+
+        // A window id nothing answers to, so the `move-window` in the middle is an `%error` and the
+        // `kill-window` after it runs regardless — commands are pipelined, and nothing conditions
+        // one on the last.
+        await service.moveWindowToNewSession(
+            hostId: "local", windowId: "@99999", fromSession: "$99999", name: created
+        )
+
+        let settled = try await waitFor(seconds: 10) {
+            let host = await service.getHost("local")
+            return host?.sessions.contains { $0.name == created } == false
+                && (host?.sessions.first { $0.name == attached }?.windows.count ?? 0) == 2
+        }
+        let finalHost = await service.getHost("local")
+        XCTAssertTrue(
+            settled,
+            "sessions: \(finalHost?.sessions.map(\.name) ?? []), tabs: "
+                + "\(finalHost?.sessions.first { $0.name == attached }?.windows.map(\.name) ?? [])"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     /// Dragging a tab reorders the session's windows, and the order the strip shows is the order
     /// `list-windows` reports — so this is the assertion the whole feature reduces to.
     ///

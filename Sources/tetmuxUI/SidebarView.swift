@@ -752,7 +752,8 @@ struct SidebarView: View {
             // command that exists on one and not the other is the kind of gap that makes a tree feel
             // unrelated to the content beside it.
             WindowSessionMenus(
-                model: model, hostId: host.id, sessionId: session.id, windowId: window.id
+                model: model, hostId: host.id, sessionId: session.id, windowId: window.id,
+                revealIn: state
             )
             Divider()
             Button("Close Tab…", role: .destructive) {

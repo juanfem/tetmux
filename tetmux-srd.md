@@ -409,6 +409,12 @@ re-read `list-clients` as the fallback).
   of adjacent `swap-window`s below; both address windows by `@id`, never by index — a session's
   indices are arbitrary and often not contiguous — and the source of a move carries its session,
   because a linked window is reachable by id from any of them.
+  *(Amended:)* a tab can also be moved into **a session that does not exist yet** — first item of
+  Move to Session, wherever a window is listed. tmux has no single command for it, so it is
+  `new-session -d` with a named placeholder window, `move-window` into it, and a `kill-window` of
+  the placeholder **by that name**; a move that fails therefore leaves an empty session tmux
+  destroys, and nothing of the user's is ever the kill's target. The new session is named the way
+  New Session names one, and is shown once the tab is in it.
 - **F4.7** Splits mirror the tmux pane layout exactly, including nesting and dimensions,
   reconstructed from the layout string. A zoomed window renders the **visible** layout while
   membership and labels come from the full one; zoom state arrives in `%layout-change` flags, and
