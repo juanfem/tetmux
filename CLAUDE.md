@@ -461,6 +461,21 @@ screen Y. `fixedSize` is right everywhere it is currently used — those are all
 erases structural identity, so without an explicit id SwiftUI rebuilds every `NSView` on each update
 and discards the terminal's contents.
 
+**…and the id is not enough on its own: every pane is a row of *one* `ForEach`, positioned by frame
+and offset, never nested one view per split.** SwiftUI identity is structural, so a view keyed `%3`
+inside a container of two children is a different view from one keyed `%3` at the top of the tree —
+which means the obvious rendering, a view per layout node, rebuilt the *surviving* panes' `NSView`s
+on every split and every close, `.id` and all. What that costs is invisible where it happens: the
+new view starts with an empty grid, so the pane's scrollback goes, and the repaint it asks for races
+whatever the program is drawing at that instant. **Closing a split left a full-screen program (Claude
+Code was the report) drawn at the old width until the macOS window was resized** — tmux had resized
+the pane and sent `SIGWINCH`, the program had redrawn, and the redraw went into a view being torn
+down; the survivor kept the grid it had at half the width. Flat, a layout change moves frames and
+nothing else, and `TerminalContainerView.geometry` walks the tree once for both the pane placements
+and the divider specs, because those two have to agree to the point. `PaneIdentityTests` drives an
+`NSHostingView` through a split and a close and asserts the same `TerminalView` object comes out,
+which is the only way to see this: nothing about the arithmetic was ever wrong.
+
 **Every tmux window of the session is built; unselected ones are hidden with `.opacity(0)`, never
 omitted with `if` — and everything that follows focus has to be keyed on selection by hand.** A
 hidden tab's pane surfaces are real `NSView`s in the hierarchy, and a transparent view is still able

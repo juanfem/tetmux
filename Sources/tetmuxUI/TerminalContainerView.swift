@@ -143,13 +143,34 @@ public struct TerminalContainerView: View {
         // `renderTree`, not `layoutTree`: while a pane is zoomed those differ, and tmux is emitting
         // output sized to the visible one.
         if let tree = window.renderTree {
-            node(tree, size: size)
-                // Every divider in one layer above the whole tree, rather than each inside the
-                // container it belongs to. Nesting them put a handle underneath the pane surfaces of
-                // its *sibling* subtree — the outermost split was draggable and the nested one was
-                // not, silently. One overlay makes the z-order a single fact instead of a per-branch
-                // accident.
-                .overlay(alignment: .topLeading) { dividerOverlay(tree, size: size) }
+            let placed = geometry(tree, origin: .zero, size: size, path: "")
+            // Every pane in **one** `ForEach` keyed by pane id, positioned by frame and offset —
+            // never nested inside a view per split, however naturally the tree suggests it.
+            //
+            // SwiftUI identity is structural: a view keyed `%3` sitting inside a container of two
+            // children is a *different* view from one keyed `%3` at the top level, so a split or a
+            // close rebuilt the surviving panes' `NSView`s even though `.id(paneId)` was on them the
+            // whole time. That is the same identity failure the `.id` exists to prevent, and it cost
+            // more: a rebuilt view starts with an empty grid, so the pane's scrollback went and its
+            // repaint raced the redraw the program was doing at that instant. Closing a split left
+            // a full-screen program (Claude Code is the reported case) drawn at the *old* width
+            // until something resized the window — the SIGWINCH repaint had gone into a view being
+            // torn down. Flat, a layout change moves frames and nothing else.
+            //
+            // The dividers are collected the same way and for a related reason: nested, a handle sat
+            // underneath the pane surfaces of its sibling subtree, so the outer split dragged and the
+            // inner one silently did not.
+            ZStack(alignment: .topLeading) {
+                ForEach(placed.panes) { placement in
+                    pane(placement.paneId, cols: placement.cols, rows: placement.rows)
+                        .frame(width: placement.rect.width, height: placement.rect.height)
+                        .offset(x: placement.rect.minX, y: placement.rect.minY)
+                }
+            }
+            .frame(width: size.width, height: size.height, alignment: .topLeading)
+            // The seam colour, showing through the one point between panes.
+            .background(Color(nsColor: .separatorColor))
+            .overlay(alignment: .topLeading) { dividerOverlay(placed.dividers, size: size) }
         } else if let paneId = window.preferredPaneId {
             // Layout has not arrived yet — show the active pane full-bleed rather than nothing.
             pane(paneId, cols: 80, rows: 24)
@@ -164,39 +185,13 @@ public struct TerminalContainerView: View {
         }
     }
 
-    /// Lays a layout node into `size`, splitting proportionally by the cell dimensions tmux chose
-    /// (F4.7), so a 70/30 split on the server is a 70/30 split on screen.
-    private func node(_ node: LayoutNode, size: CGSize) -> AnyView {
-        switch node {
-        case .leaf(let paneId, let cols, let rows, _, _):
-            return AnyView(pane(paneId, cols: cols, rows: rows))
-
-        case .container(let direction, _, _, _, _, let children):
-            let isRow = direction == .leftRight
-            let dividers = dividerWidth * CGFloat(max(children.count - 1, 0))
-            let available = max((isRow ? size.width : size.height) - dividers, 1)
-            let weights = children.map { isRow ? $0.width : $0.height }
-            let extents = Self.distribute(available, among: weights)
-
-            let stack = ZStack(alignment: .topLeading) {
-                ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                    let extent = extents[index]
-                    let offset = extents[..<index].reduce(0, +) + dividerWidth * CGFloat(index)
-                    let childSize = isRow
-                        ? CGSize(width: extent, height: size.height)
-                        : CGSize(width: size.width, height: extent)
-
-                    self.node(child, size: childSize)
-                        .frame(width: childSize.width, height: childSize.height, alignment: .topLeading)
-                        .offset(x: isRow ? offset : 0, y: isRow ? 0 : offset)
-                }
-
-            }
-            .frame(width: size.width, height: size.height, alignment: .topLeading)
-            .background(Color(nsColor: .separatorColor))
-
-            return AnyView(stack)
-        }
+    /// Where one pane goes, and the grid tmux gave it.
+    private struct PanePlacement: Identifiable {
+        let paneId: String
+        let cols: Int
+        let rows: Int
+        let rect: CGRect
+        var id: String { paneId }
     }
 
     /// One draggable boundary: where it is, which pane setting its size moves it, and from what.
@@ -208,37 +203,29 @@ public struct TerminalContainerView: View {
         let targetPaneId: String
     }
 
-    @ViewBuilder
-    private func dividerOverlay(_ tree: LayoutNode, size: CGSize) -> some View {
-        let cell = theme.cellSize(backingScaleFactor: backingScaleFactor)
-        ZStack(alignment: .topLeading) {
-            ForEach(dividers(tree, origin: .zero, size: size, path: "")) { spec in
-                PaneDivider(
-                    isRow: spec.isRow,
-                    baseCells: spec.baseCells,
-                    cellExtent: spec.isRow ? cell.width : cell.height
-                ) { cells in
-                    resize(paneId: spec.targetPaneId, isRow: spec.isRow, toCells: cells)
-                }
-                .frame(width: spec.rect.width, height: spec.rect.height)
-                .offset(x: spec.rect.minX, y: spec.rect.minY)
-            }
-        }
-        .frame(width: size.width, height: size.height, alignment: .topLeading)
-    }
-
-    /// Walks the layout with exactly the arithmetic `node(_:size:)` uses, so the handles land on the
-    /// seams rather than near them.
-    private func dividers(
+    /// Walks the layout once and answers where everything in it belongs.
+    ///
+    /// Splits proportionally by the cell counts tmux chose (F4.7), so a 70/30 split on the server is
+    /// a 70/30 split on screen. One walk for both answers deliberately: the panes and the handles
+    /// between them have to agree to the point, and this arithmetic was written out twice before —
+    /// a seam that misses the boundary it belongs to is a drag that starts by jumping.
+    private func geometry(
         _ node: LayoutNode, origin: CGPoint, size: CGSize, path: String
-    ) -> [DividerSpec] {
-        guard case .container(let direction, _, _, _, _, let children) = node else { return [] }
+    ) -> (panes: [PanePlacement], dividers: [DividerSpec]) {
+        guard case .container(let direction, _, _, _, _, let children) = node else {
+            guard case .leaf(let paneId, let cols, let rows, _, _) = node else { return ([], []) }
+            return ([PanePlacement(
+                paneId: paneId, cols: cols, rows: rows, rect: CGRect(origin: origin, size: size)
+            )], [])
+        }
+
         let isRow = direction == .leftRight
         let gaps = dividerWidth * CGFloat(max(children.count - 1, 0))
         let available = max((isRow ? size.width : size.height) - gaps, 1)
         let weights = children.map { isRow ? $0.width : $0.height }
         let extents = Self.distribute(available, among: weights)
 
+        var panes: [PanePlacement] = []
         var specs: [DividerSpec] = []
         for (index, child) in children.enumerated() {
             let offset = extents[..<index].reduce(0, +) + dividerWidth * CGFloat(index)
@@ -248,7 +235,9 @@ public struct TerminalContainerView: View {
             let childSize = isRow
                 ? CGSize(width: extents[index], height: size.height)
                 : CGSize(width: size.width, height: extents[index])
-            specs += dividers(child, origin: childOrigin, size: childSize, path: "\(path).\(index)")
+            let inside = geometry(child, origin: childOrigin, size: childSize, path: "\(path).\(index)")
+            panes += inside.panes
+            specs += inside.dividers
 
             // The boundary *before* this child, owned by the child ahead of it.
             guard index > 0, let paneId = children[index - 1].paneIds.first else { continue }
@@ -273,7 +262,26 @@ public struct TerminalContainerView: View {
                 baseCells: weights[index - 1], targetPaneId: paneId
             ))
         }
-        return specs
+        return (panes, specs)
+    }
+
+    @ViewBuilder
+    private func dividerOverlay(_ specs: [DividerSpec], size: CGSize) -> some View {
+        let cell = theme.cellSize(backingScaleFactor: backingScaleFactor)
+        ZStack(alignment: .topLeading) {
+            ForEach(specs) { spec in
+                PaneDivider(
+                    isRow: spec.isRow,
+                    baseCells: spec.baseCells,
+                    cellExtent: spec.isRow ? cell.width : cell.height
+                ) { cells in
+                    resize(paneId: spec.targetPaneId, isRow: spec.isRow, toCells: cells)
+                }
+                .frame(width: spec.rect.width, height: spec.rect.height)
+                .offset(x: spec.rect.minX, y: spec.rect.minY)
+            }
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 
     /// Asks tmux to make `child` `cells` wide or tall.

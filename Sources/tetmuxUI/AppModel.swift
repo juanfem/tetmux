@@ -505,6 +505,7 @@ public final class AppModel {
         hosts = snapshot
         respondToAuthenticationPrompts(in: snapshot)
         resolveReveals()
+        resolvePaneFocus()
         // Restoration is resolved here rather than only in each window's `onChange`, because a
         // window's session becoming attachable and the window learning about it have to happen in
         // that order: `syncDisplayedSessions` below reads the selections, and a SwiftUI `onChange` is
@@ -1027,11 +1028,83 @@ public final class AppModel {
         Task { await service.newWindow(hostId: hostId, sessionId: sessionId) }
     }
 
+    /// Splits the focused pane, and focuses what comes back.
+    ///
+    /// The pane tmux makes is the one the user is about to type in — tmux itself makes it the window's
+    /// active pane, and every other client follows that. tetmux did not: `focusedPaneId` still named
+    /// the pane that was split, so the keyboard stayed behind and the frame marked the wrong half.
+    ///
+    /// Recorded rather than set, for the reason creating anything is (`RevealRequest`): control mode
+    /// answers `split-window` with no id, so the new pane is not nameable until the layout comes back
+    /// a round trip later. The panes that existed at the moment of asking are what tell it apart when
+    /// it does.
     public func split(leftRight: Bool) {
         let scope = activeScope
         guard let hostId = scope.hostId,
               let paneId = scope.paneId ?? window(in: scope)?.preferredPaneId else { return }
+        if let state = activeWindowState, let window = window(in: scope) {
+            pendingPaneFocus.append(PaneFocusRequest(
+                state: state, hostId: hostId, windowId: window.id,
+                knownPaneIds: Self.paneIds(of: window), madeAt: .now
+            ))
+        }
         Task { await service.splitPane(hostId: hostId, paneId: paneId, leftRight: leftRight) }
+    }
+
+    /// Both records of what a window holds, together.
+    ///
+    /// The layout tree is updated by `%layout-change` and `panes` by the `list-panes` that follows it,
+    /// so at the instant a split lands one of them has already grown and the other has not. A pane in
+    /// either is a pane that was already there.
+    static func paneIds(of window: TmuxWindow) -> Set<String> {
+        Set(window.panes.map(\.id)).union(window.layoutTree?.paneIds ?? [])
+    }
+
+    /// A split waiting on the pane it asked for.
+    private struct PaneFocusRequest {
+        /// Weak, like `RevealRequest`'s: a window that has closed has nothing to focus.
+        weak var state: WindowState?
+        let hostId: String
+        let windowId: String
+        let knownPaneIds: Set<String>
+        let madeAt: Date
+    }
+
+    @ObservationIgnored private var pendingPaneFocus: [PaneFocusRequest] = []
+
+    private func resolvePaneFocus() {
+        guard !pendingPaneFocus.isEmpty else { return }
+        var unresolved: [PaneFocusRequest] = []
+
+        for request in pendingPaneFocus {
+            guard let state = request.state else { continue }
+            guard let window = hosts.first(where: { $0.id == request.hostId })?
+                .sessions.lazy.compactMap({ $0.windows.first { $0.id == request.windowId } }).first
+            else {
+                unresolved.append(request)
+                continue
+            }
+            // The window the split was asked for is not the one on screen any more — a tab switch
+            // clears `focusedPaneId` precisely because it named a pane in the tab being left, and
+            // putting one back would hand the keyboard to a pane nobody can see.
+            guard state.selectedWindowId == request.windowId else { continue }
+
+            let arrived = Self.paneIds(of: window).subtracting(request.knownPaneIds)
+            guard !arrived.isEmpty else {
+                unresolved.append(request)
+                continue
+            }
+            // tmux makes the pane it created active, so that is the one to prefer — `arrived` can
+            // hold more than one when a second client split the same window in the meantime, and
+            // then the active one is still the better guess than an arbitrary member of a set.
+            let focus = window.activePaneId.flatMap { arrived.contains($0) ? $0 : nil }
+                ?? arrived.sorted().first
+            state.focusedPaneId = focus
+        }
+
+        // The same 15 seconds every other pending intent gets: a request kept indefinitely would
+        // eventually match a pane somebody else opened and move the keyboard for no reason.
+        pendingPaneFocus = unresolved.filter { Date().timeIntervalSince($0.madeAt) < 15 }
     }
 
     /// F4.10 — the confirmation names the window, its pane count, and what is running in it.

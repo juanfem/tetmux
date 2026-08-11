@@ -790,6 +790,78 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    // MARK: - Splitting a pane
+
+    /// A window with two panes and a model focused on it, for the split tests below.
+    private func splitScope(_ model: AppModel) -> WindowState {
+        var window = TmuxWindow(id: "@1", name: "shell")
+        window.panes = [TmuxPane(id: "%1", command: "zsh")]
+        window.activePaneId = "%1"
+        model.hosts = [host(sessions: [
+            TmuxSession(id: "$1", name: "work", windows: [window], isAttached: true),
+        ])]
+        let state = WindowState()
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+        state.selectedWindowId = "@1"
+        state.focusedPaneId = "%1"
+        model.registerWindow(state)
+        model.focus(state)
+        return state
+    }
+
+    /// A pane that appears with two panes already in it, as tmux reports one after a split.
+    private func windowWithPanes(_ ids: [String], active: String) -> HostState {
+        var window = TmuxWindow(id: "@1", name: "shell")
+        window.panes = ids.map { TmuxPane(id: $0, command: "zsh") }
+        window.activePaneId = active
+        return host(sessions: [
+            TmuxSession(id: "$1", name: "work", windows: [window], isAttached: true),
+        ])
+    }
+
+    /// The new pane is the one the user is about to type in, and tmux makes it active itself — every
+    /// other client follows. tetmux kept the keyboard on the pane that was split, so the frame marked
+    /// one half and the typing went to the other.
+    func testSplittingFocusesThePaneThatComesBack() {
+        let model = makeModel()
+        let state = splitScope(model)
+
+        model.split(leftRight: true)
+        XCTAssertEqual(state.focusedPaneId, "%1", "nothing exists to focus until tmux answers")
+
+        model.applyForTesting([windowWithPanes(["%1", "%2"], active: "%2")])
+        XCTAssertEqual(state.focusedPaneId, "%2")
+    }
+
+    /// Identified by not having been there before, not by whichever pane tmux calls active — the same
+    /// rule a new *window* gets, and for the same reason: another client can move the active pane
+    /// between the ask and the answer.
+    func testTheFocusedPaneIsTheOneThatWasNotThereBefore() {
+        let model = makeModel()
+        let state = splitScope(model)
+
+        model.split(leftRight: false)
+        // tmux made some other pane active in the meantime — but only `%2` is new.
+        model.applyForTesting([windowWithPanes(["%1", "%2"], active: "%1")])
+
+        XCTAssertEqual(state.focusedPaneId, "%2")
+    }
+
+    /// A split answered after the user has moved on must not take the keyboard back. `focusedPaneId`
+    /// is per macOS window and is cleared by a tab switch precisely because it named a pane in the tab
+    /// being left; putting one back would hand the keyboard to a pane nobody can see.
+    func testASplitAnsweredAfterATabSwitchIsDropped() {
+        let model = makeModel()
+        let state = splitScope(model)
+
+        model.split(leftRight: true)
+        state.selectedWindowId = "@2"
+
+        model.applyForTesting([windowWithPanes(["%1", "%2"], active: "%2")])
+        XCTAssertNil(state.focusedPaneId, "the tab switch cleared it and the split put it back")
+    }
+
     // MARK: - The Dock menu
     //
     // The Dock is the app's only surface while it has no window and is not frontmost, and it used to

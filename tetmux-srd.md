@@ -422,6 +422,13 @@ re-read `list-clients` as the fallback).
   visible layout and flags too.
 - **F4.8** GUI split/close operations translate to tmux commands and apply only when tmux
   confirms. Dragging a divider issues `resize-pane -x/-y`.
+  *(Amended:)* a split **focuses the pane it creates** — tmux makes it the window's active pane and
+  every other client follows, so keeping the keyboard on the pane that was split marked one half and
+  typed into the other. Recorded and satisfied on the next topology snapshot, like every other
+  create-and-show: control mode answers `split-window` with no id. And a pane surface **survives a
+  change in the shape of the layout**, not only in its numbers — panes are one flat, id-keyed list
+  rather than a view per split, or closing a split rebuilds the survivor and loses both its
+  scrollback and the redraw the program is making at that moment.
 - **F4.9** Closing a tab detaches or unlinks — it never kills. Where tmux makes that impossible it
   must say so rather than do the other thing: a window linked to a single session cannot be
   removed without being destroyed (`unlink-window` refuses it outright), so that case is the one
