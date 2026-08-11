@@ -343,13 +343,26 @@ defaulted parameter for the same reason `AppModel` takes a directory: `.general`
 clipboard, and a test asserting what was copied would take whatever they were carrying.
 
 **⌥ held on either control asks the same question from a shell already on the host**
-(`reachingHost: false`), which is the common case for anybody keeping a terminal open there. It
+(`fromShellOnHost: true`), which is the common case for anybody keeping a terminal open there. It
 takes off everything about *arriving* — the ssh line, and the `customCommand` wrapper too, since a
 wrapper is a way of getting there rather than a way of attaching — leaving the local form. That
 makes it a parameter on `attachCommandLine` rather than a trim applied above it: what counts as
 reaching the host is that function's to know, and a wrapped host has no `ssh` in its line to
 remove. Nothing offers the modifier on the local host, where the two lines are identical — a
 modifier advertised where it does nothing is one nobody trusts anywhere.
+
+**The flag is named for where the shell is, not for the route, so that its polarity is ⌥'s.** It
+was `reachingHost` — true when ⌥ was *not* held — for five days, and every site reading the live
+flag wrote `reachingHost: !OptionKey.isHeld`. That `!` was the whole correctness of the call, and
+its absence reads perfectly plausibly: a later site writing `reachingHost: OptionKey.isHeld` to
+"pass the modifier through" inverts the feature in silence. Nothing downstream could have caught
+it — both strings are valid shell, and the UI call sites have no test, so an unmodified click would
+simply have started copying the short line and the blame would have landed on the host config.
+Renamed on 2026-08-11 with no behaviour change: the two live-flag sites now read
+`fromShellOnHost: OptionKey.isHeld`, the menu's alternate items still name their own value as a
+literal, and `attachCommandDependsOnReachingHost` became
+`attachCommandDependsOnShellLocation`. **A Bool a modifier key supplies is named so the modifier
+passes through unnegated** — the general rule this bought.
 
 **⌥ and not ⌘, which is what this shipped as for a day.** ⌥ is macOS's variant modifier and ⌘ is its
 *invoking* one — the key that turns a keystroke into a command, not the key that asks for another
@@ -375,7 +388,7 @@ the tracking notifications and the content is built before tracking begins, so t
 before the right-click still read as not held. AppKit swaps the two items itself while the menu tracks —
 verified working against the running app the same day, and the swap carries the item's tooltip
 with it, because the alternate is a different `NSMenuItem` with a `.help` of its own — and each
-item's action names its own `reachingHost` outright, so the words and the click cannot disagree
+item's action names its own `fromShellOnHost` outright, so the words and the click cannot disagree
 and nothing reads the live flags at click time; macOS 14, which has no alternate items
 from SwiftUI, keeps flags-at-click behind a title that promises only the unmodified line. The
 toolbar's tooltip names **both** lines in one modifier-independent sentence, because an AppKit

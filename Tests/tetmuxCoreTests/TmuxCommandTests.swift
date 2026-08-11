@@ -727,12 +727,12 @@ final class TmuxCommandTests: XCTestCase {
             extraSshArguments: "-o \"ProxyJump=bastion\""
         )
         XCTAssertEqual(
-            TmuxCommand.attachCommandLine(host: remote, sessionName: "work", reachingHost: false),
+            TmuxCommand.attachCommandLine(host: remote, sessionName: "work", fromShellOnHost: true),
             "tmux attach -t work"
         )
         let wrapped = HostConfig(id: "w", name: "container", customCommand: "docker exec -it dev sh -c")
         XCTAssertEqual(
-            TmuxCommand.attachCommandLine(host: wrapped, sessionName: "work", reachingHost: false),
+            TmuxCommand.attachCommandLine(host: wrapped, sessionName: "work", fromShellOnHost: true),
             "tmux attach -t work"
         )
     }
@@ -742,7 +742,7 @@ final class TmuxCommandTests: XCTestCase {
     func testTheLocalCommandReadsTheSameEitherWay() {
         let local = HostConfig(id: "local", name: "local", isLocal: true)
         XCTAssertEqual(
-            TmuxCommand.attachCommandLine(host: local, sessionName: "work", reachingHost: false),
+            TmuxCommand.attachCommandLine(host: local, sessionName: "work", fromShellOnHost: true),
             TmuxCommand.attachCommandLine(host: local, sessionName: "work")
         )
     }
@@ -751,11 +751,11 @@ final class TmuxCommandTests: XCTestCase {
     /// accessibility label. Pinned here so a surface cannot re-derive it and drift.
     func testTheModifierIsAdvertisedExactlyWhereItChangesTheLine() {
         let local = HostConfig(id: "local", name: "local", isLocal: true)
-        XCTAssertFalse(TmuxCommand.attachCommandDependsOnReachingHost(host: local))
+        XCTAssertFalse(TmuxCommand.attachCommandDependsOnShellLocation(host: local))
         let remote = HostConfig(id: "r", name: "devbox")
-        XCTAssertTrue(TmuxCommand.attachCommandDependsOnReachingHost(host: remote))
+        XCTAssertTrue(TmuxCommand.attachCommandDependsOnShellLocation(host: remote))
         let wrapped = HostConfig(id: "w", name: "container", customCommand: "docker exec -it dev sh -c")
-        XCTAssertTrue(TmuxCommand.attachCommandDependsOnReachingHost(host: wrapped))
+        XCTAssertTrue(TmuxCommand.attachCommandDependsOnShellLocation(host: wrapped))
     }
 
     /// Dropping the ssh half drops one layer of shell parsing with it, and the name is still user
@@ -764,12 +764,12 @@ final class TmuxCommandTests: XCTestCase {
         let remote = HostConfig(id: "r", name: "devbox")
         XCTAssertEqual(
             TmuxCommand.attachCommandLine(
-                host: remote, sessionName: "my session", reachingHost: false
+                host: remote, sessionName: "my session", fromShellOnHost: true
             ),
             "tmux attach -t 'my session'"
         )
         XCTAssertEqual(
-            TmuxCommand.attachCommandLine(host: remote, sessionName: "$(id)", reachingHost: false),
+            TmuxCommand.attachCommandLine(host: remote, sessionName: "$(id)", fromShellOnHost: true),
             "tmux attach -t '$(id)'"
         )
     }

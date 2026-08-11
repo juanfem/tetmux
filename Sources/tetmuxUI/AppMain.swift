@@ -726,12 +726,12 @@ private struct AttachCommandButton: View {
     var body: some View {
         Button {
             guard let host, let session else { return }
-            let reachingHost = !OptionKey.isHeld
+            let fromShellOnHost = OptionKey.isHeld
             guard let copied = model.attachCommand(
-                hostId: host.id, sessionName: session.name, reachingHost: reachingHost
+                hostId: host.id, sessionName: session.name, fromShellOnHost: fromShellOnHost
             ) else { return }
             model.copyAttachCommand(
-                hostId: host.id, sessionName: session.name, reachingHost: reachingHost
+                hostId: host.id, sessionName: session.name, fromShellOnHost: fromShellOnHost
             )
             copyConfirmation?.cancel()
             copyConfirmation = Task {
@@ -785,18 +785,20 @@ private struct AttachCommandButton: View {
     /// the two differ, which is the same gate the hint and the accessibility label ask.
     private var fullCommand: String? {
         guard let host, let session else { return nil }
-        return model.attachCommand(hostId: host.id, sessionName: session.name, reachingHost: true)
+        return model.attachCommand(hostId: host.id, sessionName: session.name)
     }
 
     private var hostLocalCommand: String? {
         guard commandChangesWithModifier, let host, let session else { return nil }
-        return model.attachCommand(hostId: host.id, sessionName: session.name, reachingHost: false)
+        return model.attachCommand(
+            hostId: host.id, sessionName: session.name, fromShellOnHost: true
+        )
     }
 
     /// The shared F4.36 gate, by this button's host — asked by the tooltip, the glyph and the
     /// accessibility label alike, so the three cannot drift about where ⌥ does something.
     private var commandChangesWithModifier: Bool {
-        host.map { model.attachCommandDependsOnReachingHost(hostId: $0.id) } == true
+        host.map { model.attachCommandDependsOnShellLocation(hostId: $0.id) } == true
     }
 }
 

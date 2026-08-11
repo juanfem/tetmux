@@ -453,19 +453,26 @@ public enum TmuxCommand {
     /// `-t` is not optional. tmux refuses to attach without a tty, and `ssh host tmux attach` — no
     /// tty, because a command was given — fails with `open terminal failed: not a terminal`.
     ///
-    /// - Parameter reachingHost: `false` answers the same question asked from the host itself — a
+    /// - Parameter fromShellOnHost: `true` answers the same question asked from the host itself — a
     ///   shell that is *already* there, which is the ordinary case for anyone who keeps a terminal
     ///   open on the box. Getting there is then not part of the answer, so everything above drops
     ///   out: the ssh line, and equally the wrapper a `customCommand` host is described by, since
     ///   both are ways of arriving rather than of attaching. What is left is the local form, which
     ///   is why a local host reads the same either way and has nothing to explain.
+    ///
+    ///   **Named for where the shell is, not for the route, so that it agrees with ⌥** — the
+    ///   modifier that supplies it at every call site. It was `reachingHost` until 2026-08-11, true
+    ///   when ⌥ was *not* held, so each site that read the live flag wrote `!OptionKey.isHeld`; that
+    ///   `!` is boilerplate whose absence reads perfectly plausibly ("pass the modifier through"),
+    ///   and dropping it inverts the feature in silence, since both lines are valid shell and
+    ///   nothing downstream can object. Keep any future flag driven by a modifier in this polarity.
     public static func attachCommandLine(
-        host: HostConfig, sessionName: String, reachingHost: Bool = true
+        host: HostConfig, sessionName: String, fromShellOnHost: Bool = false
     ) -> String {
         // `attach` rather than the `attach-session` every other line here uses: they are the same
         // command, and this one is read by a person rather than by tmux.
         let attach = "tmux attach -t \(shellWord(sessionName))"
-        if host.isLocal || !reachingHost { return attach }
+        if host.isLocal || fromShellOnHost { return attach }
         // A wrapper takes the remote command as its last argument, exactly as `invocation` hands it
         // one — so a host reached through a jump script is described by that script, rather than by
         // an ssh line that is not how this host is reached at all.
@@ -479,16 +486,16 @@ public enum TmuxCommand {
         return "\(line) \(shellWord(host.sshDestination)) \(shellWord(attach))"
     }
 
-    /// Whether `reachingHost` changes the line for this host at all — false for the local host,
-    /// where the answer is already the one typed on the box.
+    /// Whether where the shell sits changes the line for this host at all — false for the local
+    /// host, where the answer is already the one typed on the box.
     ///
     /// This is the gate for every control that *advertises* the ⌥ modifier — the tooltip hint, the
     /// menu title, the accessibility label — because a modifier advertised where it does nothing is
     /// one nobody trusts anywhere. Defined as the two lines differing, rather than re-derived from
     /// `isLocal` at each site, so the surfaces cannot drift from what `attachCommandLine` does.
-    public static func attachCommandDependsOnReachingHost(host: HostConfig) -> Bool {
-        attachCommandLine(host: host, sessionName: "s", reachingHost: true)
-            != attachCommandLine(host: host, sessionName: "s", reachingHost: false)
+    public static func attachCommandDependsOnShellLocation(host: HostConfig) -> Bool {
+        attachCommandLine(host: host, sessionName: "s")
+            != attachCommandLine(host: host, sessionName: "s", fromShellOnHost: true)
     }
 
     /// A value as one word of a shell command line, quoted only when it would not survive unquoted.

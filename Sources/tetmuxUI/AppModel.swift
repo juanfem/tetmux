@@ -837,26 +837,27 @@ public final class AppModel {
     /// want it: the session is on screen in the tree because a probe found it (F4.4), and reaching it
     /// from a shell needs no connection here at all.
     ///
-    /// - Parameter reachingHost: `false` is ⌥ on the control that asked — the same session as typed
-    ///   from a shell already on that host, with the ssh half of the line taken off. Passed down
-    ///   rather than trimmed here: what counts as reaching the host is `TmuxCommand`'s to know, and
-    ///   a wrapper host has no `ssh` in its line to remove.
+    /// - Parameter fromShellOnHost: `true` is ⌥ on the control that asked — the same session as
+    ///   typed from a shell already on that host, with the ssh half of the line taken off. It reads
+    ///   the modifier's own polarity so no call site carries a `!` (see `attachCommandLine`). Passed
+    ///   down rather than trimmed here: what counts as reaching the host is `TmuxCommand`'s to know,
+    ///   and a wrapper host has no `ssh` in its line to remove.
     public func attachCommand(
-        hostId: String, sessionName: String, reachingHost: Bool = true
+        hostId: String, sessionName: String, fromShellOnHost: Bool = false
     ) -> String? {
         guard let host = hosts.first(where: { $0.id == hostId }) else { return nil }
         return TmuxCommand.attachCommandLine(
-            host: host.config, sessionName: sessionName, reachingHost: reachingHost
+            host: host.config, sessionName: sessionName, fromShellOnHost: fromShellOnHost
         )
     }
 
-    /// `TmuxCommand.attachCommandDependsOnReachingHost` by host id — the one gate every control
+    /// `TmuxCommand.attachCommandDependsOnShellLocation` by host id — the one gate every control
     /// that advertises ⌥ asks, so the tooltip hint, the menu title and the accessibility label
     /// cannot disagree about where the modifier does something. False for a host that is gone,
     /// which is also a host with no line to modify.
-    public func attachCommandDependsOnReachingHost(hostId: String) -> Bool {
+    public func attachCommandDependsOnShellLocation(hostId: String) -> Bool {
         guard let host = hosts.first(where: { $0.id == hostId }) else { return false }
-        return TmuxCommand.attachCommandDependsOnReachingHost(host: host.config)
+        return TmuxCommand.attachCommandDependsOnShellLocation(host: host.config)
     }
 
     /// The same, on the pasteboard. `false` when there was nothing to copy, so a control can say so
@@ -867,11 +868,11 @@ public final class AppModel {
     /// on it. The default is what every caller uses.
     @discardableResult
     public func copyAttachCommand(
-        hostId: String, sessionName: String, reachingHost: Bool = true,
+        hostId: String, sessionName: String, fromShellOnHost: Bool = false,
         to pasteboard: NSPasteboard = .general
     ) -> Bool {
         let command = attachCommand(
-            hostId: hostId, sessionName: sessionName, reachingHost: reachingHost
+            hostId: hostId, sessionName: sessionName, fromShellOnHost: fromShellOnHost
         )
         guard let command else { return false }
         pasteboard.clearContents()

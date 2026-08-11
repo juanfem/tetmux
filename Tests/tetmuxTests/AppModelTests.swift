@@ -2398,12 +2398,12 @@ final class AppModelTests: XCTestCase {
             "ssh -t devbox 'tmux attach -t '\\''my work'\\'''"
         )
         XCTAssertTrue(model.copyAttachCommand(
-            hostId: "devbox", sessionName: "my work", reachingHost: false, to: pasteboard
+            hostId: "devbox", sessionName: "my work", fromShellOnHost: true, to: pasteboard
         ))
         XCTAssertEqual(pasteboard.string(forType: .string), "tmux attach -t 'my work'")
         XCTAssertEqual(
             pasteboard.string(forType: .string),
-            model.attachCommand(hostId: "devbox", sessionName: "my work", reachingHost: false)
+            model.attachCommand(hostId: "devbox", sessionName: "my work", fromShellOnHost: true)
         )
     }
 
@@ -2416,7 +2416,7 @@ final class AppModelTests: XCTestCase {
         pasteboard.setString("untouched", forType: .string)
 
         XCTAssertFalse(model.copyAttachCommand(
-            hostId: "gone", sessionName: "work", reachingHost: false, to: pasteboard
+            hostId: "gone", sessionName: "work", fromShellOnHost: true, to: pasteboard
         ))
         XCTAssertEqual(pasteboard.string(forType: .string), "untouched")
     }

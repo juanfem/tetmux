@@ -626,28 +626,30 @@ struct SidebarView: View {
     @ViewBuilder
     private func copyAttachCommandItem(host: HostState, session: TmuxSession) -> some View {
         let fullCommand =
-            model.attachCommand(hostId: host.id, sessionName: session.name, reachingHost: true) ?? ""
-        if #available(macOS 15.0, *), model.attachCommandDependsOnReachingHost(hostId: host.id) {
+            model.attachCommand(hostId: host.id, sessionName: session.name) ?? ""
+        if #available(macOS 15.0, *), model.attachCommandDependsOnShellLocation(hostId: host.id) {
             Button("Copy Attach Command") {
-                model.copyAttachCommand(hostId: host.id, sessionName: session.name, reachingHost: true)
+                model.copyAttachCommand(
+                    hostId: host.id, sessionName: session.name, fromShellOnHost: false
+                )
             }
             .help(fullCommand)
             .modifierKeyAlternate(.option) {
                 Button("Copy Attach Command Without ssh") {
                     model.copyAttachCommand(
-                        hostId: host.id, sessionName: session.name, reachingHost: false
+                        hostId: host.id, sessionName: session.name, fromShellOnHost: true
                     )
                 }
                 .help(
                     model.attachCommand(
-                        hostId: host.id, sessionName: session.name, reachingHost: false
+                        hostId: host.id, sessionName: session.name, fromShellOnHost: true
                     ) ?? ""
                 )
             }
         } else {
             Button("Copy Attach Command") {
                 model.copyAttachCommand(
-                    hostId: host.id, sessionName: session.name, reachingHost: !OptionKey.isHeld
+                    hostId: host.id, sessionName: session.name, fromShellOnHost: OptionKey.isHeld
                 )
             }
             .help(fullCommand)
