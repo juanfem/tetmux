@@ -44,6 +44,21 @@ the runner label, which an older Xcode on the image would satisfy while being wr
 stays 14.0 and `LSMinimumSystemVersion` stays honest. The test jobs stay a version behind
 deliberately — they assert behaviour, which is the half that does not vary with the SDK.
 
+**That version behind is a *compiler* version behind too, and it compiles this package more
+strictly than the machine it is written on.** `macos-15` carries Swift 6.1.2; a current dev machine
+is on 6.3. Actor-isolation diagnostics moved between them in the permissive direction, so the skew
+is one-way: **a green `swift test` locally does not mean the tree compiles on CI, while the reverse
+holds.** `91f0329` made a test delegate read `isAnsweringQuery` — main-actor state, because the
+property belongs to an `NSView` subclass — from a witness of `TerminalViewDelegate`, which is a
+plain protocol and so gives its witnesses no isolation. 6.3 accepts that and 6.1.2 rejects it, and
+the tree stayed red for four commits while every local run passed. The fix is a `@preconcurrency`
+conformance (SE-0423), which both toolchains accept: the witness may be `@MainActor` and the
+requirement stays nonisolated, with a runtime main-thread check that traps loudly instead of
+racing. **When a build failure is a concurrency-isolation error, check the two Swift versions before
+anything else** — and read a red CI job against a green local suite as a toolchain question, not a
+flake. Nothing here is worth pinning the runners to fix: the older compiler catching more is the
+useful direction for the skew to run in.
+
 **Signing is ad-hoc (`codesign --sign -`): no Developer ID, no notarisation, no updater.** That is
 a **decision** (§2.5), not a gap awaiting funds — notarisation needs a paid Apple Developer
 account, this is a tool for one person's daily use, and a first open is right-click → Open, which

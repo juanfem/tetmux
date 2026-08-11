@@ -245,9 +245,16 @@ final class PaneInputTests: XCTestCase {
 /// Records what the emulator hands to its delegate, which is the seam bytes cross to reach the
 /// channel. `TerminalPaneView.Coordinator` forwards exactly this to `SessionService.sendKeys`.
 ///
-/// Not `@MainActor`: SwiftTerm's delegate protocols are not, and a conformance that added isolation
-/// would not compile. The tests drive it from one thread.
-private final class RecordingDelegate: TerminalViewDelegate, @unchecked Sendable {
+/// `@MainActor` **through a `@preconcurrency` conformance**, which is the only shape that compiles
+/// on both toolchains this package is built with. `isAnsweringQuery` belongs to a view, so it is
+/// main-actor state; `TerminalViewDelegate` is a plain protocol, so a witness of it is nonisolated
+/// and may not read that. Swift 6.3 lets line 260 pass anyway and Swift 6.1.2 — what CI runs — does
+/// not, so the tree was green here and red there for four commits. `@preconcurrency` on the
+/// conformance (SE-0423) lets the isolated witness satisfy the nonisolated requirement behind a
+/// runtime main-thread check: the tests drive this from `PaneInputTests`, which is `@MainActor`, so
+/// the check holds, and it traps loudly rather than racing if that ever stops being true.
+@MainActor
+private final class RecordingDelegate: @preconcurrency TerminalViewDelegate {
     private(set) var bytes: [[UInt8]] = []
     /// What the view claimed about each write *at the moment it was made*, which is the only moment
     /// the answer exists: the flag is cleared as the call returns.
