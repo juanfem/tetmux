@@ -12,7 +12,7 @@ thing it constrains, and where somebody will actually meet it. A second copy in 
 list nobody reads twice and one that drifts from the original the first time either is edited;
 `git log` holds the narrative. This paragraph replaced ninety lines of exactly that on 2026-08-07.
 
-**As of 2026-08-11: 1 open, 6 parked, and nothing here blocks a release.** On 2026-08-06 the last
+**As of 2026-08-11: 0 open, 6 parked, and nothing here blocks a release.** On 2026-08-06 the last
 two then-open entries left the list without being implemented, and both say so where it counts
 rather than here: P6.7's launch half was amended to name **warm** launch (SRD §6,
 `docs/measurements.md`), and signing moved from *blocked* to *parked* (SRD §2.5), because "blocked
@@ -26,43 +26,25 @@ References point into current `main`. Line numbers drift; the symbol names besid
 
 ## Open
 
-- [ ] **Check F4.36's two ⌘ advertisements against the running app: does each surface actually
-  update while it is visible?** Both were flagged by review on 2026-08-11 and neither is verified.
-  The click paths are correct either way — they read live `CommandKey.isHeld` at click time — so
-  what is at stake is only the *advertisement*; but the advertisement is the feature's whole answer
-  to "the words and the click must agree", so a surface that does not update is worse than one that
-  says nothing.
-  (1) The sidebar context menu's title (`SidebarView.swift`, "Copy Attach Command Without ssh")
-  switches on `menuModifiers.isCommandHeld` while the menu is open. That an *open* menu re-renders
-  its SwiftUI content mid-tracking is demonstrated for `MenuBarExtra` and **assumed** for
-  `.contextMenu`, whose `NSMenu` bridging is different and may snapshot its items at open. If it
-  snapshots: right-click, *then* press ⌘ — the ordinary order — leaves the plain title up while the
-  click copies the short line, and the tree's only in-place advertisement of the modifier never
-  appears. The fix would be another channel (the item's `.help` is already there, or an armed
-  appearance like the ⌥ close buttons), not more title logic.
-  (2) The toolbar tooltip (`AttachCommandButton` in `AppMain.swift`): its `.help` string changes
-  with ⌘, but an AppKit tooltip that is *already showing* may not redraw when the string changes —
-  hover, read the ssh line and its "hold ⌘" hint, follow the hint without moving the mouse, and the
-  tooltip may keep showing the ssh line while ⌘-click copies the short one, for the whole hover
-  rather than the one frame the monitor convention budgets for.
-  How to check is the convention `docs/behavior.md` already states for menus: against the running
-  app, not by reading — remote host selected, press and release ⌘ with the menu open and with the
-  tooltip up, watch whether the words move. Whichever half fails, record what was seen here and
-  change that surface.
+Nothing.
 
 ## Parked by decision
 
-- [~] **`reachingHost:`'s polarity is inverted relative to the modifier that drives it.** Every UI
-  call site writes `reachingHost: !CommandKey.isHeld` (or `!modifiers.isCommandHeld`), and that `!`
-  is boilerplate whose absence reads plausibly: a future call site that writes
-  `reachingHost: CommandKey.isHeld` — "pass the modifier through" — inverts the feature silently,
-  and no test covers the UI call sites. Flipping the parameter to match its driver (e.g.
-  `fromShellOnHost: Bool = false`) would remove every negation and let the tests' explicit `false`
-  become the droppable default. Parked 2026-08-11 rather than folded into the review fixes, because
-  the name is load-bearing prose by now: F4.36's amendment and `docs/behavior.md`'s entry both
-  explain the feature as what "reaching the host" includes, and renaming the parameter means
-  rewriting both for a saving of four `!`s. Un-park if a fifth call site appears, or the first time
-  the sign is actually written backwards.
+- [~] **`reachingHost:`'s polarity is inverted relative to the modifier that drives it.** The
+  modified click paths write `reachingHost: !OptionKey.isHeld`, and that `!` is boilerplate whose
+  absence reads plausibly: a future call site that writes `reachingHost: OptionKey.isHeld` —
+  "pass the modifier through" — inverts the feature silently, and no test covers the UI call
+  sites. Flipping the parameter to match its driver (e.g. `fromShellOnHost: Bool = false`) would
+  remove the negations and let the tests' explicit `false` become the droppable default. Parked
+  2026-08-11 rather than folded into the review fixes, because the name is load-bearing prose by
+  now: F4.36's amendment and `docs/behavior.md`'s entry both explain the feature as what "reaching
+  the host" includes, and renaming the parameter means rewriting both. The advertisement fix later
+  that day shrank the exposure without touching the name: the menu's alternate items pass explicit
+  `true`/`false`, leaving two negated sites (the toolbar click and the macOS 14 menu fallback). The
+  ⌘→⌥ switch on 2026-08-11 rewrote the driver at both and left the polarity alone, deliberately —
+  it was a modifier decision, not a rename, and folding one into the other would have hidden it.
+  Un-park if the negated sites multiply again, or the first time the sign is actually written
+  backwards.
   `Sources/tetmuxCore/Session/TmuxCommand.swift` (`attachCommandLine(host:sessionName:reachingHost:)`)
 
 - [~] **P6.7's cold launch: ~898 ms, amended out of the requirement rather than fixed.** The

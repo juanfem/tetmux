@@ -37,13 +37,6 @@ struct SidebarView: View {
     /// is what already happened is not a modifier anyone can learn.
     @State private var modifiers = ModifierKeyMonitor()
 
-    /// ⌘, for the context menu's copy — which is an `NSMenu` tracking in a run loop of its own, where
-    /// the monitor above sees nothing. Two mechanisms for two surfaces of one tree, which is what the
-    /// pair is for: the row buttons are events, the menu is a poll bounded by the menu being open.
-    /// The shared instance, because its observers live for the whole process — see
-    /// `MenuModifierMonitor.shared`.
-    private let menuModifiers = MenuModifierMonitor.shared
-
     var body: some View {
         VStack(spacing: 0) {
             List {
@@ -608,29 +601,56 @@ struct SidebarView: View {
             // gets to *this* session from a shell — over ssh, with the tty tmux insists on, with the
             // name quoted. It is worth copying for a host nothing is attached to as well, which is
             // why the command is built from the host's configuration and not from a live channel.
-            //
-            // ⌘ takes off the half that reaches the host, for a shell already on it — the title says
-            // which line is about to be copied, since the clipboard is not somewhere the result can
-            // be checked. Titled from the poll and acted on from the live flags, like every other
-            // modified control: the display may be a frame behind, the click may not.
-            Button(
-                menuModifiers.isCommandHeld && model.attachCommandDependsOnReachingHost(hostId: host.id)
-                    ? "Copy Attach Command Without ssh" : "Copy Attach Command"
-            ) {
-                model.copyAttachCommand(
-                    hostId: host.id, sessionName: session.name, reachingHost: !CommandKey.isHeld
-                )
-            }
-            .help(
-                model.attachCommand(
-                    hostId: host.id, sessionName: session.name,
-                    reachingHost: !menuModifiers.isCommandHeld
-                ) ?? ""
-            )
+            copyAttachCommandItem(host: host, session: session)
             Divider()
             Button("Kill Session…", role: .destructive) {
                 model.requestKillSession(in: state, hostId: host.id, sessionId: session.id)
             }
+        }
+    }
+
+    /// F4.36's menu half. ⌥ takes off the half that reaches the host, for a shell already on it —
+    /// and the advertisement is a native alternate item, because this menu cannot be driven by a
+    /// monitor at all. Verified against the running app 2026-08-11: a `.contextMenu` snapshots its
+    /// items at open, so a title switched on the poll never updated while the menu was up — and it
+    /// was wrong *at* open too, since the poll only runs between `NSMenu`'s tracking notifications
+    /// and the content is built before tracking begins, so ⌥ held before the right-click read as
+    /// not held. An alternate item is AppKit swapping the two titles itself while the menu tracks —
+    /// verified working the same day, tooltip included, since the alternate is a different
+    /// `NSMenuItem` carrying its own `.help` — and each item's action names its own line outright,
+    /// so the words and the click cannot disagree even in principle: no live-flags read at click
+    /// time, unlike every other modified control, because here the *system* guarantees which item
+    /// was showing when it was clicked.
+    /// macOS 14 has no alternate items from SwiftUI and keeps the click-time flags behind a title
+    /// that promises only the unmodified line.
+    @ViewBuilder
+    private func copyAttachCommandItem(host: HostState, session: TmuxSession) -> some View {
+        let fullCommand =
+            model.attachCommand(hostId: host.id, sessionName: session.name, reachingHost: true) ?? ""
+        if #available(macOS 15.0, *), model.attachCommandDependsOnReachingHost(hostId: host.id) {
+            Button("Copy Attach Command") {
+                model.copyAttachCommand(hostId: host.id, sessionName: session.name, reachingHost: true)
+            }
+            .help(fullCommand)
+            .modifierKeyAlternate(.option) {
+                Button("Copy Attach Command Without ssh") {
+                    model.copyAttachCommand(
+                        hostId: host.id, sessionName: session.name, reachingHost: false
+                    )
+                }
+                .help(
+                    model.attachCommand(
+                        hostId: host.id, sessionName: session.name, reachingHost: false
+                    ) ?? ""
+                )
+            }
+        } else {
+            Button("Copy Attach Command") {
+                model.copyAttachCommand(
+                    hostId: host.id, sessionName: session.name, reachingHost: !OptionKey.isHeld
+                )
+            }
+            .help(fullCommand)
         }
     }
 

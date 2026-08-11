@@ -342,17 +342,54 @@ and this word can be a session name. And `copyAttachCommand` takes its `NSPasteb
 defaulted parameter for the same reason `AppModel` takes a directory: `.general` is the user's
 clipboard, and a test asserting what was copied would take whatever they were carrying.
 
-**⌘ held on either control asks the same question from a shell already on the host**
+**⌥ held on either control asks the same question from a shell already on the host**
 (`reachingHost: false`), which is the common case for anybody keeping a terminal open there. It
 takes off everything about *arriving* — the ssh line, and the `customCommand` wrapper too, since a
 wrapper is a way of getting there rather than a way of attaching — leaving the local form. That
 makes it a parameter on `attachCommandLine` rather than a trim applied above it: what counts as
 reaching the host is that function's to know, and a wrapped host has no `ssh` in its line to
 remove. Nothing offers the modifier on the local host, where the two lines are identical — a
-modifier advertised where it does nothing is one nobody trusts anywhere. Both controls show the
-line the click would copy *before* the click, since a clipboard is not somewhere a result can be
-checked: the toolbar's tooltip and the menu item's title come from a monitor, and the behaviour
-from `CommandKey.isHeld` at click time — the same division ⌥ already makes.
+modifier advertised where it does nothing is one nobody trusts anywhere.
+
+**⌥ and not ⌘, which is what this shipped as for a day.** ⌥ is macOS's variant modifier and ⌘ is its
+*invoking* one — the key that turns a keystroke into a command, not the key that asks for another
+reading of a click. Every alternate item a user has already met is keyed to ⌥ (Close All, Force
+Quit, Copy as Pathname, ⌥-drag to copy), and ⌘ is spoken for twice on the exact surfaces this
+control lives on: ⌘-click on a `List` row is discontiguous selection, and ⌘-click inside a pane
+already activates a URL (`linkHighlightMode = .hoverWithModifier`, in the OSC 8 entry below). It
+disagreed with this application's own vocabulary too, where ⌥ was already the entire answer to "the
+other reading of this click" — ⌥ on a close button skips the confirmation, ⌥ on **New Session**
+opens it in a window of its own — and the danger in those two lives in the control, not in the
+modifier, so a benign clipboard variant does not dilute anything. Holding ⌘ over an open menu is a
+live key-equivalent posture besides, where ⌥ held is inert. The switch was **net subtraction**:
+`CommandKey` and both monitors' `isCommandHeld` went with it, `MenuModifierMonitor` is ⌥-only
+again, and the app now reads exactly one modifier anywhere.
+
+Both controls show the line the click would copy *before* the click, since a clipboard is not
+somewhere a result can be checked — but **neither advertisement comes from a monitor**, because both monitor-driven versions
+were checked against the running app on 2026-08-11 and both displayed wrongly, each for its own
+AppKit reason. The menu's is a native **alternate item** (`.modifierKeyAlternate`, macOS 15+): a
+`.contextMenu`'s `NSMenu` snapshots its items at open, so a title switched on the poll never
+updated while the menu was up — and it was wrong *at* open too, since the poll only runs between
+the tracking notifications and the content is built before tracking begins, so the modifier held
+before the right-click still read as not held. AppKit swaps the two items itself while the menu tracks —
+verified working against the running app the same day, and the swap carries the item's tooltip
+with it, because the alternate is a different `NSMenuItem` with a `.help` of its own — and each
+item's action names its own `reachingHost` outright, so the words and the click cannot disagree
+and nothing reads the live flags at click time; macOS 14, which has no alternate items
+from SwiftUI, keeps flags-at-click behind a title that promises only the unmodified line. The
+toolbar's tooltip names **both** lines in one modifier-independent sentence, because an AppKit
+tooltip already on screen keeps the string it appeared with: the old text read the monitor
+correctly and displayed its answer only at hover time, so following its own "hold ⌥" hint left the
+ssh line showing while the click copied the short one. The live acknowledgement there is the
+glyph, which fills while ⌥ is held (the accessibility label flips with it): the button redraws
+mid-hover and its tooltip does not. **Checked twice, the second time because the first record never
+said who had looked**: on 2026-08-11, against the ⌘ build at `d882fec`, tooltip up and the modifier
+pressed under a stationary pointer — the words do not move. Anyone tempted to put a live string back
+into a `.help` is re-opening a question that has been answered at the running app, which is the only
+place it can be answered; that is why this sentence names the build it was answered on. That toolbar
+click still takes `OptionKey.isHeld` at click time — the same division every other ⌥-modified control
+makes.
 
 ## Sessions, tabs, and destructive actions
 
@@ -438,9 +475,12 @@ window. The flags come from `OptionKey.isHeld` inside the action, never from a m
 frame behind, and a button whose behaviour disagreed with its own icon for one frame is the least
 explicable bug on this list. The two monitors are separate because their constraints are opposite —
 a window's events reach a local `.flagsChanged` monitor, and a menu's do not (it tracks events in a
-run loop of its own), which is why the menu bar polls instead. Both report ⌥ **and** ⌘, since
-F4.36's copy is modified by the second one and appears on a window control and inside a menu; the
-sidebar therefore holds one of each, which is not duplication but two surfaces of one tree.
+run loop of its own), which is why the menu bar polls instead. **Both report ⌥ and nothing else**,
+which is the whole modifier vocabulary of this application: ⌥ means "the other reading of this
+click" on every control that has one — skip the confirmation here, a window of its own on **New
+Session**, the ssh half off F4.36's copy. Neither monitor samples ⌘, and there is no `CommandKey`:
+the one thing that briefly read ⌘ was F4.36, and the same surfaces that made a ⌘ title impossible to
+display also made it the wrong key to ask for (see the F4.36 entry above).
 
 **A command the user asked for that fails has to say so (§7).** `%error` bodies used to reach only
 the diagnostic logger, which only `--diagnose` installs — in the app, the command simply did not

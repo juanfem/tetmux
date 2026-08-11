@@ -482,7 +482,7 @@ public enum TmuxCommand {
     /// Whether `reachingHost` changes the line for this host at all — false for the local host,
     /// where the answer is already the one typed on the box.
     ///
-    /// This is the gate for every control that *advertises* the ⌘ modifier — the tooltip hint, the
+    /// This is the gate for every control that *advertises* the ⌥ modifier — the tooltip hint, the
     /// menu title, the accessibility label — because a modifier advertised where it does nothing is
     /// one nobody trusts anywhere. Defined as the two lines differing, rather than re-derived from
     /// `isLocal` at each site, so the surfaces cannot drift from what `attachCommandLine` does.

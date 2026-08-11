@@ -617,7 +617,7 @@ tmux's prefix.
   a wrapper is described by that wrapper. Values are quoted only where a shell needs it, so the
   line reads as something a person would have typed. It is built from the host's configuration and
   needs no channel, so a session found by discovery (F4.4) on a host nothing is attached to can
-  still be copied. **⌘ held on either control copies the same session as typed from a shell that is
+  still be copied. **⌥ held on either control copies the same session as typed from a shell that is
   already on that host**, which is the other half of the question and the common one for anyone
   keeping a terminal open there: everything about *arriving* comes off — the ssh line, and equally
   the wrapper that stands in for one — leaving `tmux attach -t <name>`. Both controls say which

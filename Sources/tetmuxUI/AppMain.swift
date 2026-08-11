@@ -705,34 +705,28 @@ private struct AttachCommandButton: View {
     let host: HostState?
     let session: TmuxSession?
 
-    /// ⌘, which takes the ssh half off the command this copies. Held so the tooltip can show the
-    /// shorter line *before* the click: the clipboard is not on screen, so a modifier whose only
-    /// evidence is what was already copied is one nobody can check.
+    /// ⌥, which takes the ssh half off the command this copies. Held so the *glyph* can arm while
+    /// it is down — the one part of this control that verifiably redraws mid-hover. It used to
+    /// drive the tooltip's text instead, which read correctly and displayed wrongly: verified
+    /// against the running app 2026-08-11, an AppKit tooltip samples `.help` when it appears and
+    /// never again, so following the tooltip's own "hold ⌥" hint left the ssh line on screen while
+    /// the click copied the short one — for the whole hover, not the one frame the monitor
+    /// convention budgets for. The tooltip now states both lines up front (see `help` below), so
+    /// there is nothing for a stale tooltip to be wrong about.
     @State private var modifiers = ModifierKeyMonitor()
 
     /// The copy acknowledgement — the exact string the last click put on the pasteboard — and the
     /// task that withdraws it. The string rather than a flag, because re-deriving the line at
-    /// display time reads the monitor: ⌘ released between click and hover would caption the tick
+    /// display time reads the monitor: ⌥ released between click and hover would caption the tick
     /// with a line that was never copied. Per window, like every other piece of state a window can
     /// be in on its own.
     @State private var copiedCommand: String?
     @State private var copyConfirmation: Task<Void, Never>?
 
     var body: some View {
-        // The line a click *now* would copy, read from the monitor — allowed to be a frame behind,
-        // because it is a preview. The click itself reads the live flags, the same division every
-        // other modified control makes.
-        let command = session.flatMap { session in
-            host.flatMap {
-                model.attachCommand(
-                    hostId: $0.id, sessionName: session.name,
-                    reachingHost: !modifiers.isCommandHeld
-                )
-            }
-        }
         Button {
             guard let host, let session else { return }
-            let reachingHost = !CommandKey.isHeld
+            let reachingHost = !OptionKey.isHeld
             guard let copied = model.attachCommand(
                 hostId: host.id, sessionName: session.name, reachingHost: reachingHost
             ) else { return }
@@ -752,40 +746,57 @@ private struct AttachCommandButton: View {
         } label: {
             // A copy that says nothing is indistinguishable from a click that missed, and this one
             // has no visible result anywhere: the clipboard is not on screen. So the glyph becomes
-            // a tick for a moment.
-            Image(systemName: copiedCommand == nil ? "terminal" : "checkmark")
+            // a tick for a moment — and fills while ⌥ is held, where ⌥ changes the answer, which
+            // is the surface's only live acknowledgement that the modifier registered: the button
+            // redraws mid-hover and the tooltip beside it does not.
+            Image(systemName: glyph)
         }
-        // The command itself, because the point of copying it is to run it somewhere else and the
-        // tooltip is the only chance to see what is being copied before it replaces the clipboard.
-        // Both states are named — a bare tick is a result with no subject — and the tick's caption
-        // is the snapshot of what was copied, never re-derived: ⌘ may have changed since the click,
-        // and the confirmation reports the past, which the monitor cannot answer for.
-        //
-        // The ⌘ hint is offered only where ⌘ would change the answer — on a local host the two
-        // lines are the same, and a modifier advertised where it does nothing is one nobody
-        // trusts anywhere.
-        .help(
-            copiedCommand.map { "Copied: \($0)" }
-                ?? command.map { "Copy attach command: \($0)\(attachCommandHint)" }
-                ?? "Copy attach command"
-        )
-        .disabled(command == nil)
+        .help(help)
+        .disabled(fullCommand == nil)
         .accessibilityLabel(
-            modifiers.isCommandHeld && commandChangesWithModifier
+            modifiers.isOptionHeld && commandChangesWithModifier
                 ? "Copy attach command without ssh" : "Copy attach command"
         )
     }
 
-    /// The shared F4.36 gate, by this button's host — asked by the hint and the accessibility
-    /// label both, so the two cannot drift about where ⌘ does something.
-    private var commandChangesWithModifier: Bool {
-        host.map { model.attachCommandDependsOnReachingHost(hostId: $0.id) } == true
+    private var glyph: String {
+        if copiedCommand != nil { return "checkmark" }
+        return modifiers.isOptionHeld && commandChangesWithModifier ? "terminal.fill" : "terminal"
     }
 
-    /// What ⌘ would do to the copied command, said only where it would do something.
-    private var attachCommandHint: String {
-        guard commandChangesWithModifier, !modifiers.isCommandHeld else { return "" }
-        return " — hold ⌘ to copy it without the part that reaches the host"
+    /// The command itself, because the point of copying it is to run it somewhere else and the
+    /// tooltip is the only chance to see what is being copied before it replaces the clipboard.
+    /// It names *both* lines where ⌥ would change the answer, and deliberately does not read the
+    /// monitor: an AppKit tooltip already on screen keeps the string it appeared with (verified
+    /// 2026-08-11), so a text that switched with ⌥ was a promise the display could not keep. A
+    /// sentence that is true in either modifier state has nothing to go stale. The ⌥ half is
+    /// offered only where it would change the line — on a local host the two are the same, and a
+    /// modifier advertised where it does nothing is one nobody trusts anywhere. The tick's caption
+    /// is the snapshot of what was copied, never re-derived: ⌥ may have changed since the click,
+    /// and the confirmation reports the past, which no monitor can answer for.
+    private var help: String {
+        if let copiedCommand { return "Copied: \(copiedCommand)" }
+        guard let fullCommand else { return "Copy attach command" }
+        guard let hostLocalCommand else { return "Copy attach command: \(fullCommand)" }
+        return "Copy attach command: \(fullCommand)\n⌥-click copies it for a shell already on the host: \(hostLocalCommand)"
+    }
+
+    /// The line an unmodified click copies, and the one ⌥ shortens it to — the second only where
+    /// the two differ, which is the same gate the hint and the accessibility label ask.
+    private var fullCommand: String? {
+        guard let host, let session else { return nil }
+        return model.attachCommand(hostId: host.id, sessionName: session.name, reachingHost: true)
+    }
+
+    private var hostLocalCommand: String? {
+        guard commandChangesWithModifier, let host, let session else { return nil }
+        return model.attachCommand(hostId: host.id, sessionName: session.name, reachingHost: false)
+    }
+
+    /// The shared F4.36 gate, by this button's host — asked by the tooltip, the glyph and the
+    /// accessibility label alike, so the three cannot drift about where ⌥ does something.
+    private var commandChangesWithModifier: Bool {
+        host.map { model.attachCommandDependsOnReachingHost(hostId: $0.id) } == true
     }
 }
 
@@ -1633,28 +1644,25 @@ enum OptionKey {
     static var isHeld: Bool { NSEvent.modifierFlags.contains(.option) }
 }
 
-/// ⌘ at this instant, read for the same reason and under the same rule as `OptionKey`.
+/// Whether ⌥ is down *right now*, so the `MenuBarExtra`'s open menu can show what clicking it
+/// would do.
 ///
-/// It decides one thing: whether the copyable attach command (F4.36) carries the half that reaches
-/// the host. Held, it does not — the answer for somebody who is already on that machine.
-@MainActor
-enum CommandKey {
-    static var isHeld: Bool { NSEvent.modifierFlags.contains(.command) }
-}
-
-/// Which modifiers are down *right now*, so an open menu can show what clicking it would do.
+/// Polled, which wants justifying. The modifier cannot come from the items themselves — a swapped
+/// *icon* on one item is not an alternate item, which is the only modifier mechanism a menu offers
+/// (`.modifierKeyAlternate`, macOS 15+, is how the sidebar's attach-command copy advertises ⌥, and
+/// is the better mechanism wherever the difference can be carried by a whole item). It cannot come
+/// from an event monitor either: a menu tracks events in a run loop of its own, where a local
+/// monitor sees nothing, and a global monitor for a keyboard event needs the Accessibility
+/// permission this app otherwise has no use for. So the hardware state is read on a timer —
+/// scheduled in the *common* run-loop modes, which is the part that makes it fire during menu
+/// tracking at all — and only between `NSMenu` beginning and ending its tracking, so nothing wakes
+/// up while no menu is open.
 ///
-/// Polled, which wants justifying. The modifier cannot come from the items themselves —
-/// `MenuBarExtra` hands its content no event and SwiftUI has no equivalent of AppKit's
-/// `isAlternate`. It cannot come from an event monitor either: a menu tracks events in a run loop
-/// of its own, where a local monitor sees nothing, and a global monitor for a keyboard event needs
-/// the Accessibility permission this app otherwise has no use for. So the hardware state is read on
-/// a timer — scheduled in the *common* run-loop modes, which is the part that makes it fire during
-/// menu tracking at all — and only between `NSMenu` beginning and ending its tracking, so nothing
-/// wakes up while no menu is open.
-/// Both modifiers rather than one because both are read from a menu: ⌥ says a session will open in a
-/// window of its own, and ⌘ says the copied attach command will stop at the host it is on. One timer
-/// answering both is also the only way the two cannot disagree about when they sampled.
+/// This reaches only menus whose SwiftUI content re-renders while they are open, which
+/// `MenuBarExtra`'s does and a `.contextMenu`'s does not (its `NSMenu` snapshots the items at
+/// open — verified against the running app 2026-08-11, which is why the tree's attach-command
+/// title is an alternate item and not a reader of this: the value could never reach it, not even
+/// at open, since the timer starts with tracking and the content is built before tracking begins).
 @MainActor
 @Observable
 final class MenuModifierMonitor {
@@ -1668,7 +1676,6 @@ final class MenuModifierMonitor {
     static let shared = MenuModifierMonitor()
 
     private(set) var isOptionHeld = false
-    private(set) var isCommandHeld = false
 
     @ObservationIgnored private var timer: Timer?
 
@@ -1700,19 +1707,22 @@ final class MenuModifierMonitor {
     private func stop() {
         timer?.invalidate()
         timer = nil
-        // The menu is gone; leaving these set would show the alternate icons the moment it reopens.
+        // The menu is gone; leaving this set would show the alternate icons the moment it reopens.
         isOptionHeld = false
-        isCommandHeld = false
     }
 
     private func sample() {
         if OptionKey.isHeld != isOptionHeld { isOptionHeld = OptionKey.isHeld }
-        if CommandKey.isHeld != isCommandHeld { isCommandHeld = CommandKey.isHeld }
     }
 }
 
 /// The same question for an ordinary window: is ⌥ down, so a close button can say that clicking it
-/// will not stop to ask — and is ⌘, so the toolbar's copy can say what it is about to copy?
+/// will not stop to ask, and so the toolbar's copy can arm its glyph and its accessibility label
+/// while the shorter line is the one a click would take?
+///
+/// One flag for both, because ⌥ is the one variant modifier in this application: it is what every
+/// control means by "the other reading of this click". Nothing here samples ⌘, which is the key
+/// that *invokes* — and which a `List` row and a pane's link already answer to.
 ///
 /// Separate from `MenuModifierMonitor` because the two have opposite constraints. A window's events go
 /// through the normal responder chain, so `.flagsChanged` simply arrives — no Accessibility
@@ -1727,7 +1737,6 @@ final class MenuModifierMonitor {
 @Observable
 final class ModifierKeyMonitor {
     private(set) var isOptionHeld = false
-    private(set) var isCommandHeld = false
 
     /// `nonisolated(unsafe)` so `deinit` can take it back. It is written once in `init` and read once
     /// in `deinit`, and `NSEvent.removeMonitor` is safe from either.
@@ -1744,8 +1753,6 @@ final class ModifierKeyMonitor {
                 guard let self else { return }
                 let option = event.modifierFlags.contains(.option)
                 if option != self.isOptionHeld { self.isOptionHeld = option }
-                let command = event.modifierFlags.contains(.command)
-                if command != self.isCommandHeld { self.isCommandHeld = command }
             }
             return event
         }

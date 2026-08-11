@@ -837,7 +837,7 @@ public final class AppModel {
     /// want it: the session is on screen in the tree because a probe found it (F4.4), and reaching it
     /// from a shell needs no connection here at all.
     ///
-    /// - Parameter reachingHost: `false` is ⌘ on the control that asked — the same session as typed
+    /// - Parameter reachingHost: `false` is ⌥ on the control that asked — the same session as typed
     ///   from a shell already on that host, with the ssh half of the line taken off. Passed down
     ///   rather than trimmed here: what counts as reaching the host is `TmuxCommand`'s to know, and
     ///   a wrapper host has no `ssh` in its line to remove.
@@ -851,7 +851,7 @@ public final class AppModel {
     }
 
     /// `TmuxCommand.attachCommandDependsOnReachingHost` by host id — the one gate every control
-    /// that advertises ⌘ asks, so the tooltip hint, the menu title and the accessibility label
+    /// that advertises ⌥ asks, so the tooltip hint, the menu title and the accessibility label
     /// cannot disagree about where the modifier does something. False for a host that is gone,
     /// which is also a host with no line to modify.
     public func attachCommandDependsOnReachingHost(hostId: String) -> Bool {

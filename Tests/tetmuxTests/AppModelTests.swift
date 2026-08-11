@@ -2385,10 +2385,10 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(pasteboard.string(forType: .string), "tmux attach -t 'my work'")
     }
 
-    /// ⌘ on either control — the toolbar button or the tree's menu item — copies the line as typed
-    /// from a shell already on that host. The tooltip and the menu title show that line before the
-    /// click, so the two have to be the same string here as well.
-    func testHoldingCommandCopiesTheCommandWithoutTheSshHalf() {
+    /// ⌥ on either control — the toolbar button or the tree's alternate menu item — copies the line
+    /// as typed from a shell already on that host. The tooltip and the alternate's title show that
+    /// line before the click, so the two have to be the same string here as well.
+    func testHoldingOptionCopiesTheCommandWithoutTheSshHalf() {
         let model = makeModel()
         model.hosts = [remoteHost(id: "devbox", sessions: [TmuxSession(id: "$1", name: "my work")])]
         let pasteboard = scratchPasteboard()

@@ -719,7 +719,7 @@ final class TmuxCommandTests: XCTestCase {
         )
     }
 
-    /// ⌘ on the control asks the same question from a shell already on that host, so everything
+    /// ⌥ on the control asks the same question from a shell already on that host, so everything
     /// about *arriving* comes off — the ssh line, and the wrapper that stands in for one.
     func testTheCommandForAShellAlreadyOnTheHostCarriesNothingThatReachesIt() {
         let remote = HostConfig(
@@ -747,7 +747,7 @@ final class TmuxCommandTests: XCTestCase {
         )
     }
 
-    /// The gate the surfaces that advertise ⌘ share — the tooltip hint, the menu title, the
+    /// The gate the surfaces that advertise ⌥ share — the tooltip hint, the menu title, the
     /// accessibility label. Pinned here so a surface cannot re-derive it and drift.
     func testTheModifierIsAdvertisedExactlyWhereItChangesTheLine() {
         let local = HostConfig(id: "local", name: "local", isLocal: true)
