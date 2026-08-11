@@ -2384,6 +2384,42 @@ final class AppModelTests: XCTestCase {
         )
         XCTAssertEqual(pasteboard.string(forType: .string), "tmux attach -t 'my work'")
     }
+
+    /// ⌘ on either control — the toolbar button or the tree's menu item — copies the line as typed
+    /// from a shell already on that host. The tooltip and the menu title show that line before the
+    /// click, so the two have to be the same string here as well.
+    func testHoldingCommandCopiesTheCommandWithoutTheSshHalf() {
+        let model = makeModel()
+        model.hosts = [remoteHost(id: "devbox", sessions: [TmuxSession(id: "$1", name: "my work")])]
+        let pasteboard = scratchPasteboard()
+
+        XCTAssertEqual(
+            model.attachCommand(hostId: "devbox", sessionName: "my work"),
+            "ssh -t devbox 'tmux attach -t '\\''my work'\\'''"
+        )
+        XCTAssertTrue(model.copyAttachCommand(
+            hostId: "devbox", sessionName: "my work", reachingHost: false, to: pasteboard
+        ))
+        XCTAssertEqual(pasteboard.string(forType: .string), "tmux attach -t 'my work'")
+        XCTAssertEqual(
+            pasteboard.string(forType: .string),
+            model.attachCommand(hostId: "devbox", sessionName: "my work", reachingHost: false)
+        )
+    }
+
+    /// The modifier cannot manufacture a host, for the same reason the unmodified control cannot:
+    /// a copy reported for a host that is not there is a click that silently missed.
+    func testTheModifiedCopyStillReportsAnUnknownHost() {
+        let model = makeModel()
+        let pasteboard = scratchPasteboard()
+        pasteboard.clearContents()
+        pasteboard.setString("untouched", forType: .string)
+
+        XCTAssertFalse(model.copyAttachCommand(
+            hostId: "gone", sessionName: "work", reachingHost: false, to: pasteboard
+        ))
+        XCTAssertEqual(pasteboard.string(forType: .string), "untouched")
+    }
 }
 
 // MARK: - A session ending under a window

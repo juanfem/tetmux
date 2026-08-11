@@ -37,6 +37,13 @@ struct SidebarView: View {
     /// is what already happened is not a modifier anyone can learn.
     @State private var modifiers = ModifierKeyMonitor()
 
+    /// ⌘, for the context menu's copy — which is an `NSMenu` tracking in a run loop of its own, where
+    /// the monitor above sees nothing. Two mechanisms for two surfaces of one tree, which is what the
+    /// pair is for: the row buttons are events, the menu is a poll bounded by the menu being open.
+    /// The shared instance, because its observers live for the whole process — see
+    /// `MenuModifierMonitor.shared`.
+    private let menuModifiers = MenuModifierMonitor.shared
+
     var body: some View {
         VStack(spacing: 0) {
             List {
@@ -601,10 +608,25 @@ struct SidebarView: View {
             // gets to *this* session from a shell — over ssh, with the tty tmux insists on, with the
             // name quoted. It is worth copying for a host nothing is attached to as well, which is
             // why the command is built from the host's configuration and not from a live channel.
-            Button("Copy Attach Command") {
-                model.copyAttachCommand(hostId: host.id, sessionName: session.name)
+            //
+            // ⌘ takes off the half that reaches the host, for a shell already on it — the title says
+            // which line is about to be copied, since the clipboard is not somewhere the result can
+            // be checked. Titled from the poll and acted on from the live flags, like every other
+            // modified control: the display may be a frame behind, the click may not.
+            Button(
+                menuModifiers.isCommandHeld && model.attachCommandDependsOnReachingHost(hostId: host.id)
+                    ? "Copy Attach Command Without ssh" : "Copy Attach Command"
+            ) {
+                model.copyAttachCommand(
+                    hostId: host.id, sessionName: session.name, reachingHost: !CommandKey.isHeld
+                )
             }
-            .help(model.attachCommand(hostId: host.id, sessionName: session.name) ?? "")
+            .help(
+                model.attachCommand(
+                    hostId: host.id, sessionName: session.name,
+                    reachingHost: !menuModifiers.isCommandHeld
+                ) ?? ""
+            )
             Divider()
             Button("Kill Session…", role: .destructive) {
                 model.requestKillSession(in: state, hostId: host.id, sessionId: session.id)

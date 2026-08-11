@@ -719,6 +719,61 @@ final class TmuxCommandTests: XCTestCase {
         )
     }
 
+    /// ⌘ on the control asks the same question from a shell already on that host, so everything
+    /// about *arriving* comes off — the ssh line, and the wrapper that stands in for one.
+    func testTheCommandForAShellAlreadyOnTheHostCarriesNothingThatReachesIt() {
+        let remote = HostConfig(
+            id: "r", name: "devbox", hostname: "devbox.example.org", user: "ada", port: 2222,
+            extraSshArguments: "-o \"ProxyJump=bastion\""
+        )
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(host: remote, sessionName: "work", reachingHost: false),
+            "tmux attach -t work"
+        )
+        let wrapped = HostConfig(id: "w", name: "container", customCommand: "docker exec -it dev sh -c")
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(host: wrapped, sessionName: "work", reachingHost: false),
+            "tmux attach -t work"
+        )
+    }
+
+    /// The local line is already the one typed on the host, so the modifier has nothing to take off —
+    /// which is why no surface offers it there.
+    func testTheLocalCommandReadsTheSameEitherWay() {
+        let local = HostConfig(id: "local", name: "local", isLocal: true)
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(host: local, sessionName: "work", reachingHost: false),
+            TmuxCommand.attachCommandLine(host: local, sessionName: "work")
+        )
+    }
+
+    /// The gate the surfaces that advertise ⌘ share — the tooltip hint, the menu title, the
+    /// accessibility label. Pinned here so a surface cannot re-derive it and drift.
+    func testTheModifierIsAdvertisedExactlyWhereItChangesTheLine() {
+        let local = HostConfig(id: "local", name: "local", isLocal: true)
+        XCTAssertFalse(TmuxCommand.attachCommandDependsOnReachingHost(host: local))
+        let remote = HostConfig(id: "r", name: "devbox")
+        XCTAssertTrue(TmuxCommand.attachCommandDependsOnReachingHost(host: remote))
+        let wrapped = HostConfig(id: "w", name: "container", customCommand: "docker exec -it dev sh -c")
+        XCTAssertTrue(TmuxCommand.attachCommandDependsOnReachingHost(host: wrapped))
+    }
+
+    /// Dropping the ssh half drops one layer of shell parsing with it, and the name is still user
+    /// data — the remaining layer must still quote it.
+    func testASessionNameIsQuotedWithTheSshHalfGone() {
+        let remote = HostConfig(id: "r", name: "devbox")
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(
+                host: remote, sessionName: "my session", reachingHost: false
+            ),
+            "tmux attach -t 'my session'"
+        )
+        XCTAssertEqual(
+            TmuxCommand.attachCommandLine(host: remote, sessionName: "$(id)", reachingHost: false),
+            "tmux attach -t '$(id)'"
+        )
+    }
+
     /// A session name is user data here as everywhere else, and this line ends up in a shell.
     func testASessionNameIsQuotedWhenItNeedsToBe() {
         let local = HostConfig(id: "local", name: "local", isLocal: true)

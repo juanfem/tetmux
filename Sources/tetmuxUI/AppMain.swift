@@ -413,11 +413,6 @@ struct RootView: View {
     @Environment(\.controlActiveState) private var controlActiveState
     @Environment(\.openWindow) private var openWindow
 
-    /// The toolbar's copy acknowledgement, and the task that withdraws it. Per window, like every
-    /// other piece of state a window can be in on its own.
-    @State private var copiedAttachCommand = false
-    @State private var copyConfirmation: Task<Void, Never>?
-
     private var host: HostState? { state.selectedHost(in: model.hosts) }
     private var session: TmuxSession? { state.selectedSession(in: model.hosts) }
     private var window: TmuxWindow? { state.selectedWindow(in: model.hosts) }
@@ -558,42 +553,12 @@ struct RootView: View {
     /// command reaching that session from a shell belongs — and it is the one action here that is
     /// about leaving this application, which no context menu in a collapsed tree can offer.
     ///
-    /// A copy that says nothing is indistinguishable from a click that missed, and this one has no
-    /// visible result anywhere: the clipboard is not on screen. So the glyph becomes a tick for a
-    /// moment. The task is cancelled and restarted on each copy rather than left to overlap, or a
-    /// second click inside the window would be acknowledged and then un-acknowledged early by the
-    /// first one's timer.
+    /// The button is a separate view, and that is load-bearing: it reads the modifier monitor, and
+    /// SwiftUI re-evaluates whichever body reads one. See `AttachCommandButton`.
     @ToolbarContentBuilder
     private var attachCommandItem: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
-            let command = session.flatMap { session in
-                host.flatMap { model.attachCommand(hostId: $0.id, sessionName: session.name) }
-            }
-            Button {
-                guard let host, let session else { return }
-                guard model.copyAttachCommand(hostId: host.id, sessionName: session.name) else { return }
-                copyConfirmation?.cancel()
-                copyConfirmation = Task {
-                    copiedAttachCommand = true
-                    try? await Task.sleep(for: .seconds(1.6))
-                    // The cancelled task still gets here — `try?` swallows the `CancellationError`
-                    // — and would clear the tick the *new* one has just set, which is the exact
-                    // early withdrawal cancelling was meant to prevent.
-                    guard !Task.isCancelled else { return }
-                    copiedAttachCommand = false
-                }
-            } label: {
-                Image(systemName: copiedAttachCommand ? "checkmark" : "terminal")
-            }
-            // The command itself, because the point of copying it is to run it somewhere else and
-            // the tooltip is the only chance to see what is being copied before it replaces the
-            // clipboard. Both states are named: a bare tick is a result with no subject.
-            .help(
-                command.map { copiedAttachCommand ? "Copied: \($0)" : "Copy attach command: \($0)" }
-                    ?? "Copy attach command"
-            )
-            .disabled(command == nil)
-            .accessibilityLabel("Copy attach command")
+            AttachCommandButton(model: model, host: host, session: session)
         }
     }
 
@@ -723,6 +688,104 @@ struct RootView: View {
             // R3.7 — this macOS window's, so a drag on another window's edge silences nothing here.
             liveResize: state.liveResize
         )
+    }
+}
+
+/// The toolbar's Copy Attach Command (F4.36) — a leaf view, so the modifier monitor invalidates
+/// this button alone.
+///
+/// `ModifierKeyMonitor` publishes on every ⌘ or ⌥ transition anywhere in the app, and SwiftUI
+/// re-evaluates whichever body read it. Read from `RootView`'s toolbar, that was the whole window —
+/// the split view, the sheets and the pane tree, twice per keyboard chord, in every open window —
+/// with nothing on screen to show for it, since diffing spares the `NSView`s. The F4.29 rule
+/// again: a value that changes this often wants exactly one reader, and `RoundTripIndicator` is
+/// the shape.
+private struct AttachCommandButton: View {
+    let model: AppModel
+    let host: HostState?
+    let session: TmuxSession?
+
+    /// ⌘, which takes the ssh half off the command this copies. Held so the tooltip can show the
+    /// shorter line *before* the click: the clipboard is not on screen, so a modifier whose only
+    /// evidence is what was already copied is one nobody can check.
+    @State private var modifiers = ModifierKeyMonitor()
+
+    /// The copy acknowledgement — the exact string the last click put on the pasteboard — and the
+    /// task that withdraws it. The string rather than a flag, because re-deriving the line at
+    /// display time reads the monitor: ⌘ released between click and hover would caption the tick
+    /// with a line that was never copied. Per window, like every other piece of state a window can
+    /// be in on its own.
+    @State private var copiedCommand: String?
+    @State private var copyConfirmation: Task<Void, Never>?
+
+    var body: some View {
+        // The line a click *now* would copy, read from the monitor — allowed to be a frame behind,
+        // because it is a preview. The click itself reads the live flags, the same division every
+        // other modified control makes.
+        let command = session.flatMap { session in
+            host.flatMap {
+                model.attachCommand(
+                    hostId: $0.id, sessionName: session.name,
+                    reachingHost: !modifiers.isCommandHeld
+                )
+            }
+        }
+        Button {
+            guard let host, let session else { return }
+            let reachingHost = !CommandKey.isHeld
+            guard let copied = model.attachCommand(
+                hostId: host.id, sessionName: session.name, reachingHost: reachingHost
+            ) else { return }
+            model.copyAttachCommand(
+                hostId: host.id, sessionName: session.name, reachingHost: reachingHost
+            )
+            copyConfirmation?.cancel()
+            copyConfirmation = Task {
+                copiedCommand = copied
+                try? await Task.sleep(for: .seconds(1.6))
+                // The cancelled task still gets here — `try?` swallows the `CancellationError`
+                // — and would clear the tick the *new* one has just set, which is the exact
+                // early withdrawal cancelling was meant to prevent.
+                guard !Task.isCancelled else { return }
+                copiedCommand = nil
+            }
+        } label: {
+            // A copy that says nothing is indistinguishable from a click that missed, and this one
+            // has no visible result anywhere: the clipboard is not on screen. So the glyph becomes
+            // a tick for a moment.
+            Image(systemName: copiedCommand == nil ? "terminal" : "checkmark")
+        }
+        // The command itself, because the point of copying it is to run it somewhere else and the
+        // tooltip is the only chance to see what is being copied before it replaces the clipboard.
+        // Both states are named — a bare tick is a result with no subject — and the tick's caption
+        // is the snapshot of what was copied, never re-derived: ⌘ may have changed since the click,
+        // and the confirmation reports the past, which the monitor cannot answer for.
+        //
+        // The ⌘ hint is offered only where ⌘ would change the answer — on a local host the two
+        // lines are the same, and a modifier advertised where it does nothing is one nobody
+        // trusts anywhere.
+        .help(
+            copiedCommand.map { "Copied: \($0)" }
+                ?? command.map { "Copy attach command: \($0)\(attachCommandHint)" }
+                ?? "Copy attach command"
+        )
+        .disabled(command == nil)
+        .accessibilityLabel(
+            modifiers.isCommandHeld && commandChangesWithModifier
+                ? "Copy attach command without ssh" : "Copy attach command"
+        )
+    }
+
+    /// The shared F4.36 gate, by this button's host — asked by the hint and the accessibility
+    /// label both, so the two cannot drift about where ⌘ does something.
+    private var commandChangesWithModifier: Bool {
+        host.map { model.attachCommandDependsOnReachingHost(hostId: $0.id) } == true
+    }
+
+    /// What ⌘ would do to the copied command, said only where it would do something.
+    private var attachCommandHint: String {
+        guard commandChangesWithModifier, !modifiers.isCommandHeld else { return "" }
+        return " — hold ⌘ to copy it without the part that reaches the host"
     }
 }
 
@@ -1438,9 +1501,10 @@ struct EmptyStateView: View {
 struct MenuBarContent: View {
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
-    /// Owned here rather than by the app so it exists for as long as the menu can be opened, and so
-    /// the items and the hint below them cannot disagree about what ⌥ is currently doing.
-    @State private var optionKey = OptionKeyMonitor()
+    /// The shared monitor rather than one of its own: its tracking observers live for the whole
+    /// process, so the type owns the single copy — see `MenuModifierMonitor.shared`. Reading it
+    /// from here still keeps the items and the hint below them agreeing about what ⌥ is doing.
+    private let menuModifiers = MenuModifierMonitor.shared
 
     /// What every item in this menu does while ⌥ is held, and the icon that says so.
     private var newWindowIcon: String { "macwindow.on.rectangle" }
@@ -1476,7 +1540,7 @@ struct MenuBarContent: View {
                 Button {
                     newSession(host: host)
                 } label: {
-                    Label("New Session", systemImage: optionKey.isHeld ? newWindowIcon : "plus")
+                    Label("New Session", systemImage: menuModifiers.isOptionHeld ? newWindowIcon : "plus")
                 }
             }
         }
@@ -1485,7 +1549,7 @@ struct MenuBarContent: View {
         // behaviour the way AppKit's `isAlternate` does, so the icons above are swapped by hand
         // while ⌥ is down and this says what they mean.
         Label(
-            optionKey.isHeld ? "Opening in a new window" : "Hold ⌥ to open sessions in a new window",
+            menuModifiers.isOptionHeld ? "Opening in a new window" : "Hold ⌥ to open sessions in a new window",
             systemImage: newWindowIcon
         )
         .font(.caption)
@@ -1495,7 +1559,7 @@ struct MenuBarContent: View {
     }
 
     private func icon(live: Bool) -> String {
-        if optionKey.isHeld { return newWindowIcon }
+        if menuModifiers.isOptionHeld { return newWindowIcon }
         return live ? "macwindow.badge.plus" : "macwindow"
     }
 
@@ -1569,7 +1633,16 @@ enum OptionKey {
     static var isHeld: Bool { NSEvent.modifierFlags.contains(.option) }
 }
 
-/// Whether ⌥ is down *right now*, so an open menu can show what clicking it would do.
+/// ⌘ at this instant, read for the same reason and under the same rule as `OptionKey`.
+///
+/// It decides one thing: whether the copyable attach command (F4.36) carries the half that reaches
+/// the host. Held, it does not — the answer for somebody who is already on that machine.
+@MainActor
+enum CommandKey {
+    static var isHeld: Bool { NSEvent.modifierFlags.contains(.command) }
+}
+
+/// Which modifiers are down *right now*, so an open menu can show what clicking it would do.
 ///
 /// Polled, which wants justifying. The modifier cannot come from the items themselves —
 /// `MenuBarExtra` hands its content no event and SwiftUI has no equivalent of AppKit's
@@ -1579,14 +1652,27 @@ enum OptionKey {
 /// a timer — scheduled in the *common* run-loop modes, which is the part that makes it fire during
 /// menu tracking at all — and only between `NSMenu` beginning and ending its tracking, so nothing
 /// wakes up while no menu is open.
+/// Both modifiers rather than one because both are read from a menu: ⌥ says a session will open in a
+/// window of its own, and ⌘ says the copied attach command will stop at the host it is on. One timer
+/// answering both is also the only way the two cannot disagree about when they sampled.
 @MainActor
 @Observable
-final class OptionKeyMonitor {
-    private(set) var isHeld = false
+final class MenuModifierMonitor {
+    /// The one instance, and `init` is private because a second would be a leak: it registers
+    /// `NSMenu` tracking observers that live as long as the process. A per-view copy — and a
+    /// `@State` *default value* is re-evaluated on every construction of the view struct — would
+    /// leave a discarded pair of observers registered on every body pass, walked on every menu
+    /// open forever, and put one more 20 Hz timer behind every open menu. The flags being sampled
+    /// are global hardware state, so one answer serves every surface — which is also what makes
+    /// two menus unable to disagree about when they sampled.
+    static let shared = MenuModifierMonitor()
+
+    private(set) var isOptionHeld = false
+    private(set) var isCommandHeld = false
 
     @ObservationIgnored private var timer: Timer?
 
-    init() {
+    private init() {
         let center = NotificationCenter.default
         center.addObserver(
             forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
@@ -1614,21 +1700,21 @@ final class OptionKeyMonitor {
     private func stop() {
         timer?.invalidate()
         timer = nil
-        // The menu is gone; leaving this set would show the alternate icons the moment it reopens.
-        isHeld = false
+        // The menu is gone; leaving these set would show the alternate icons the moment it reopens.
+        isOptionHeld = false
+        isCommandHeld = false
     }
 
     private func sample() {
-        let held = OptionKey.isHeld
-        guard held != isHeld else { return }
-        isHeld = held
+        if OptionKey.isHeld != isOptionHeld { isOptionHeld = OptionKey.isHeld }
+        if CommandKey.isHeld != isCommandHeld { isCommandHeld = CommandKey.isHeld }
     }
 }
 
 /// The same question for an ordinary window: is ⌥ down, so a close button can say that clicking it
-/// will not stop to ask?
+/// will not stop to ask — and is ⌘, so the toolbar's copy can say what it is about to copy?
 ///
-/// Separate from `OptionKeyMonitor` because the two have opposite constraints. A window's events go
+/// Separate from `MenuModifierMonitor` because the two have opposite constraints. A window's events go
 /// through the normal responder chain, so `.flagsChanged` simply arrives — no Accessibility
 /// permission, no timer, and nothing running while the key is not being pressed. That monitor cannot
 /// use this mechanism (a menu tracks events in a run loop where a local monitor sees nothing), and
@@ -1641,6 +1727,7 @@ final class OptionKeyMonitor {
 @Observable
 final class ModifierKeyMonitor {
     private(set) var isOptionHeld = false
+    private(set) var isCommandHeld = false
 
     /// `nonisolated(unsafe)` so `deinit` can take it back. It is written once in `init` and read once
     /// in `deinit`, and `NSEvent.removeMonitor` is safe from either.
@@ -1654,8 +1741,11 @@ final class ModifierKeyMonitor {
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .mouseEntered]) {
             [weak self] event in
             MainActor.assumeIsolated {
-                let held = event.modifierFlags.contains(.option)
-                if let self, held != self.isOptionHeld { self.isOptionHeld = held }
+                guard let self else { return }
+                let option = event.modifierFlags.contains(.option)
+                if option != self.isOptionHeld { self.isOptionHeld = option }
+                let command = event.modifierFlags.contains(.command)
+                if command != self.isCommandHeld { self.isCommandHeld = command }
             }
             return event
         }

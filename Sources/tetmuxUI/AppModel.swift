@@ -836,9 +836,27 @@ public final class AppModel {
     /// so it answers for a session on a host nothing is attached to — which is most of the reason to
     /// want it: the session is on screen in the tree because a probe found it (F4.4), and reaching it
     /// from a shell needs no connection here at all.
-    public func attachCommand(hostId: String, sessionName: String) -> String? {
+    ///
+    /// - Parameter reachingHost: `false` is ⌘ on the control that asked — the same session as typed
+    ///   from a shell already on that host, with the ssh half of the line taken off. Passed down
+    ///   rather than trimmed here: what counts as reaching the host is `TmuxCommand`'s to know, and
+    ///   a wrapper host has no `ssh` in its line to remove.
+    public func attachCommand(
+        hostId: String, sessionName: String, reachingHost: Bool = true
+    ) -> String? {
         guard let host = hosts.first(where: { $0.id == hostId }) else { return nil }
-        return TmuxCommand.attachCommandLine(host: host.config, sessionName: sessionName)
+        return TmuxCommand.attachCommandLine(
+            host: host.config, sessionName: sessionName, reachingHost: reachingHost
+        )
+    }
+
+    /// `TmuxCommand.attachCommandDependsOnReachingHost` by host id — the one gate every control
+    /// that advertises ⌘ asks, so the tooltip hint, the menu title and the accessibility label
+    /// cannot disagree about where the modifier does something. False for a host that is gone,
+    /// which is also a host with no line to modify.
+    public func attachCommandDependsOnReachingHost(hostId: String) -> Bool {
+        guard let host = hosts.first(where: { $0.id == hostId }) else { return false }
+        return TmuxCommand.attachCommandDependsOnReachingHost(host: host.config)
     }
 
     /// The same, on the pasteboard. `false` when there was nothing to copy, so a control can say so
@@ -849,9 +867,13 @@ public final class AppModel {
     /// on it. The default is what every caller uses.
     @discardableResult
     public func copyAttachCommand(
-        hostId: String, sessionName: String, to pasteboard: NSPasteboard = .general
+        hostId: String, sessionName: String, reachingHost: Bool = true,
+        to pasteboard: NSPasteboard = .general
     ) -> Bool {
-        guard let command = attachCommand(hostId: hostId, sessionName: sessionName) else { return false }
+        let command = attachCommand(
+            hostId: hostId, sessionName: sessionName, reachingHost: reachingHost
+        )
+        guard let command else { return false }
         pasteboard.clearContents()
         pasteboard.setString(command, forType: .string)
         return true

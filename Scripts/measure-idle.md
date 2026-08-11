@@ -82,9 +82,9 @@ drains a battery, and `ps` cannot see it.
     sudo powermetrics --samplers tasks -n 3 -i 5000 | grep -E "^tetmux|Name.*ID.*CPU"
 
 The column to read is **Intr Wakeups** (interrupt-driven wakeups per second) and its idle-state
-sibling. There is exactly one polling timer in the whole application — `OptionKeyMonitor`, at 20 Hz,
-and only between `NSMenu`'s begin- and end-tracking notifications, so with no menu open it is not
-running. Anything above a handful of wakeups per second with every pane quiet is a finding: the
+sibling. There is exactly one polling timer in the whole application — `MenuModifierMonitor.shared`,
+at 20 Hz, and only between `NSMenu`'s begin- and end-tracking notifications, so with no menu open it
+is not running. Anything above a handful of wakeups per second with every pane quiet is a finding: the
 suspects are a `%output` nobody stopped, a reconnect backoff still ticking, or a SwiftUI view
 rebuilding on a state broadcast that should not have been sent.
 
