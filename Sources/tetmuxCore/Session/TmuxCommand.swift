@@ -301,6 +301,20 @@ public enum TmuxCommand {
         "display-message -p -t \(quote(target)) '\(inheritedWorkingDirectoryFormat)'"
     }
 
+    /// One session's window indices, which is the one question about a *number* anything here asks.
+    ///
+    /// Indices are otherwise absent from this client on purpose — they are arbitrary, they are not
+    /// contiguous, and a position in the tab strip is not one of them (`SessionService.moveWindow`
+    /// says what that costs). This exists for the single case that cannot be phrased without one:
+    /// putting a window at the end of a session's tabs on tmux 3.0 and 3.1, where `-a` does not yet
+    /// mean "after the window `-t` names". The end is the highest index plus one, and the numbers
+    /// have to come from tmux because nothing in the model records them.
+    static let windowIndexFormat = "#{window_index}"
+
+    public static func windowIndices(session: String) -> String {
+        "list-windows -t \(quote(session)) -F '\(windowIndexFormat)'"
+    }
+
     /// `-c <dir>` for a spawn that should start where an existing pane is, or nothing at all.
     ///
     /// Empty for an answer that is not a usable directory — an empty or relative reply, which is what

@@ -30,21 +30,6 @@ Nothing.
 
 ## Parked by decision
 
-- [~] **`link-window` and the cross-session `move-window` land in a free index, not at the end.**
-  Both target `<session>:` with no index, which is tmux's "lowest free index there" — so a window
-  linked or moved into a session whose window 0 was killed arrives *in front of* that session's
-  tabs, not after them, and `moveWindow`'s own doc comment claims it appends. It is the same defect
-  `newWindow` had (fixed there with `-a -t <session>:<last window>`; see the tab entry in
-  `docs/behavior.md`), and it is parked rather than done because `-a` on `move-window` and
-  `link-window` is **tmux 3.2** and the R3.6 floor is 3.0: appending below 3.2 means the run of
-  `swap-window`s `moveWindow(before:)` already carries for reordering, run after the move lands. Do
-  it by reusing that helper rather than by writing a second copy of it, and extend
-  `testMovingAWindowToAnotherSessionKeepsWhatIsRunningInIt` with a killed window 0 in the
-  destination — the fault is invisible in a session whose indices are contiguous, which is every
-  session the suite currently builds. Not urgent: moving a tab between sessions is a menu item, and
-  the destination is a session the user is not looking at, so the wrong end of its strip is not on
-  screen at the moment it happens.
-
 - [~] **P6.7's cold launch: ~898 ms, amended out of the requirement rather than fixed.** The
   requirement now names **warm** launch, which passes at 268–288 ms (SRD §6, and the reasoning is
   there rather than here). This entry survives because it holds what was measured and what was ruled

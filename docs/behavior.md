@@ -452,10 +452,27 @@ the R3.6 floor (verified on 3.0, unlike `move-window -b`, which is 3.2). The anc
 own model, so a window created by another client a moment ago is not in it and the new tab lands
 before that one; that is the same staleness every other placement here has, and it is still the
 position the user could see. `testANewTabLandsAtTheEndWhenAnIndexIsFree` kills window 0 to make the
-hole and asserts both tabs, so a fix that moved the fault along by one would fail. **`link-window`
-and the cross-session `move-window` still take tmux's index** — both target `<session>:` and land in
-the same hole, and `move-window -a` is 3.2, so appending there needs the `swap-window` fallback
-`moveWindow` already has for reordering. `TODO.md` carries it.
+hole and asserts both tabs, so a fix that moved the fault along by one would fail.
+
+**A moved or linked tab lands at the end of the destination, and below tmux 3.2 that costs a round
+trip.** `link-window` and the cross-session `move-window` are one function in tmux —
+`cmd_move_window_exec`, over `server_link_window`, which resolves "no index given" into the first
+free index from `base-index` exactly as `new-window` does — so both took the arriving window into
+the same hole as the tab above, in front of the tabs the destination already had. Quieter than the
+new-tab case and worse to diagnose: the destination is a session the user is looking away from, so
+nothing on screen contradicts it, and the tab is merely in the wrong place when they next go there.
+`appendPosition` answers both. On 3.2 and after it is `-a -t <session>:<the last window>`, the same
+form `newWindow` uses. Below it, **`-a` is accepted and means something else**: 3.0 and 3.1 anchor at
+the destination's *current* window (`winlink_shuffle_up(dst, dst->curw)`, where 3.2 passes
+`target.wl`), which is somewhere else entirely and renumbers the windows it passes. So there the
+index is asked for — `TmuxCommand.windowIndices`, the one question about a number this client asks —
+and the end is named outright as the highest plus one. That is not the arithmetic
+`moveWindow(before:)` refuses to do: no position is derived from the strip, and the number comes
+from tmux rather than from a model that records no indices. A destination that cannot be counted is
+left to tmux, because a guessed index is worse than the wrong end — an index in use is a refusal,
+and the move does not happen at all.
+`testAMovedOrLinkedTabLandsAtTheEndOfTheDestination` asserts both commands against tmux's own order,
+and fails on 3.0 without the fallback, which is what keeps that branch honest.
 
 **Closing a tab unlinks; it must never kill (F4.9).** `AppModel.closeWindow` counts the sessions
 the window is linked to and sends `unlink-window` when there is more than one, so the window leaves

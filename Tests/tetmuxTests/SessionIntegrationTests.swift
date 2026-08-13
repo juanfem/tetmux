@@ -2840,6 +2840,85 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// A tab moved or linked into another session lands at the **end** of its tabs.
+    ///
+    /// `-t <session>:` is tmux's first free index rather than "append", so a destination whose window
+    /// 0 was killed takes the arriving window into that hole, in front of the tabs already there.
+    /// Both commands are asserted because they are one function in tmux — `link-window` and
+    /// `move-window` share `cmd_move_window_exec` — and both are asserted against tmux's own order:
+    /// the destination is a session the user is looking away from, so nothing on screen would
+    /// contradict this at the moment it happens.
+    ///
+    /// Runs the version branch on whichever tmux it is given, which is the point of running it under
+    /// `Scripts/test-matrix.sh`: 3.2 and after send `-a`, and 3.0 and 3.1 — where `-a` anchors at the
+    /// destination's *current* window instead — ask for the indices and name the end outright.
+    func testAMovedOrLinkedTabLandsAtTheEndOfTheDestination() async throws {
+        let other = "\(sessionName)-target"
+        defer { runTmux(["kill-session", "-t", other]) }
+        runTmux(["new-session", "-d", "-s", sessionName, "-n", "one"])
+        runTmux(["new-window", "-t", sessionName, "-n", "movable"])
+        runTmux(["new-window", "-t", sessionName, "-n", "linkable"])
+        runTmux(["new-session", "-d", "-s", other, "-n", "first"])
+        runTmux(["new-window", "-t", other, "-n", "second"])
+        // The hole. What is left in the destination is one window, at index 1.
+        runTmux(["kill-window", "-t", "\(other):0"])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let targetId = try XCTUnwrap(sessionId(named: other))
+        let host = try await waitForHost(service) { host in
+            host.sessions.first { $0.name == self.sessionName }?.windows.count == 3
+                && host.sessions.first { $0.id == targetId }?.windows.count == 1
+        }
+        let source = try XCTUnwrap(host.sessions.first { $0.name == sessionName })
+        let moving = try XCTUnwrap(source.windows.first { $0.name == "movable" })
+        let linking = try XCTUnwrap(source.windows.first { $0.name == "linkable" })
+        // The window the destination already had, which everything arriving has to end up behind.
+        let resident = try XCTUnwrap(host.sessions.first { $0.id == targetId }?.windows.first?.id)
+
+        await service.moveWindow(
+            hostId: "local", windowId: moving.id, fromSession: source.id, toSession: targetId
+        )
+        var settled = try await waitFor(seconds: 10) {
+            guard let host = await service.getHost("local") else { return false }
+            return host.sessions.first { $0.id == targetId }?.windows.count == 2
+        }
+        XCTAssertTrue(settled, "the window never moved to the target session")
+        XCTAssertEqual(
+            destinationOrder(of: other), [resident, moving.id],
+            "the moved tab landed in front of the tab the destination already had"
+        )
+
+        await service.linkWindow(hostId: "local", windowId: linking.id, toSession: targetId)
+        settled = try await waitFor(seconds: 10) {
+            guard let host = await service.getHost("local") else { return false }
+            return host.sessions.first { $0.id == targetId }?.windows.count == 3
+        }
+        XCTAssertTrue(settled, "the window was never linked into the target session")
+        XCTAssertEqual(
+            destinationOrder(of: other), [resident, moving.id, linking.id],
+            "the linked tab did not land at the end"
+        )
+
+        // And what the user would see, which is the model rather than tmux: it sorts by the order
+        // `list-windows` reports, so this fails separately if the sort is what broke.
+        let final = await service.getHost("local")
+        XCTAssertEqual(
+            final?.sessions.first { $0.id == targetId }?.windows.map(\.id),
+            [resident, moving.id, linking.id],
+            "tmux and the model disagree about where the tabs went"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// A session's window ids in tmux's order, which is index order.
+    private func destinationOrder(of session: String) -> [String] {
+        tmuxQuery(["list-windows", "-t", session, "-F", "#{window_id}"], allLines: true)?
+            .components(separatedBy: "\n") ?? []
+    }
+
     /// The other half of F4.9: tmux refuses to unlink a window from its only session, which is why
     /// that case has to stop and ask rather than silently doing nothing. If this ever starts
     /// succeeding, the confirmation is no longer needed and the close path should just unlink.

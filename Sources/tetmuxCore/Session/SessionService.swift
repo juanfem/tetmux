@@ -3520,15 +3520,66 @@ public actor SessionService {
 
     /// Moves a window out of one session and into another (F4.9's other half — nothing is killed).
     ///
-    /// Appended to the destination rather than placed: `-t $id:` with no index is tmux's own "next
-    /// free index there", and there is no drop position to honour when the gesture is a menu item.
-    public func moveWindow(hostId: String, windowId: String, fromSession: String, toSession: String) {
+    /// Appended to the destination rather than placed, which `appendPosition` has to say outright
+    /// because tmux's own "no index given" does not mean appended. There is no drop position to
+    /// honour when the gesture is a menu item, so the end of the strip is the whole of the intent.
+    public func moveWindow(hostId: String, windowId: String, fromSession: String, toSession: String) async {
         guard fromSession != toSession else { return }
+        let position = await appendPosition(hostId: hostId, session: toSession)
         send(
-            "move-window -s \(TmuxCommand.quote("\(fromSession):\(windowId)"))"
-                + " -t \(TmuxCommand.quote("\(toSession):"))",
+            "move-window -s \(TmuxCommand.quote("\(fromSession):\(windowId)"))\(position)",
             kind: .userCommand("Move tab"), hostId: hostId
         )
+    }
+
+    /// Where a window has to be sent to land at the **end** of `session`'s tabs: the `-t` a move or a
+    /// link needs, with the `-a` in front of it on the versions that mean by it what this does.
+    ///
+    /// `-t <session>:` — a session named with no index — is not "append". It is tmux's *first free
+    /// index* there, scanned upward from `base-index`: `server_link_window` resolves the `-1` exactly
+    /// as `new-window` does, so a destination whose window 0 was killed takes the arriving window
+    /// into that hole, in front of every tab it already has. That is the defect `newWindow` had, and
+    /// it is quieter here — the destination is a session the user is looking away from, so nothing on
+    /// screen contradicts it at the moment it happens, and the tab is simply in the wrong place when
+    /// they next go there.
+    ///
+    /// Two forms, because **3.2 is where `-a` came to mean "after the window `-t` names"**. 3.0 and
+    /// 3.1 accept the flag and anchor it at the destination's *current* window instead —
+    /// `winlink_shuffle_up(dst, dst->curw)` in their `cmd-move-window.c`, where 3.2 passes
+    /// `target.wl` — which is somewhere else entirely, and shuffles the windows after it up by one on
+    /// the way, renumbering tabs nobody touched. So below 3.2 the index is asked for and named
+    /// outright: the end is the highest index tmux reports plus one, which is what `-a` works out for
+    /// itself above. That is not the arithmetic `moveWindow(before:)` refuses to do — it derives no
+    /// position from a place in the strip, and the number comes from tmux a round trip ago rather
+    /// than from a model that records no indices at all.
+    private func appendPosition(hostId: String, session: String) async -> String {
+        // What tmux would have picked. Also the answer when there is nothing better to say, and it is
+        // right whenever the indices have no hole in them — which is every session until something is
+        // killed out of the middle of one.
+        let freeIndex = " -t \(TmuxCommand.quote("\(session):"))"
+        guard let connection = connections[hostId] else { return freeIndex }
+        // Unknown version is treated as modern, like every other version gate here: an old server
+        // answers with an error the user can see, where assuming old on a new one would silently
+        // spend a round trip on every move for the life of the connection.
+        if connection.version.map(\.movesWindowsRelatively) ?? true {
+            guard let last = windowOrder(hostId: hostId, sessionId: session)?.last else { return freeIndex }
+            // Session-qualified for the reason the `-s` above is: a linked window is reachable by
+            // `@id` from every session holding it, and an unqualified anchor leaves tmux to pick
+            // which of them the arriving window is placed against.
+            return " -a -t \(TmuxCommand.quote("\(session):\(last)"))"
+        }
+        let lines = await sendAndAwaitResult(
+            TmuxCommand.windowIndices(session: session), action: nil,
+            hostId: hostId, connection: connection
+        )
+        // The highest rather than the last line, which asserts nothing about how tmux orders its
+        // answer. A destination we cannot count is left to tmux, since a guessed index is the one
+        // failure that is worse than the wrong end: an index in use is a refusal, and the move that
+        // the user asked for does not happen at all.
+        guard let last = lines?.compactMap({ Int(String(decoding: $0, as: UTF8.self)) }).max() else {
+            return freeIndex
+        }
+        return " -t \(TmuxCommand.quote("\(session):\(last + 1)"))"
     }
 
     /// The same move, into a session that does not exist yet — three commands, because tmux has no
@@ -3589,9 +3640,14 @@ public actor SessionService {
     /// The inverse of `unlinkWindow`, and the thing that makes F4.9's unlink path reachable at all: a
     /// window in one session cannot be closed without being killed, and this is how it comes to be in
     /// two.
-    public func linkWindow(hostId: String, windowId: String, toSession: String) {
+    ///
+    /// Placed at the end of the destination like a move, and for the same reason: `link-window` and
+    /// `move-window` are one function in tmux — the same `cmd_move_window_exec`, the same
+    /// `server_link_window` underneath — so they take the arriving window into the same hole.
+    public func linkWindow(hostId: String, windowId: String, toSession: String) async {
+        let position = await appendPosition(hostId: hostId, session: toSession)
         send(
-            "link-window -s \(windowId) -t \(TmuxCommand.quote("\(toSession):"))",
+            "link-window -s \(windowId)\(position)",
             kind: .userCommand("Link tab"), hostId: hostId
         )
     }

@@ -929,6 +929,12 @@ public struct TmuxVersion: Comparable, Sendable {
     /// `move-window -a`/`-b`, which places a window next to another one instead of at a numbered
     /// index. Added in 3.2; 3.0 answers `move-window: illegal option -- b` and offers only `[-dkr]`.
     /// Below it, the same reordering is built out of `swap-window`.
+    ///
+    /// `-a` is the subtler half and this gate covers it too. 3.0 and 3.1 *accept* the flag — it is in
+    /// their `args` string — but anchor it at the destination session's **current** window rather
+    /// than at the one `-t` names: `winlink_shuffle_up(dst, dst->curw)`, where 3.2 passes
+    /// `target.wl`. So a `-a` sent below 3.2 does not fail, it lands somewhere else and renumbers the
+    /// windows it passes. `link-window` shares the same exec and the same history.
     public var movesWindowsRelatively: Bool { self >= TmuxVersion("3.2")! }
     /// `window-size manual` plus `resize-window -t @id`, which is what lets one macOS window size its
     /// tmux window independently of another's. Below it, `window-size latest` and `refresh-client -C`
