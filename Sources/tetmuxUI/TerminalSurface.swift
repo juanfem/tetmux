@@ -445,6 +445,12 @@ struct TerminalPaneView: NSViewRepresentable {
             paste(NSPasteboard.general.string(forType: .string))
         }
 
+        /// A drop's text, which arrives with the destination chosen by the pointer the way a
+        /// right-click's does — hence this pane, focused as a side effect like every paste here.
+        func insert(dropped text: String) {
+            paste(text)
+        }
+
         /// Middle-click's text: the selection, the way it is on every X11 terminal.
         ///
         /// This pane's own selection first, then the last selection made in *any* pane, which is
@@ -595,6 +601,104 @@ class ComposingTerminalView: TerminalView {
     /// What the last `insertText` was given, so a replacement knows how many characters — rather
     /// than how many UTF-16 units — it is being asked to take back.
     private var lastInsertedText: String?
+
+    override init(frame: CGRect, font: NSFont?) {
+        super.init(frame: frame, font: font)
+        registerForDraggedTypes(Self.droppedTypes)
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes(Self.droppedTypes)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes(Self.droppedTypes)
+    }
+
+    // MARK: - Drag and drop
+
+    /// What a terminal accepts from a drag, the way Terminal.app does: files, whose paths it
+    /// types, and plain text, which it pastes. Registered here rather than on `PaneTerminalView`
+    /// for the reason this class exists at all — §4.6's passthrough surface is a terminal too,
+    /// and a drop that worked everywhere except during a fallback would read as flakiness.
+    static let droppedTypes: [NSPasteboard.PasteboardType] = [.fileURL, .string]
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        sender.draggingPasteboard.availableType(from: Self.droppedTypes) == nil ? [] : .copy
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        true
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let text = Self.droppedText(from: sender.draggingPasteboard) else { return false }
+        insertDropped(text)
+        return true
+    }
+
+    /// The text a drop turns into, decided from the pasteboard alone so a test can hand one in.
+    ///
+    /// Files beat the text that rides along with them — a Finder drag carries both, and the
+    /// string half is the display name, not the path. Paths are escaped one by one, joined with
+    /// spaces, and given one trailing space, so a drop composes into a command being typed and
+    /// a second drop continues it. Dropped *text* is inserted verbatim, trailing nothing: it is
+    /// a paste, not an argument.
+    static func droppedText(from pasteboard: NSPasteboard) -> String? {
+        if let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL], !urls.isEmpty {
+            return urls.map { shellEscaped($0.path) }.joined(separator: " ") + " "
+        }
+        guard let text = pasteboard.string(forType: .string), !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// A path made safe to type at a shell, the way Terminal.app escapes one.
+    ///
+    /// Backslash-escaped against an allowlist rather than quoted, so the common case reads as a
+    /// path and not as machinery. Two deliberate edges:
+    ///
+    /// - Non-ASCII passes through untouched. It is literal to every shell, and `café` should not
+    ///   arrive as `caf\é`.
+    /// - A path carrying a newline falls back to single quotes, because backslash-newline is a
+    ///   line *continuation*: the escape that works for every other character makes this one
+    ///   vanish, and the fragment before it would be run as a command on its own.
+    static func shellEscaped(_ path: String) -> String {
+        if path.contains(where: \.isNewline) {
+            return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        var escaped = ""
+        for scalar in path.unicodeScalars {
+            if scalar.value > 127 || Self.unescapedScalars.contains(scalar) {
+                escaped.unicodeScalars.append(scalar)
+            } else {
+                escaped += "\\"
+                escaped.unicodeScalars.append(scalar)
+            }
+        }
+        return escaped
+    }
+
+    /// ASCII that no shell gives a meaning to. `~` and `=` are absent on purpose — zsh expands
+    /// both at the start of a word — and over-escaping is harmless where under-escaping is not:
+    /// a backslash before an ordinary character is that character.
+    private static let unescapedScalars = CharacterSet(
+        charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+,:@%"
+    )
+
+    /// What a drop does once its text is decided. This base implementation is the passthrough
+    /// surface's: there is no tmux on the far end to buffer through, so the text goes straight
+    /// out the channel the way SwiftTerm's own paste would send it, wrapped in bracketed-paste
+    /// markers when the program asked for them. `PaneTerminalView` overrides it to route through
+    /// `SessionService.paste` — SwiftTerm's insertion is the keystroke-per-character path whose
+    /// own comment says a newline cannot travel it safely.
+    func insertDropped(_ text: String) {
+        let bracketed = getTerminal().bracketedPasteMode
+        send(txt: bracketed ? "\u{1b}[200~\(text)\u{1b}[201~" : text)
+    }
 
     /// True only while the *emulator* is writing back, rather than the user.
     ///
@@ -748,6 +852,14 @@ final class PaneTerminalView: ComposingTerminalView, NSMenuItemValidation {
     /// newline safely. The service builds a tmux buffer instead, chunked and double-quoted.
     @objc private func pasteIntoPane() {
         coordinator?.pasteFromPasteboard()
+    }
+
+    /// A drop is a paste whose text is already decided, so it takes the same route as the context
+    /// menu's Paste and for the same reason — the base class's direct write is for the surface
+    /// with no tmux behind it. Targeting *this* pane rather than the focused one is what the
+    /// gesture means: a drop is a statement about where the pointer is.
+    override func insertDropped(_ text: String) {
+        coordinator?.insert(dropped: text)
     }
 
     // MARK: - Accessibility

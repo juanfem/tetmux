@@ -603,6 +603,24 @@ would empty itself the moment you reached for the mouse. `allowsContextMenuPlugI
 AppKit from adding AutoFill and Look Up, which it offers because the view takes text input and
 which mean nothing over a remote pane.
 
+**A drop types what Terminal.app would: files as escaped paths, text as a paste.**
+`ComposingTerminalView` is the drag destination, so the pane and §4.6's passthrough surface accept
+the same drops — registration lives in its initialisers, where a surface cannot be created without
+it. Files beat the text that rides along with them, because a Finder drag carries both and the
+string half is the *display name*: taking it would type `plain.txt` with no path. Each path is
+backslash-escaped against an ASCII allowlist (`~` and `=` escaped on purpose — zsh expands both at
+the start of a word; non-ASCII untouched, since it is literal to every shell and `café` must not
+arrive as `caf\é`), and a path carrying a newline falls back to single quotes, because
+backslash-newline is a line *continuation* — the escape that carries every other character makes
+this one vanish and the fragment before it would run as a command. Paths end with one trailing
+space so a drop composes into a command being typed; dropped text is verbatim, because it is a
+paste, not an argument. The routes then differ where every paste's do: `PaneTerminalView` hands
+the text to `SessionService.paste` — SwiftTerm's own insertion is the keystroke-per-character path
+that cannot carry a newline — targeting *this* pane and focusing it, since a drop, like a
+right-click, is a statement about where the pointer is; the passthrough surface writes to its
+channel directly, wrapped in bracketed-paste markers when the program asked for them, because
+there is no tmux buffer on the far end to go through. `PaneDropTests` pins all of it.
+
 **A pane's accessibility value is the viewport, not the scrollback.** SwiftTerm's accessibility
 service is an empty stub, so `PaneTerminalView` supplies the value itself, bounded by the grid — a
 screen reader query must not cost more because a pane is holding a large history, and "read the
