@@ -387,6 +387,7 @@ public struct TerminalContainerView: View {
             cols: cols,
             rows: rows,
             isFocused: focused,
+            isSelectedTab: isSelectedTab,
             theme: theme,
             allowsRemoteClipboardWrite: allowsRemoteClipboardWrite,
             service: service,

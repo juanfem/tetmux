@@ -163,6 +163,10 @@ struct TerminalPaneView: NSViewRepresentable {
     let cols: Int
     let rows: Int
     let isFocused: Bool
+    /// Whether this pane's tab is the one on screen. Distinct from `isFocused`, which names one
+    /// pane of that tab: every pane of the selected tab is a legal drop destination, and no pane of
+    /// any other tab is. See `ComposingTerminalView.acceptsDrops` for what that gates and why.
+    let isSelectedTab: Bool
     let theme: TerminalTheme
     /// T5.6 — this host's opt-in, not an application-wide one. See `HostConfig`.
     let allowsRemoteClipboardWrite: Bool
@@ -191,6 +195,7 @@ struct TerminalPaneView: NSViewRepresentable {
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(NSAccessibility.Role.textArea)
         view.setAccessibilityLabel("Terminal pane \(paneId)")
+        applyDropRegistration(to: view)
 
         context.coordinator.attach(view: view, hostId: hostId, paneId: paneId, service: service)
         if cols > 0 && rows > 0 {
@@ -252,6 +257,7 @@ struct TerminalPaneView: NSViewRepresentable {
 
     func updateNSView(_ view: TerminalView, context: Context) {
         context.coordinator.parent = self
+        applyDropRegistration(to: view)
         // Cheap, and it keeps the gutter reclaimed if SwiftTerm ever rebuilds the scroller — the
         // failure it guards against is silent and only visible as text wrapping a few columns early.
         Self.hideReservedScroller(in: view)
@@ -286,6 +292,15 @@ struct TerminalPaneView: NSViewRepresentable {
                 view.window?.makeFirstResponder(view)
             }
         }
+    }
+
+    /// Whether this pane is currently a drop destination, applied on every update rather than only
+    /// at creation: panes are never rebuilt — their `.id(paneId)` is what keeps their scrollback —
+    /// so a view first made in a background tab would otherwise stay unregistered after the switch
+    /// that put it on screen. Split out from `updateNSView` so a test can drive it without a
+    /// `Context`, which is not constructible outside SwiftUI.
+    func applyDropRegistration(to view: TerminalView) {
+        (view as? ComposingTerminalView)?.acceptsDrops = isSelectedTab
     }
 
     static func dismantleNSView(_ view: TerminalView, coordinator: Coordinator) {
@@ -624,6 +639,29 @@ class ComposingTerminalView: TerminalView {
     /// for the reason this class exists at all — §4.6's passthrough surface is a terminal too,
     /// and a drop that worked everywhere except during a fallback would read as flakiness.
     static let droppedTypes: [NSPasteboard.PasteboardType] = [.fileURL, .string]
+
+    /// Whether this surface is a drop destination at all, which is *not* the same question as
+    /// whether it is on screen.
+    ///
+    /// Every tab of a session is built and stacked (`AppMain`'s `ZStack`), with the ones that are
+    /// not selected hidden by zero opacity and `allowsHitTesting(false)`. Neither of those reaches
+    /// AppKit's search for a drag's destination: that search consults which views are *registered*
+    /// for the dragged types and where their frames are, and a background tab's panes are real
+    /// views at the full frame. So with two tabs open, a drop onto the tab on screen landed in the
+    /// first tab's pane instead — the path was typed into a shell the user could not see, and
+    /// nothing on screen said where it had gone. Registration is the one lever that search obeys,
+    /// so a background tab's panes hold none.
+    var acceptsDrops: Bool {
+        get { !registeredDraggedTypes.isEmpty }
+        set {
+            guard newValue != acceptsDrops else { return }
+            if newValue {
+                registerForDraggedTypes(Self.droppedTypes)
+            } else {
+                unregisterDraggedTypes()
+            }
+        }
+    }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         sender.draggingPasteboard.availableType(from: Self.droppedTypes) == nil ? [] : .copy

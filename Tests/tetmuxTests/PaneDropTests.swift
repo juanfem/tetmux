@@ -113,6 +113,47 @@ final class PaneDropTests: XCTestCase {
         }
     }
 
+    /// A background tab's panes must hold no registration at all.
+    ///
+    /// Every tab of a session is built and stacked, and the ones not selected are hidden with zero
+    /// opacity and `allowsHitTesting(false)` — neither of which AppKit's search for a drag's
+    /// destination consults. It goes by registration and frames, so with two tabs open every drop
+    /// landed in the first tab's pane rather than the tab on screen, typing the path into a shell
+    /// the user could not see. Unregistering is the only thing that search obeys.
+    func testOnlyTheSelectedTabsPanesAreDropDestinations() {
+        let view = PaneTerminalView(
+            frame: NSRect(x: 0, y: 0, width: 640, height: 400),
+            font: TerminalTheme.default.resolvedFont()
+        )
+        view.acceptsDrops = false
+        XCTAssertEqual(view.registeredDraggedTypes, [], "a hidden tab's pane still took drops")
+
+        // And a tab switch puts them back: panes are never rebuilt, so nothing else would.
+        view.acceptsDrops = true
+        XCTAssertTrue(view.registeredDraggedTypes.contains(.fileURL))
+        XCTAssertTrue(view.registeredDraggedTypes.contains(.string))
+    }
+
+    /// The flag reaches the view from the tab that owns it, which is the half a unit test on the
+    /// view alone cannot see: `isSelectedTab` is threaded through `TerminalPaneView` separately
+    /// from `isFocused`, because every pane of the visible tab is a destination and only one of
+    /// them has the keyboard.
+    func testTheSelectedTabFlagReachesTheSurface() {
+        let view = PaneTerminalView(
+            frame: NSRect(x: 0, y: 0, width: 640, height: 400),
+            font: TerminalTheme.default.resolvedFont()
+        )
+        for selected in [false, true, false] {
+            let pane = TerminalPaneView(
+                hostId: "local", paneId: "%1", cols: 80, rows: 24, isFocused: false,
+                isSelectedTab: selected, theme: .default, allowsRemoteClipboardWrite: false,
+                service: SessionService(), onFocusRequest: {}
+            )
+            pane.applyDropRegistration(to: view)
+            XCTAssertEqual(view.acceptsDrops, selected)
+        }
+    }
+
     /// The base class's route is the passthrough surface's: straight out the channel, because
     /// there is no tmux buffer on the far end to go through.
     func testTheBaseSurfaceWritesADropStraightToTheChannel() {
@@ -151,8 +192,8 @@ final class PaneDropTests: XCTestCase {
         var focusRequests = 0
         let coordinator = TerminalPaneView.Coordinator(parent: TerminalPaneView(
             hostId: "local", paneId: "%1", cols: 80, rows: 24, isFocused: false,
-            theme: .default, allowsRemoteClipboardWrite: false, service: SessionService(),
-            onFocusRequest: { focusRequests += 1 }
+            isSelectedTab: true, theme: .default, allowsRemoteClipboardWrite: false,
+            service: SessionService(), onFocusRequest: { focusRequests += 1 }
         ))
         let recorder = RecordingDropDelegate()
         let view = PaneTerminalView(

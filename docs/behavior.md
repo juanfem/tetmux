@@ -621,6 +621,19 @@ right-click, is a statement about where the pointer is; the passthrough surface 
 channel directly, wrapped in bracketed-paste markers when the program asked for them, because
 there is no tmux buffer on the far end to go through. `PaneDropTests` pins all of it.
 
+**A background tab's panes must hold no drag registration, because nothing else hides them from a
+drag.** Every tab of a session is built and stacked in one `ZStack` (see the tab-switching entry
+above for why it cannot be an `if`), and the ones not selected are hidden with zero opacity and
+`allowsHitTesting(false)`. AppKit's search for a drag's destination consults neither: it goes by
+which views are *registered* for the dragged types and where their frames are, and a hidden tab's
+panes are real views at the full frame. With two tabs open, every drop therefore landed in the
+first tab's pane — the path was typed into a shell the user could not see, and nothing on screen
+said where it had gone. So `isSelectedTab` reaches `TerminalPaneView` in its own right, separate
+from `isFocused` (every pane of the visible tab is a destination; only one of them has the
+keyboard), and drives `ComposingTerminalView.acceptsDrops`, which registers and unregisters the
+types. Applied on every `updateNSView` and not only at creation: panes are never rebuilt, so a view
+first made in a background tab would otherwise stay unregistered for the rest of its life.
+
 **A pane's accessibility value is the viewport, not the scrollback.** SwiftTerm's accessibility
 service is an empty stub, so `PaneTerminalView` supplies the value itself, bounded by the grid — a
 screen reader query must not cost more because a pane is holding a large history, and "read the
