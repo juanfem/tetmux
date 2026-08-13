@@ -75,6 +75,22 @@ released *and repainted*, because whoever picks it up has been having its bytes 
 mid-stream on a screen it never drew. `refresh-client -A` (the pause) has to go to the owning
 client too — asking the primary to pause a pane it is not streaming does nothing at all, silently.
 
+**A claim is given up when the *window* moves, not only when the channel does.** Ownership was
+released on two events, and both are about the channel: it died, or `switch-client` moved it. A
+window can move instead — "Move to Session", and the New Session item that makes the destination
+first — and it takes its panes out of the session its owner is attached to. tmux then sends that
+client no further `%output` for them while the follower on the session they landed in has every
+byte dropped as a duplicate, so the moved tab froze the instant it arrived and stayed frozen for
+the life of the connection, with keystrokes still reaching it and nothing on screen saying the
+picture was a photograph. `releaseStrandedPanes` reads ownership back off the topology census — a
+claim whose owner is attached to none of the sessions now showing the pane is dropped, and the pane
+repainted for whichever client picks it up. It runs beside `pruneVanishedPanes` and off the
+same `list-panes -a`, and for the same reason that one is not driven from `%window-close`: the
+notification cannot say which session a window left, and an unlinked window still in the owner's
+session must keep its claim. **The one-window case hides this**: with only the moved tab on screen
+the primary follows it, and the release its `switch-client` performs repairs the claim as a side
+effect — so the defect only shows when something else keeps the source session on screen.
+
 **`HostState.liveSessionIds` is what tetmux is attached to, and it counts channels that are still
 connecting.** `TmuxSession.isAttached` is tmux's own client count and includes terminals elsewhere
 on the machine, so it cannot answer "are these panes live?". Liveness deliberately includes a

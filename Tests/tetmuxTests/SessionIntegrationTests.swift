@@ -2511,6 +2511,99 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// The moved tab keeps streaming where it landed.
+    ///
+    /// Everything above about the move is about the server: the window arrives and the placeholder
+    /// is gone. This is about the screen, and it goes through `AppModel` because the freeze needs
+    /// the whole chain — the reveal that points a window at the new session, the client that session
+    /// then gets, and the pane claim that has to change hands between the two.
+    ///
+    /// `%output` reaches a control client only for the session it is attached to, so a window that
+    /// changes session changes which channel can see its panes. The pane here is subscribed *before*
+    /// the move, as a view on screen is: the claim it makes is the thing that goes stale, and a test
+    /// that subscribed afterwards would repaint its way past the bug without ever streaming a byte.
+    func testATabMovedToANewSessionKeepsStreamingThere() async throws {
+        runTmux(["new-session", "-d", "-s", sessionName, "-n", "one"])
+        runTmux(["new-window", "-t", sessionName, "-n", "two"])
+
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tetmux-integration-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let model = await AppModel(directory: scratch)
+        // The model only hears about topology once it has subscribed, and that is what decides where
+        // the moved tab is shown.
+        await model.bootstrap()
+        let service = await model.service
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let attached = sessionName
+        let host = try await waitForHost(service, timeout: 15) { host in
+            host.sessions.first { $0.name == attached }?
+                .windows.first { $0.name == "two" }?.preferredPaneId != nil
+        }
+        let session = try XCTUnwrap(host.sessions.first { $0.name == attached })
+        let movedWindow = try XCTUnwrap(session.windows.first { $0.name == "two" })
+        let paneId = try XCTUnwrap(movedWindow.preferredPaneId)
+
+        // Two macOS windows on the source session. The second one is what makes this the interesting
+        // case: it keeps the source session on screen, so the primary channel stays attached to it
+        // rather than following the moved tab, and the session the tab lands in is served by a
+        // follower. With one window the primary switches session and releases its panes on the way,
+        // which repairs the claim as a side effect and hides the defect entirely.
+        let windows = await MainActor.run { () -> [WindowState] in
+            let other = WindowState()
+            other.selectedHostId = "local"
+            other.selectedSessionId = session.id
+            other.selectedWindowId = session.windows.first { $0.name == "one" }?.id
+            model.registerWindow(other)
+            let state = WindowState()
+            state.selectedHostId = "local"
+            state.selectedSessionId = session.id
+            state.selectedWindowId = movedWindow.id
+            model.registerWindow(state)
+            return [other, state]
+        }
+        let state = windows[1]
+
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
+        let collector = OutputCollector()
+        let reader = Task {
+            for await chunk in stream { await collector.append(String(decoding: chunk, as: UTF8.self)) }
+        }
+        defer { reader.cancel() }
+
+        try await Task.sleep(for: .milliseconds(700))
+        // The markers are assembled by the shell, so the line the tty echoes back does not contain
+        // them: every occurrence here is one the pane really produced.
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "echo before$(echo -n -move)\r")
+        let streamedBefore = try await waitFor(seconds: 15) { await collector.text.contains("before-move") }
+        XCTAssertTrue(streamedBefore, "the pane was not streaming before the move")
+
+        await MainActor.run {
+            model.moveWindowToNewSession(
+                hostId: "local", windowId: movedWindow.id, from: session.id, revealIn: state
+            )
+        }
+
+        // The window follows the tab, which is what asks for a client on the session it landed in.
+        let followed = try await waitFor(seconds: 15) {
+            await MainActor.run { state.selectedSessionId } != session.id
+        }
+        XCTAssertTrue(followed, "the window never followed the tab into its new session")
+        // The session it landed in has to have a client of its own before its output can arrive.
+        let landed = try await MainActor.run { try XCTUnwrap(state.selectedSessionId) }
+        _ = try await waitForHost(service, timeout: 15) { $0.liveSessionIds.contains(landed) }
+        try await Task.sleep(for: .milliseconds(500))
+
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "echo after$(echo -n -move)\r")
+        let streamedAfter = try await waitFor(seconds: 15) { await collector.text.contains("after-move") }
+        let text = await collector.text
+        XCTAssertTrue(streamedAfter, "the moved tab stopped streaming; got:\n\(text)")
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     /// The failure the sequence has to survive: the move does not happen, and the placeholder is
     /// killed anyway. Nothing may be left behind — killing a session's only window destroys the
     /// session — and above all nothing of the user's may be killed, which is what

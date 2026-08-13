@@ -2373,6 +2373,9 @@ public actor SessionService {
         // `list-panes -a` is the authoritative pane census, so this is the one moment the service can
         // tell a pane that is gone from one it has simply not heard about yet.
         pruneVanishedPanes(hostId: hostId)
+        // And the one moment it can tell that a pane still very much there has changed session under
+        // the client that was painting it.
+        releaseStrandedPanes(hostId: hostId)
     }
 
     // MARK: - Model helpers
@@ -2571,12 +2574,57 @@ public actor SessionService {
         let orphaned = (paneOwners[hostId] ?? [:]).filter { $0.value == epoch }.map(\.key)
         guard !orphaned.isEmpty else { return }
         for paneId in orphaned {
-            paneOwners[hostId]?.removeValue(forKey: paneId)
-            connections[hostId]?.repaintedPanes.remove(paneId)
+            releasePane(hostId: hostId, paneId: paneId)
         }
-        guard connections[hostId] != nil else { return }
-        for paneId in orphaned where outputSubscribers[hostId]?[paneId]?.isEmpty == false {
-            requestRepaint(hostId: hostId, paneId: paneId)
+    }
+
+    /// One pane's claim, given up. The repaint is the same argument `releasePanes` makes for a whole
+    /// channel's worth: whoever streams it next is mid-stream on a screen it never drew.
+    private func releasePane(hostId: String, paneId: String) {
+        paneOwners[hostId]?.removeValue(forKey: paneId)
+        connections[hostId]?.repaintedPanes.remove(paneId)
+        guard outputSubscribers[hostId]?[paneId]?.isEmpty == false else { return }
+        requestRepaint(hostId: hostId, paneId: paneId)
+    }
+
+    /// Gives up a claim held by a channel that can no longer see the pane.
+    ///
+    /// A pane is painted from exactly one channel's bytes — whichever claimed it first — and every
+    /// other copy is dropped, which is what keeps a window linked into two displayed sessions from
+    /// being painted twice. A claim was only ever released when its channel died or `switch-client`
+    /// moved it, and both are events about the *channel*. A **window** can move instead: "Move to
+    /// Session", and the New Session item that makes the destination first, take a window out of the
+    /// session its pane's owner is attached to, and `%output` reaches a control client only for the
+    /// session it is attached to. The pane was then owned by a client that would never send another
+    /// byte for it while the follower on the session it landed in had every byte discarded — a tab
+    /// that froze the moment it was moved and stayed frozen for the life of the connection, with
+    /// keystrokes still arriving and nothing on screen to say the picture was a photograph.
+    ///
+    /// Judged from the topology census rather than from `%window-close`, for the reason the prune
+    /// beside it is: the notification says a window left *a* session and cannot say which, and a
+    /// window that is still in the owner's session after an unlink must keep its claim.
+    private func releaseStrandedPanes(hostId: String) {
+        guard let host = hosts[hostId], !(paneOwners[hostId] ?? [:]).isEmpty else { return }
+
+        var sessionsShowing: [String: Set<String>] = [:]
+        for session in host.sessions {
+            for window in session.windows {
+                for paneId in window.panes.map(\.id) + (window.layoutTree?.paneIds ?? []) {
+                    sessionsShowing[paneId, default: []].insert(session.id)
+                }
+            }
+        }
+
+        for (paneId, epoch) in paneOwners[hostId] ?? [:] {
+            // A pane the census does not mention is not stranded, it is unknown — `pruneVanishedPanes`
+            // is what decides whether it is gone. A channel still handshaking is attached to nothing
+            // yet, and cannot be judged on a session it has not landed on.
+            guard let sessions = sessionsShowing[paneId],
+                  let owner = channel(of: hostId, epoch: epoch),
+                  let attached = owner.attachedSessionId,
+                  !sessions.contains(attached) else { continue }
+            log("[\(hostId)] \(paneId) left \(attached); releasing it for whichever client can see it")
+            releasePane(hostId: hostId, paneId: paneId)
         }
     }
 
