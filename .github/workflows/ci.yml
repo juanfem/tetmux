@@ -254,12 +254,41 @@ jobs:
 
       # Tag builds also become a release, so a .dmg is downloadable without digging through a
       # workflow run. Unsigned beyond ad-hoc, which the release notes have to say out loud.
+      #
+      # **The notes are the tag's own message.** A release body is stored by GitHub beside the
+      # release, not read from the tag, so the two drift silently: the eight releases before this
+      # all carried the signing note and nothing else, while the annotated tags carried the
+      # changelog, and rewriting a tag message changed nothing anybody could see. The tag is the
+      # one copy — `git tag -n` and the Releases page now say the same thing because they are the
+      # same bytes. `--generate-notes` is gone with it: it produced nothing here (these tags have
+      # no PRs behind them) and would only compete with the message for the same space.
+      #
+      # `git tag -l --format` rather than `git show`: the point is the annotation alone, without
+      # the commit the tag points at. The first line becomes the title, the rest the body — which
+      # is why a tag message's subject has to read as a release name.
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF#refs/tags/}" dist/*.dmg \
-            --title "${GITHUB_REF#refs/tags/}" \
-            --generate-notes \
-            --notes "This build is ad-hoc signed, not notarised. macOS will refuse it on first open: right-click the app and choose Open, or run \`xattr -dr com.apple.quarantine /Applications/tetmux.app\`."
+          TAG="${GITHUB_REF#refs/tags/}"
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          TITLE="$(git tag -l --format='%(contents:subject)' "$TAG")"
+          {
+            git tag -l --format='%(contents:body)' "$TAG"
+            echo
+            echo "---"
+            echo
+            echo "This build is ad-hoc signed, not notarised. macOS will refuse it on first open: right-click the app and choose Open, or run \`xattr -dr com.apple.quarantine /Applications/tetmux.app\`."
+          } > release-notes.md
+          # Idempotent, because a tag can be rebuilt: `create` fails outright once the release
+          # exists, which is how a re-run would otherwise end with the .dmg built and nothing
+          # published. `--clobber` lets the asset be replaced rather than collide.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "${TITLE:-$TAG}" --notes-file release-notes.md
+            gh release upload "$TAG" dist/*.dmg --clobber
+          else
+            gh release create "$TAG" dist/*.dmg \
+              --title "${TITLE:-$TAG}" \
+              --notes-file release-notes.md
+          fi
