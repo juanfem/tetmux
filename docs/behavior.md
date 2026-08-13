@@ -437,6 +437,26 @@ makes.
 
 ## Sessions, tabs, and destructive actions
 
+**A new tab is placed after the last one, because tmux's own choice is the lowest free index.**
+`new-window` left to index itself does not append: it scans upward from `base-index` for the first
+*free* index, so a session whose window 0 has been killed puts the next window back into that hole,
+in front of the window the user still has — and the one after that, finding the hole filled, lands
+at the end as expected. Reported exactly that way: the second tab jumps to the front and the third
+behaves, which reads as a bug in the strip's ordering rather than in the command that asked for the
+window. It is neither: `applyWindows` sorts by `list-windows`' order, and that order was right.
+tmux's status bar numbers its windows so the arithmetic is visible there; a tab strip has no
+numbers, and the `+` that opened the tab sits at the other end of it. `newWindow` therefore sends
+`-a -t <session>:<the last window>`, session-qualified for the reason `moveWindow`'s `-s` is — a
+linked window is reachable by `@id` from every session holding it. `new-window -a` is old enough for
+the R3.6 floor (verified on 3.0, unlike `move-window -b`, which is 3.2). The anchor comes from our
+own model, so a window created by another client a moment ago is not in it and the new tab lands
+before that one; that is the same staleness every other placement here has, and it is still the
+position the user could see. `testANewTabLandsAtTheEndWhenAnIndexIsFree` kills window 0 to make the
+hole and asserts both tabs, so a fix that moved the fault along by one would fail. **`link-window`
+and the cross-session `move-window` still take tmux's index** — both target `<session>:` and land in
+the same hole, and `move-window -a` is 3.2, so appending there needs the `swap-window` fallback
+`moveWindow` already has for reordering. `TODO.md` carries it.
+
 **Closing a tab unlinks; it must never kill (F4.9).** `AppModel.closeWindow` counts the sessions
 the window is linked to and sends `unlink-window` when there is more than one, so the window leaves
 this session and carries on in the others. tmux cannot do that for a window in its *only* session —

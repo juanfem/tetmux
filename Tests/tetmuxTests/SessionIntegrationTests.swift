@@ -2653,6 +2653,58 @@ final class SessionIntegrationTests: XCTestCase {
     /// so, because there is one tmux on a developer's machine — and `Scripts/test-matrix.sh` is what
     /// changed it: the same assertions against 3.0 are the only thing that has ever proved the
     /// fallback puts windows in the order a drop asked for.
+    /// A new tab lands at the end of the strip, even when the session's window indices have a hole
+    /// in them.
+    ///
+    /// tmux picks the *lowest free index* for a `new-window` it is left to place, so a session whose
+    /// window 0 has been killed puts the next one back in that hole — in front of the window the user
+    /// still has. On tmux's own status bar that is visible arithmetic; on a tab strip with no indices
+    /// it is a tab that appears at the wrong end, and only the *first* one after the kill, because
+    /// the tab after that finds the hole filled and appends. Both are asserted here: the tab that
+    /// exposed it, and the one that hid it.
+    func testANewTabLandsAtTheEndWhenAnIndexIsFree() async throws {
+        runTmux(["new-session", "-d", "-s", sessionName, "-n", "one"])
+        runTmux(["new-window", "-t", sessionName, "-n", "two"])
+        // The hole. What is left is a single window, at index 1.
+        runTmux(["kill-window", "-t", "\(sessionName):0"])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let host = try await waitForHost(service) { host in
+            host.sessions.first { $0.name == self.sessionName }?.windows.count == 1
+        }
+        let session = try XCTUnwrap(host.sessions.first { $0.name == sessionName })
+        let first = try XCTUnwrap(session.windows.first?.id)
+
+        await service.newWindow(hostId: "local", sessionId: session.id)
+        let second = try await waitForHost(service) { host in
+            host.sessions.first { $0.id == session.id }?.windows.count == 2
+        }
+        var ids = try XCTUnwrap(second.sessions.first { $0.id == session.id }).windows.map(\.id)
+        XCTAssertEqual(ids.first, first, "the new tab landed in front of the window that was there")
+
+        // And the one after it, which never had the fault: it is here so a fix that only moved the
+        // problem along by one would fail rather than pass.
+        await service.newWindow(hostId: "local", sessionId: session.id)
+        let third = try await waitForHost(service) { host in
+            host.sessions.first { $0.id == session.id }?.windows.count == 3
+        }
+        ids = try XCTUnwrap(third.sessions.first { $0.id == session.id }).windows.map(\.id)
+        XCTAssertEqual(ids.first, first, "the third tab disturbed the order")
+
+        // The model is only as right as tmux is: assert the server agrees rather than that our sort
+        // held, since the whole defect was a command that asked tmux for the wrong index.
+        XCTAssertEqual(
+            tmuxQuery(["list-windows", "-t", sessionName, "-F", "#{window_id}"], allLines: true)?
+                .components(separatedBy: "\n"),
+            ids,
+            "tmux disagrees with the model about where the new tabs went"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     func testDraggingATabReordersTheSession() async throws {
         runTmux(["new-session", "-d", "-s", sessionName, "-n", "one"])
         runTmux(["new-window", "-t", sessionName, "-n", "two"])

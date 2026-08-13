@@ -3274,8 +3274,31 @@ public actor SessionService {
     /// opened *from*; without one the session is asked instead and answers for its current pane,
     /// which is what the sidebar's `+` means — it names a session the user is not looking at, whose
     /// panes are not the ones on screen.
+    ///
+    /// It is placed **after the last tab** rather than left to tmux to index. Left to itself tmux
+    /// puts a new window at the *lowest free index*, which is the end of the strip only while the
+    /// indices are contiguous: kill window 0 of a two-window session and the next `new-window` drops
+    /// back into that hole, in front of the window the user still has — and the one after that,
+    /// finding no hole left, lands at the end as expected. That is the reported shape of it: the
+    /// second tab jumps to the front and the third behaves. tmux's own status bar numbers its
+    /// windows, so there the arithmetic is visible; a tab strip with no numbers on it just puts the
+    /// tab that was asked for last in front of everything, and the `+` button that opened it sits at
+    /// the other end of the strip.
     public func newWindow(hostId: String, sessionId: String? = nil, fromPaneId: String? = nil) async {
-        let target = sessionId.map { " -t \(TmuxCommand.quote($0))" } ?? ""
+        // The attached session when the caller did not name one — the same session tmux itself would
+        // have picked, but named here because the anchor below has to be looked up in it.
+        let session = sessionId ?? hosts[hostId]?.activeSessionId
+        // Session-qualified, for the reason the `move-window -s` below is: a linked window is
+        // reachable by `@id` from every session holding it, and an unqualified target leaves tmux to
+        // decide which of them the new window is created in.
+        let target: String
+        if let session, let last = windowOrder(hostId: hostId, sessionId: session)?.last {
+            target = " -a -t \(TmuxCommand.quote("\(session):\(last)"))"
+        } else {
+            // No topology yet, so there is no last tab to anchor to. tmux's own choice is the only
+            // one left, and with nothing on the strip to be in front of it cannot be wrong.
+            target = session.map { " -t \(TmuxCommand.quote($0))" } ?? ""
+        }
         let directory = await startDirectory(hostId: hostId, target: fromPaneId ?? sessionId)
         send("new-window\(target)\(directory)", kind: .userCommand("New tab"), hostId: hostId)
     }
