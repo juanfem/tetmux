@@ -290,6 +290,11 @@ struct SidebarView: View {
 
     private func hostRow(_ host: HostState) -> some View {
         let live = host.connectionState.isActive
+        // Which host the terminal in front of you is on — but only while the host is closed, because
+        // that is when its session row is not there to say so. Expanded, the mark belongs one level
+        // down: a tinted host row wrapped around a tinted session row reads as a selected *subtree*,
+        // which is a claim about four rows when the truth is about one.
+        let marksSelection = host.id == state.selectedHostId && !isExpanded(host)
         return HStack(spacing: 6) {
             Button {
                 let expanding = !isExpanded(host)
@@ -366,11 +371,13 @@ struct SidebarView: View {
                 }
             }
         }
+        .modifier(TreeRowSelection(isSelected: marksSelection))
         .onHover { hovering(host.id, $0) }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             "Host \(host.config.name), \(host.connectionState.accessibilityDescription), "
                 + "\(host.browsableSessions.count) sessions"
+                + (marksSelection ? ", showing in this window" : "")
         )
     }
 
@@ -581,12 +588,23 @@ struct SidebarView: View {
             }
         }
         .padding(.leading, 14)
+        // The session this macOS window's terminal belongs to, marked exactly as the window row
+        // marks the tab.
+        //
+        // The accented glyph beside it is a different statement and always was: it says tetmux is
+        // *streaming* that session, which is true of every session any window is showing, and of
+        // sessions shown in no window at all. With several windows open that lit up three rows and
+        // pointed at none of them, and with the sessions closed — the view most of this tree is used
+        // in, now that the header can open the hosts alone — the tab strip's selection was the only
+        // thing on screen that said which session was in front of you.
+        .modifier(TreeRowSelection(isSelected: isSelected))
         .onHover { hovering(rowKey, $0) }
         // Liveness used to be a second glyph as well as a colour; the layered icon is now the same
         // shape either way, so the state it carries has to be said here in words.
         .accessibilityLabel(
             "Session \(session.name), \(session.windows.count) tabs, "
                 + (host.isLive(session.id) ? "attached" : "not attached")
+                + (isSelected ? ", showing in this window" : "")
         )
     }
 
@@ -768,35 +786,20 @@ struct SidebarView: View {
         }
         .padding(.leading, 32)
         .padding(.vertical, 1)
-        .background(
-            RoundedRectangle(cornerRadius: 5)
-                .fill(rowFill(isSelected: isSelected, isHovered: isHovered, linked: linked.count > 1))
-        )
-        .overlay {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 5)
-                    .strokeBorder(ContrastPolicy.selectionBorder(contrast), lineWidth: 1)
-                    .allowsHitTesting(false)
-            }
-        }
+        // The hover wash is only for a *linked* window, and it is the one thing about this row's
+        // background that is not the shared selection mark. Washing every hovered row would be a
+        // change to how the whole tree behaves, and it would say nothing: what makes this worth
+        // drawing is that the same window is highlighted in two places at once, which is only true
+        // when there is a second place.
+        .modifier(TreeRowSelection(
+            isSelected: isSelected,
+            otherwise: isHovered && linked.count > 1 ? ContrastPolicy.hoverFill(contrast) : .clear
+        ))
         .onHover { hovering(rowKey, $0) }
         .accessibilityLabel(
             "Tab \(label), \(window.paneCount) panes"
                 + (linked.count > 1 ? ", also in \(otherSessionNames(linked, excluding: session.id))" : "")
         )
-    }
-
-    /// A window row's background.
-    ///
-    /// Selection wins, and the hover wash is only for a *linked* window. Washing every hovered row
-    /// would be a change to how the whole tree behaves, and it would say nothing: what makes this
-    /// worth drawing is that the same window is highlighted in two places at once, which is only
-    /// true when there is a second place. The wash is `ContrastPolicy`'s, like every other one — the
-    /// signal is a faint fill at standard contrast and an obvious one at increased.
-    private func rowFill(isSelected: Bool, isHovered: Bool, linked: Bool) -> Color {
-        if isSelected { return ContrastPolicy.selectionFill(contrast) }
-        if isHovered && linked { return ContrastPolicy.hoverFill(contrast) }
-        return .clear
     }
 
     /// "build and deploy" — the sessions a window is in other than this one.
@@ -900,6 +903,39 @@ private enum RowAction {
     /// there. A literal pair of hex fills would have to be chosen against a background this control
     /// cannot see, and would invert wrongly in dark mode besides.
     static func hoverFill(_ contrast: ColorSchemeContrast) -> Color { ContrastPolicy.hoverFill(contrast) }
+}
+
+/// The mark that says a row is what the macOS window this tree belongs to is showing.
+///
+/// One modifier for all three levels, because it is a single statement made at whichever depth is on
+/// screen: the window row when the session is open, the session row when it is not, the host row when
+/// the host itself is closed. Written once so the three cannot drift into three different tints — the
+/// failure the row-action constants were extracted to stop, one level up.
+///
+/// Selection wins over anything the caller passes as `otherwise`, which is the window row's linked
+/// hover wash and nothing else. Both fills are `ContrastPolicy`'s: faint at standard contrast, obvious
+/// at increased, and the border is the whole signal when the fills are turned off.
+private struct TreeRowSelection: ViewModifier {
+    let isSelected: Bool
+    /// The row's background when it is not selected.
+    var otherwise: Color = .clear
+
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isSelected ? ContrastPolicy.selectionFill(contrast) : otherwise)
+            )
+            .overlay {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(ContrastPolicy.selectionBorder(contrast), lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
+            }
+    }
 }
 
 /// The line weight and slot width shared by everything the sidebar *draws* rather than sets in a font.

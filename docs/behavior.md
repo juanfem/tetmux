@@ -1011,6 +1011,17 @@ hosts also runs `discoverIdleHosts` (F4.4), for the reason the chevron on a sing
 a host with no channel lists nothing until somebody asks, and a control whose whole purpose is to
 show the sessions that left half of them blank would not have done it.
 
+**The sidebar marks what *this* macOS window is showing, at whichever depth is on screen.** The
+accented session glyph is a different statement and always was: it says tetmux is streaming that
+session, which is true of every session any window is showing and of sessions no window is showing at
+all — so with several windows open it lit three rows and pointed at none of them. Only the window row
+carried the selection mark, which meant the answer was visible only when the tree was opened to its
+deepest level, and invisible in exactly the view above. `TreeRowSelection` is one modifier for all
+three rows: the window row when its session is open, the session row when it is not, and the host row
+only while the host itself is closed. That last condition is what keeps it a statement about one row —
+a tinted host row wrapped around a tinted session row reads as a selected subtree. Per window, since
+`WindowState.isShowing` is, so two windows on two sessions mark two different rows in their own trees.
+
 ## The launcher and the workspace
 
 **Workspace restoration is `pendingRestore` on each window, not `@SceneStorage`.** What has to come
