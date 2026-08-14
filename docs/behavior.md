@@ -997,6 +997,20 @@ the first. Anything keyed on a tmux id alone therefore has to carry the host too
 window row lit up on every connected host simultaneously. The commands behind the row buttons were
 always host-qualified and were never affected; only the display was.
 
+**The tree opens to three depths, and the middle one is where it is usually left.** Collapse all and
+Expand all were the whole of it, and Expand all is not what anybody wants twice: a session's windows
+are already the tabs above the terminal, so opening every session lists the current one's windows a
+second time and pushes the *next* host's sessions off the bottom — against §7's density target of
+twenty sessions across five hosts without scrolling. So `setAllExpanded(hosts:sessions:)` takes the
+two answers separately and the header carries three buttons: closed, hosts open, hosts and sessions
+open. They are three `RuleStackIcon` depths rather than three symbols for the reason the pair already
+had — at 11pt SF Symbols' chevron-in-a-box variants are two identical grey squares — and the inner
+rules are indented as well as shortened, because two centred rules of different lengths read as one
+glyph with more in it where a staircase reads as another level of a tree. Either button that opens
+hosts also runs `discoverIdleHosts` (F4.4), for the reason the chevron on a single host row does:
+a host with no channel lists nothing until somebody asks, and a control whose whole purpose is to
+show the sessions that left half of them blank would not have done it.
+
 ## The launcher and the workspace
 
 **Workspace restoration is `pendingRestore` on each window, not `@SceneStorage`.** What has to come

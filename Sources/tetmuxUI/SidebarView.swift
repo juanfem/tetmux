@@ -48,17 +48,29 @@ struct SidebarView: View {
                     HStack(spacing: 2) {
                         Text("HOSTS").font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
                         Spacer()
-                        // Both stay one click — the whole point of the pair is that neither hides
-                        // behind a menu — but they no longer read as the same glyph at this size.
+                        // Three depths, not two, and the middle one is the one people live in: the
+                        // tabs above the terminal already list the current session's windows, so
+                        // opening every session's windows in the tree as well is mostly rows saying
+                        // what the tab bar says — and it is what pushes the sessions of the *next*
+                        // host off the bottom. Each stays one click; the whole point of the group is
+                        // that none of them hides behind a menu.
                         HeaderButton(help: "Collapse every host and session", label: "Collapse all") {
-                            setAllExpanded(false)
+                            setAllExpanded(hosts: false, sessions: false)
                         } icon: {
-                            RuleStackIcon(showsMiddleRule: false)
+                            RuleStackIcon(depth: 0)
+                        }
+                        HeaderButton(
+                            help: "Expand every host, leaving its sessions closed",
+                            label: "Expand hosts"
+                        ) {
+                            setAllExpanded(hosts: true, sessions: false)
+                        } icon: {
+                            RuleStackIcon(depth: 1)
                         }
                         HeaderButton(help: "Expand every host and session", label: "Expand all") {
-                            setAllExpanded(true)
+                            setAllExpanded(hosts: true, sessions: true)
                         } icon: {
-                            RuleStackIcon(showsMiddleRule: true)
+                            RuleStackIcon(depth: 2)
                         }
                     }
                     .padding(.trailing, RowAction.edgeInset)
@@ -123,14 +135,25 @@ struct SidebarView: View {
         expandedSessions.contains(key(host, session.id))
     }
 
-    /// Every host and every session at once.
+    /// The whole tree, to a depth.
+    ///
+    /// Two independent answers rather than one flag, because the middle setting — every host open,
+    /// every session closed — is the one the header's third button exists for: a session's windows
+    /// are already the tabs above the terminal, so listing them here as well mostly costs the rows
+    /// that would have shown the next host's sessions.
     ///
     /// Writes an explicit entry for each host rather than clearing the overrides, because clearing
     /// would hand each host back to its default — and "expand all" that leaves the disconnected hosts
     /// shut is not expand all.
-    private func setAllExpanded(_ expanded: Bool) {
+    private func setAllExpanded(hosts: Bool, sessions expanded: Bool) {
+        // F4.4's "on demand", the same thing the chevron on a host row means by opening one: a host
+        // with no channel has nothing under it until somebody asks, and a button whose whole purpose
+        // is "list the sessions" that leaves half the tree blank has not done it. `discoverIdleHosts`
+        // skips the connected ones and the service holds each answer for 30 s, so flapping the header
+        // costs one probe per host rather than one per click.
+        if hosts { model.discoverIdleHosts() }
         for host in model.hosts {
-            hostExpansion[host.id] = expanded
+            hostExpansion[host.id] = hosts
             for session in host.sessions {
                 if expanded {
                     expandedSessions.insert(key(host, session.id))
@@ -1233,27 +1256,35 @@ private struct HeaderButton<Icon: View>: View {
     }
 }
 
-/// Collapse all and Expand all, as a stack of rules.
+/// The three view depths, as a stack of rules: closed, hosts open, hosts and sessions open.
 ///
-/// SF Symbols has no pair that survives this size: `chevron.down.square` and `chevron.right.square`
+/// SF Symbols has no set that survives this size: `chevron.down.square` and `chevron.right.square`
 /// differ by the rotation of a 4pt chevron inside a box, which at 11pt is two identical grey squares —
-/// you had to click one to learn what it did. Rules stacked with a gap read as *closed up*, and a
-/// third shorter rule appearing between them reads as something opening, which is the actual
-/// difference between the two commands.
+/// you had to click one to learn what it did. Rules stacked with a gap read as *closed up*, and
+/// shorter rules appearing between them read as something opening, which is the actual difference
+/// between the three commands.
+///
+/// The inner rules are indented as well as shortened, and that is what separates the second depth
+/// from the third: two centred rules of different lengths read as one glyph with a bit more in it,
+/// where a staircase reads as another level of a tree. `.leading` alignment for the same reason —
+/// centred, the indent would push both ends inward and the staircase would come out as a taper.
 private struct RuleStackIcon: View {
-    let showsMiddleRule: Bool
+    /// 0 — everything closed. 1 — hosts open. 2 — hosts and their sessions open.
+    let depth: Int
 
     var body: some View {
-        VStack(spacing: 2) {
-            rule(width: 10)
-            if showsMiddleRule { rule(width: 5) }
-            rule(width: 10)
+        VStack(alignment: .leading, spacing: 2) {
+            rule(width: 10, indent: 0)
+            if depth >= 1 { rule(width: 6, indent: 2) }
+            if depth >= 2 { rule(width: 4, indent: 4) }
+            rule(width: 10, indent: 0)
         }
+        .frame(width: 10)
         .foregroundStyle(.secondary)
     }
 
-    private func rule(width: CGFloat) -> some View {
-        Capsule().frame(width: width, height: 1.4)
+    private func rule(width: CGFloat, indent: CGFloat) -> some View {
+        Capsule().frame(width: width, height: 1.4).padding(.leading, indent)
     }
 }
 
