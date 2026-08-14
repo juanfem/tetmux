@@ -632,6 +632,69 @@ class ComposingTerminalView: TerminalView {
         registerForDraggedTypes(Self.droppedTypes)
     }
 
+    // MARK: - Pixel density
+
+    /// The backing scale factor the emulator's `cellDimension` was last derived at.
+    ///
+    /// Seeded with what SwiftTerm itself used during `init`: `computeFontDimensions` resolves
+    /// `window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1`, and a view built by
+    /// `makeNSView` has no window yet, so the screen is the answer it got.
+    private var appliedBackingScaleFactor: CGFloat = NSScreen.main?.backingScaleFactor ?? 1
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        syncBackingScaleFactor()
+    }
+
+    /// The window this view is in changed density — the user dragged it to another display.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        syncBackingScaleFactor()
+    }
+
+    /// Mirrors SwiftTerm's own resolution order rather than reading `\.displayScale`, because the
+    /// number that matters is the one *it* will snap the cell to.
+    ///
+    /// Nothing to do with no window: `viewDidMoveToWindow` also fires on the way *out*, and a font
+    /// reset — cache flush, `softReset`, repaint — on a surface being torn down is work for nobody.
+    /// The next window this view lands in says what to do about it.
+    private func syncBackingScaleFactor() {
+        guard let window else { return }
+        applyBackingScaleFactor(window.backingScaleFactor)
+    }
+
+    /// Re-derives the emulator's cell size for a new pixel density, and says whether it had to.
+    ///
+    /// SwiftTerm computes `cellDimension` in `setupOptions` and in `resetFont`, and **nothing else
+    /// ever touches it** — there is no hook on a backing-property change. So a window dragged from a
+    /// 2× display to a 1× one leaves the emulator drawing 7.5pt cells while `TerminalTheme.cellSize`,
+    /// which is what the grid tetmux asks tmux for is computed from, has moved to 8.0. The two halves
+    /// of §3.3's mirror then disagree by whole columns in a way no resize corrects: tmux hands the
+    /// pane 93 columns, the emulator paints them across 697 of its 750 points, and the dead strip on
+    /// the right stays until the `NSView` is rebuilt — which is why switching to another session and
+    /// back was the only cure, that being the one thing that tears pane surfaces down.
+    ///
+    /// Setting `font` is the only public route into `resetFont`. Taken as a parameter rather than
+    /// read from the window so a test can drive both transitions on a view that is in neither.
+    @discardableResult
+    func applyBackingScaleFactor(_ scale: CGFloat) -> Bool {
+        guard scale > 0, scale != appliedBackingScaleFactor else { return false }
+        appliedBackingScaleFactor = scale
+        let terminal = getTerminal()
+        let grid = (cols: terminal.cols, rows: terminal.rows)
+        let current = font
+        font = current
+        adoptRecomputedCell(restoringGrid: grid)
+        return true
+    }
+
+    /// What to do about the grid `resetFont` has just re-derived from the frame.
+    ///
+    /// This base implementation keeps it, which is right for §4.6's passthrough surface: there is no
+    /// tmux on the far end, so the view's own frame is the only authority on how big the terminal is.
+    /// `PaneTerminalView` overrides it, because a pane's grid is tmux's.
+    func adoptRecomputedCell(restoringGrid grid: (cols: Int, rows: Int)) {}
+
     // MARK: - Drag and drop
 
     /// What a terminal accepts from a drag, the way Terminal.app does: files, whose paths it
@@ -788,6 +851,23 @@ class ComposingTerminalView: TerminalView {
 /// event whatever the z-order says.
 final class PaneTerminalView: ComposingTerminalView, NSMenuItemValidation {
     weak var coordinator: TerminalPaneView.Coordinator?
+
+    /// tmux owns a pane's grid (§3.3), so the frame-derived one `resetFont` leaves behind on a
+    /// density change is put straight back.
+    ///
+    /// A stopgap of a few milliseconds — `TerminalContainerView` re-asks tmux in the same breath,
+    /// off its own `\.displayScale` change — but the emulator must never be left disagreeing with
+    /// the server, and tmux's answer may well *be* the grid it already had, in which case no
+    /// `%layout-change` arrives to correct anything.
+    ///
+    /// Guarded on a difference because `TerminalView.resize` ends in a `softReset`, which is not
+    /// something to spend when the grid is already right.
+    override func adoptRecomputedCell(restoringGrid grid: (cols: Int, rows: Int)) {
+        let terminal = getTerminal()
+        guard grid.cols > 0, grid.rows > 0,
+              terminal.cols != grid.cols || terminal.rows != grid.rows else { return }
+        resize(cols: grid.cols, rows: grid.rows)
+    }
 
     /// SwiftTerm's own cell size, read back rather than recomputed.
     ///

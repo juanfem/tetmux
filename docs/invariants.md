@@ -189,6 +189,25 @@ change: a window dragged to another display keeps its size in points, and `reque
 `proxy.size`, so without `onChange(of:)` the panes keep the old display's grid until something
 unrelated resizes them.
 
+**…and re-asking tmux is only half of the drag between displays: the emulator has to re-derive its
+cell too.** SwiftTerm computes `cellDimension` in `setupOptions` and in `resetFont`, and nothing
+else ever touches it — there is no hook on a backing-property change, and a window moving between
+screens does not change its size in points, so nothing else prompts one either. The container
+therefore asked tmux for the new display's column count while the emulator went on painting at the
+old display's cell width: 93 columns drawn across 697 of a 750pt pane, a dead strip down the right
+that no resize corrected, and the reverse arrangement clipping the last columns off the edge.
+Switching to another session and back was the only cure, because that is the one thing that tears
+pane surfaces down — every tmux window of the *selected* session is built and the rest are not, so
+leaving a session and returning rebuilds the `NSView`s, and a fresh one measures itself.
+`ComposingTerminalView.applyBackingScaleFactor` closes it from `viewDidChangeBackingProperties` and
+`viewDidMoveToWindow`, resolving the density exactly as SwiftTerm does (`window` first, `NSScreen.main`
+behind it) and reaching `resetFont` the only way that is public — by setting `font`. Two things about
+it: it is idempotent per density, because one window move posts several notifications and each font
+reset costs a cache flush and a `softReset`; and on a *pane* the grid `resetFont` re-derives from the
+frame is put back, since tmux owns a pane's grid and its answer to the new size may well be the grid
+the pane already had, in which case no `%layout-change` arrives to correct anything. §4.6's
+passthrough surface takes the frame-derived grid instead — there is no tmux behind it to own one.
+
 **A drag on a window edge asks tmux nothing until it ends (R3.7).** §3.3 asks for a debounce *and*
 for suppression during live resize; only the debounce existed, so dragging an edge was a
 `refresh-client -C` every 100 ms, each answered with a `%layout-change`, each relaying out every

@@ -113,4 +113,57 @@ final class TerminalGeometryTests: XCTestCase {
             "expected the wrong scale factor to cost several columns, not a rounding error"
         )
     }
+
+    /// …and both sides have to re-derive it when the window is *dragged* between those displays.
+    ///
+    /// The container re-asks tmux off `\.displayScale`, and for a long time that was the whole fix.
+    /// It is only half: SwiftTerm computes `cellDimension` in `setupOptions` and in `resetFont` and
+    /// nowhere else, so the emulator kept the departed display's cell and painted tmux's new column
+    /// count across part of the pane — a dead strip down the right, or text clipped off it going the
+    /// other way. Switching to another session and back was the only cure, because that is what tears
+    /// the `NSView` down and builds one that measures itself again.
+    ///
+    /// Driven through `applyBackingScaleFactor` rather than by moving a real window: `NSWindow`'s
+    /// scale factor comes from the screen it is on and cannot be set, and a test runner may have no
+    /// screen at all. What can be pinned is that the change is acted on once, and that tmux's grid
+    /// survives it — the emulator's own frame-derived answer must never be left standing on a pane.
+    func testABackingScaleChangeRederivesTheCellAndKeepsTmuxsGrid() {
+        let view = PaneTerminalView(
+            frame: NSRect(x: 0, y: 0, width: 400, height: 300),
+            font: TerminalTheme.default.resolvedFont()
+        )
+        TerminalPaneView.hideReservedScroller(in: view)
+        // A grid tmux chose, and deliberately not one this frame divides into.
+        view.resize(cols: 80, rows: 24)
+
+        let otherDisplay: CGFloat = viewScaleFactor == 2 ? 1 : 2
+        XCTAssertTrue(
+            view.applyBackingScaleFactor(otherDisplay),
+            "a density the emulator has not snapped its cell to has to be acted on"
+        )
+        XCTAssertEqual(view.getTerminal().cols, 80, "tmux owns the grid (§3.3); the recompute may not take it")
+        XCTAssertEqual(view.getTerminal().rows, 24)
+
+        XCTAssertFalse(
+            view.applyBackingScaleFactor(otherDisplay),
+            "the same density again must not cost a font reset — every window move posts several"
+        )
+    }
+
+    /// The control, and the reason the restore is on the pane subclass rather than the shared one:
+    /// §4.6's passthrough surface has no tmux behind it, so its own frame is the only authority on
+    /// how big its terminal is, and it must take the grid the recompute derives.
+    func testThePassthroughSurfaceTakesTheFrameDerivedGridInstead() {
+        let view = ComposingTerminalView(
+            frame: NSRect(x: 0, y: 0, width: 400, height: 300),
+            font: TerminalTheme.default.resolvedFont()
+        )
+        view.resize(cols: 80, rows: 24)
+
+        XCTAssertTrue(view.applyBackingScaleFactor(viewScaleFactor == 2 ? 1 : 2))
+        XCTAssertNotEqual(
+            view.getTerminal().cols, 80,
+            "400pt of frame is nowhere near 80 columns, so this surface must have re-measured itself"
+        )
+    }
 }

@@ -120,6 +120,11 @@ public struct TerminalContainerView: View {
         // hangs off `proxy.size`, which is identical before and after the move. Without this the
         // panes keep the grid they were given for the old display until something unrelated resizes
         // them — which, on a desk with a 1× monitor beside a 2× laptop, is most of the time.
+        //
+        // This is only half of it, and the half that is easy to see. The emulator snaps its *own*
+        // cell to the pixel grid and never re-derives it, so asking tmux for the new grid without
+        // `ComposingTerminalView.applyBackingScaleFactor` doing the same on the other side simply
+        // moves the disagreement: tmux's columns painted at the old display's cell width.
         .onChange(of: backingScaleFactor) { _, _ in requestSizes() }
         .onDisappear {
             let (hostId, windowId, owner) = (self.hostId, window.id, self.owner)
