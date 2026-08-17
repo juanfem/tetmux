@@ -12,7 +12,7 @@ thing it constrains, and where somebody will actually meet it. A second copy in 
 list nobody reads twice and one that drifts from the original the first time either is edited;
 `git log` holds the narrative. This paragraph replaced ninety lines of exactly that on 2026-08-07.
 
-**As of 2026-08-11: 0 open, 5 parked, and nothing here blocks a release.** On 2026-08-06 the last
+**As of 2026-08-17: 0 open, 6 parked, and nothing here blocks a release.** On 2026-08-06 the last
 two then-open entries left the list without being implemented, and both say so where it counts
 rather than here: P6.7's launch half was amended to name **warm** launch (SRD §6,
 `docs/measurements.md`), and signing moved from *blocked* to *parked* (SRD §2.5), because "blocked
@@ -116,6 +116,27 @@ Nothing.
   which case `PaneMemoryTests` fails first and says so.
   `Sources/tetmuxUI/TerminalSurface.swift` (`TerminalTheme.scrollbackLines`),
   `Tests/tetmuxTests/PaneMemoryTests.swift`
+
+- [~] **8-bit C1 introducers print instead of being understood, and a byte filter cannot fix it.**
+  `0x9b`, `0x9d` and `0x90` are the single-byte forms of CSI, OSC and DCS. SwiftTerm's parser treats
+  none of them as an introducer, so the sequence lands in the grid as text — `0x9d 0;name 0x9c`
+  draws `0;name`. tmux's own input parser does handle them, so this is the same divergence screen's
+  `ESC k` was, and it is what is left of that class: DCS, SOS, PM, APC and every OSC number in the
+  7-bit repertoire are consumed correctly, which `ScreenTitleRenderingTests` now pins.
+  **Not fixed the way `ESC k` was, because the same trick does not work here.** Rewriting `0x9b` into
+  `ESC [` in front of the emulator would be correct only if those bytes were always controls, and
+  they are not: `0x80`–`0xbf` is also the UTF-8 continuation range, so `0x9b` occurs inside ordinary
+  non-ASCII text — `›` is `e2 80 ba`, and any accented character can carry one. A filter that
+  rewrote them would corrupt real text to fix a sequence nothing sends, which is a strictly worse
+  trade. Doing it properly means acting *after* UTF-8 decoding, which is inside the emulator's
+  parser, i.e. a change to SwiftTerm rather than to tetmux.
+  **Unlikely to be hit.** A program emits C1 only when the terminfo it was given advertises 8-bit
+  controls, and `screen*`/`tmux*` — which is what `TERM` is inside a pane — do not; under a UTF-8
+  locale the bytes are not valid UTF-8 on their own either. Nothing in the program corpus produces
+  one. The trigger to un-park is a real host showing it, or SwiftTerm gaining C1 support, in which
+  case `testEightBitC1IntroducersAreStillNotUnderstood` fails and says so.
+  `Tests/tetmuxTests/RenderingCorpusTests.swift` (`ScreenTitleRenderingTests`),
+  `Sources/tetmuxCore/Core/ScreenTitleFilter.swift`
 
 - [~] **Desync recovery.** Detection is done — a `%begin` whose number fails to increase, a
   terminator closing nothing, a `%begin` with nothing pending are all logged — but detecting is

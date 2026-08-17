@@ -444,6 +444,66 @@ final class ScreenTitleRenderingTests: XCTestCase {
             "the prompt is not alone on the row — a plain-text copy of it is still being drawn"
         )
     }
+
+    /// `ESC k` is the *only* one of its class, and this is what says so.
+    ///
+    /// The failure it belongs to is general: a sequence built as introducer + arbitrary text +
+    /// terminator, whose introducer the emulator does not know, spills its text into the grid. There
+    /// are five such introducers in the 7-bit repertoire — DCS, SOS, OSC, PM, APC — plus screen's
+    /// `ESC k`, and the payloads are exactly the strings a modern shell fills with its own state.
+    /// Each is checked with a marker in the payload, so a case that stops being consumed says which.
+    ///
+    /// The OSC numbers are deliberately a mix of the ones SwiftTerm implements and ones nothing does
+    /// (`777`, `1337`, and `3008`, which is real: it is what one of the hosts this was diagnosed on
+    /// writes around every command). An *unknown* OSC must be consumed just as thoroughly as a known
+    /// one, and that is the half that a table-driven parser can regress quietly.
+    func testAStringSequenceIsConsumedRatherThanPrinted() throws {
+        let esc = "\u{1b}", st = "\u{1b}\\", bel = "\u{07}"
+        let cases: [(String, String)] = [
+            ("DCS, tmux passthrough", "\(esc)Ptmux;MARK\(st)"),
+            // The payload of a passthrough has its own escapes doubled, which is the case most
+            // likely to end a string state early and spill the rest.
+            ("DCS, doubled escapes", "\(esc)Ptmux;\(esc)\(esc)]12;MARK\(esc)\(esc)\\\(st)"),
+            ("DCS, DECRQSS", "\(esc)P$qMARK\(st)"),
+            ("SOS", "\(esc)XMARK\(st)"),
+            ("PM", "\(esc)^MARK\(st)"),
+            ("APC, kitty graphics", "\(esc)_Ga=T,f=100;MARK\(st)"),
+            ("OSC 0, BEL-terminated", "\(esc)]0;MARK\(bel)"),
+            ("OSC 0, ST-terminated", "\(esc)]0;MARK\(st)"),
+            ("OSC 7, working directory", "\(esc)]7;file://h/tmp/MARK\(st)"),
+            ("OSC 52, clipboard", "\(esc)]52;c;TUFSSw==\(bel)"),
+            ("OSC 133, prompt marks", "\(esc)]133;A;MARK\(st)"),
+            ("OSC 777, rxvt notify", "\(esc)]777;notify;MARK;body\(st)"),
+            ("OSC 1337, iTerm2", "\(esc)]1337;SetUserVar=MARK=eA==\(bel)"),
+            ("OSC 3008, a shell integration nothing implements", "\(esc)]3008;start=1;user=MARK\(st)"),
+            ("ESC k, which is why the filter exists", "\(esc)kMARK\(st)"),
+        ]
+
+        for (name, stream) in cases {
+            var filter = ScreenTitleFilter()
+            let row = try firstRow(after: filter.filter(Array(stream.utf8)))
+            XCTAssertFalse(
+                row.contains("MARK"),
+                "\(name) put its payload in the grid: \(row.debugDescription)"
+            )
+        }
+    }
+
+    /// The gap that is left, pinned as *known* rather than fixed: the 8-bit C1 introducers.
+    ///
+    /// `0x9b`, `0x9d` and `0x90` are the single-byte forms of CSI, OSC and DCS, and SwiftTerm treats
+    /// none of them as an introducer — so the sequence prints. tmux's own parser does handle them,
+    /// which makes this the same divergence `ESC k` was. It is deliberately **not** filtered, and the
+    /// reason is in `TODO.md`: these bytes are also UTF-8 continuation bytes, so rewriting them into
+    /// their 7-bit forms without decoding first corrupts any non-ASCII text that contains one.
+    /// If a SwiftTerm bump implements C1, this test fails and the TODO entry can go.
+    func testEightBitC1IntroducersAreStillNotUnderstood() throws {
+        let osc: [UInt8] = [0x9d] + Array("0;MARK".utf8) + [0x9c]
+        XCTAssertTrue(
+            try firstRow(after: osc).contains("MARK"),
+            "SwiftTerm now understands 8-bit C1 — see TODO.md, this is no longer a known gap"
+        )
+    }
 }
 
 private final class NullDelegate: TerminalDelegate, @unchecked Sendable {
