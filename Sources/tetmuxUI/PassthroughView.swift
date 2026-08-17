@@ -197,6 +197,10 @@ struct PassthroughTerminalView: NSViewRepresentable {
             subscription?.cancel()
             subscription = Task { [weak view] in
                 let subscription = await service.subscribeToPassthrough(hostId: hostId)
+                // The same gap as a control-mode pane's, reached differently: nothing here has eaten
+                // screen's `ESC k` title on the way, and R3.8's last row is a bare login shell whose
+                // `TERM` is whatever it inherited. One filter per stream, since it carries state.
+                var screenTitles = ScreenTitleFilter()
                 // No acknowledgement loop, because there is nothing to tell: the pause that P6.5's
                 // accounting exists to trigger is `refresh-client -A`, which is tmux 3.2 — and this
                 // mode exists precisely for servers that do not have it. The service's stream bound
@@ -204,7 +208,7 @@ struct PassthroughTerminalView: NSViewRepresentable {
                 for await data in subscription.stream {
                     if Task.isCancelled { break }
                     guard let view else { break }
-                    let bytes = [UInt8](data)
+                    let bytes = screenTitles.filter([UInt8](data))
                     view.feed(byteArray: bytes[...])
                 }
             }

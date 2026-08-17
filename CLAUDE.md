@@ -120,6 +120,7 @@ Where things are, since the docs name symbols without saying which file holds th
 | `Core/PtyTransport.swift` | `forkpty` + reader thread. The only spawner of anything a channel runs on. |
 | `Core/CommandProbe.swift` | One question, one subprocess, no pty — F4.4's discovery and nothing else. |
 | `Core/SshPromptDetector.swift` | Classifies a pre-handshake prompt ssh is sitting on. |
+| `Core/ScreenTitleFilter.swift` | Eats screen's `ESC k` title out of a pane's bytes; the emulator prints it. |
 | `Session/SessionService.swift` | The actor. Channels, correlation, topology, flow control. |
 | `Session/HostModel.swift` | `HostState`, `TmuxSession`, `TmuxWindow`, `TmuxVersion`. |
 | `Session/TmuxCommand.swift` | Every command string and format, with its quoting rules. |

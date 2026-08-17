@@ -351,6 +351,9 @@ struct TerminalPaneView: NSViewRepresentable {
         private var idleFrames = 0
         private var unacknowledged = 0
         private var flowControl: (hostId: String, paneId: String, subscriber: UUID, service: SessionService)?
+        /// Screen's `ESC k` window title, which tmux would have consumed and SwiftTerm prints as text.
+        /// Per-coordinator because it carries a half-read sequence across chunk boundaries.
+        private var screenTitles = ScreenTitleFilter()
 
         func attach(view: TerminalView, hostId: String, paneId: String, service: SessionService) {
             self.view = view
@@ -362,7 +365,8 @@ struct TerminalPaneView: NSViewRepresentable {
                 for await data in subscription.stream {
                     if Task.isCancelled { break }
                     guard let self, let view = self.view else { break }
-                    let bytes = [UInt8](data)
+                    // Ahead of the probe so that what is measured is what is drawn.
+                    let bytes = self.screenTitles.filter([UInt8](data))
                     // P6.1's middle point, before the emulator sees the bytes: this is the round
                     // trip landing. Guarded inside the probe, which is off unless a measurement
                     // asked for it — the scan would otherwise be on the path P6.3 measures.

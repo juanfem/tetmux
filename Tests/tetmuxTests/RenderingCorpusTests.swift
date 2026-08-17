@@ -392,6 +392,60 @@ final class TrueColorTests: XCTestCase {
     }
 }
 
+/// The emulator half of `ScreenTitleFilter`: what screen's `ESC k` title actually does to the grid.
+///
+/// The byte-level cases live in `ScreenTitleFilterTests`, in the target that runs on Linux. This is
+/// the one assertion that needs SwiftTerm, and it is the one that says why the filter exists at all —
+/// the claim "an unhandled sequence is dropped, not printed" is true of OSC and *false* here, and
+/// nothing but the emulator can be asked which.
+@MainActor
+final class ScreenTitleRenderingTests: XCTestCase {
+
+    /// A pane's live prompt, captured from the host the duplicate was reported on: bash under
+    /// `TERM=screen-256color` naming its window after the prompt, then drawing the prompt.
+    private static let promptWithTitle =
+        "\u{1b}kjuesteba@cwe-513-vml377:~\u{1b}\\"
+        + "\u{1b}[?2004h\u{1b}[42;01;37mjuesteba@cwe-513-vml377\u{1b}[00m ~ $ "
+
+    private func firstRow(after bytes: [UInt8]) throws -> String {
+        let terminal = Terminal(delegate: NullDelegate(), options: TerminalOptions(cols: 80, rows: 4))
+        terminal.feed(byteArray: bytes)
+        let line = try XCTUnwrap(terminal.getLine(row: 0))
+        var text = ""
+        for column in 0..<80 {
+            let cell = line[column]
+            if cell.width == 0 { continue }
+            let character = cell.getCharacter()
+            text.append(character == "\0" ? " " : character)
+        }
+        return String(text.reversed().drop(while: { $0 == " " }).reversed())
+    }
+
+    /// The negative half, and the reason this is a filter rather than a bug report against SwiftTerm.
+    ///
+    /// `ESC k` is dispatched as an unknown escape and puts the parser straight back into ground, so
+    /// the name that follows is written into the grid one character at a time. If a SwiftTerm bump
+    /// ever implements the sequence this test is the notification, and the filter becomes redundant
+    /// rather than wrong.
+    func testTheEmulatorPrintsAScreenTitleIntoTheGrid() throws {
+        let row = try firstRow(after: Array(Self.promptWithTitle.utf8))
+        XCTAssertTrue(
+            row.hasPrefix("juesteba@cwe-513-vml377:~"),
+            "SwiftTerm no longer prints ESC k titles as text — check whether the filter is still needed"
+        )
+    }
+
+    /// And with the filter in front of it, the row holds the prompt once.
+    func testTheFilteredStreamLeavesOneCopyOfThePrompt() throws {
+        var filter = ScreenTitleFilter()
+        let row = try firstRow(after: filter.filter(Array(Self.promptWithTitle.utf8)))
+        XCTAssertEqual(
+            row, "juesteba@cwe-513-vml377 ~ $",
+            "the prompt is not alone on the row — a plain-text copy of it is still being drawn"
+        )
+    }
+}
+
 private final class NullDelegate: TerminalDelegate, @unchecked Sendable {
     func send(source: Terminal, data: ArraySlice<UInt8>) {}
     func showCursor(source: Terminal) {}

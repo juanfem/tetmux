@@ -671,6 +671,37 @@ keyboard), and drives `ComposingTerminalView.acceptsDrops`, which registers and 
 types. Applied on every `updateNSView` and not only at creation: panes are never rebuilt, so a view
 first made in a background tab would otherwise stay unregistered for the rest of its life.
 
+**A pane's bytes still contain the sequences tmux would have eaten, and `ESC k` is the one that
+shows.** `%output` is what the program wrote, not what tmux drew — the property that gets 24-bit colour with
+nobody writing any code for it — so a control-mode client also inherits the escapes tmux normally
+consumes on a program's behalf. `TERM` inside a pane is `screen*`, so a shell whose prompt sets the window title
+takes the `screen*` branch of the usual `case $TERM in` and writes `ESC k <name> ESC \` rather than
+xterm's `OSC 0 ; <name> BEL`. SwiftTerm implements the OSC and has no case for the other: `ESC k`
+dispatches as an unknown escape and returns the parser to *ground*, so the name is printed into the
+grid one character at a time. It was reported as "the prompt is duplicated, once without colour and
+once with the right styling", on one host and not another — the plain copy being the window title
+(`juesteba@cwe-513-vml377:~`) and the styled one the prompt it was named after. Only hosts whose
+shell takes the `screen*` branch show it, which is why it reads as tetmux misbehaving on particular
+machines; `--diagnose` on the two hosts side by side is what separated them, one emitting `ESC k`
+and the other `OSC 0`. `ScreenTitleFilter` sits in front of both feeds — the pane stream and §4.6's
+passthrough — and three things about it are load-bearing:
+
+- **The name is dropped, not applied.** tmux owns window names: it parses this same sequence for
+  itself and, if `allow-rename` is on, the result arrives as `%window-renamed`, which is what the
+  tab strip listens to. A title set from here as well would give a tab two sources that disagree
+  whenever `allow-rename` is off, which is the default.
+- **It is stateful, and an `ESC` at the end of a chunk is withheld rather than emitted.** A
+  sequence is delivered in whatever pieces tmux flushed, re-cut again by P6.4's per-frame
+  coalescing, so every byte of it is somewhere a buffer can end. Holding the `ESC` costs nothing
+  that was not already being paid: the emulator's own parser would sit in its escape state waiting
+  for the same byte.
+- **An unterminated title gives up after 1 KiB and resumes output.** Consuming to a terminator
+  that never comes would take every byte the pane produces for the rest of its life, and a pane
+  that has gone permanently blank is much worse than a screenful of garbage a repaint clears.
+
+The negative half of `ScreenTitleRenderingTests` asserts that SwiftTerm *does* print the title, so
+a bump that implements the sequence makes the filter redundant rather than wrong, and says so.
+
 **A pane's accessibility value is the viewport, not the scrollback.** SwiftTerm's accessibility
 service is an empty stub, so `PaneTerminalView` supplies the value itself, bounded by the grid — a
 screen reader query must not cost more because a pane is holding a large history, and "read the
