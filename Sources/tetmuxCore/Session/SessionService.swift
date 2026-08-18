@@ -244,7 +244,9 @@ public actor SessionService {
         }
         /// How long a server-origin pause is left alone before the viewer's watermark may lift it.
         static let serverPauseHoldDown = Duration.seconds(2)
-        var desiredSize: (cols: Int, rows: Int)?
+        /// The client size last written on *this* channel. Per channel and deliberately so, unlike
+        /// the desired size it is compared against: `refresh-client -C` sizes one client, and a new
+        /// channel is a new client that has been told nothing.
         var lastSentSize: (cols: Int, rows: Int)?
         var userInitiatedDisconnect = false
 
@@ -291,15 +293,6 @@ public actor SessionService {
         /// Whether this session's windows are sized individually (`window-size manual`) rather than
         /// from the client's size. Needs tmux 2.9; below that there is one size for everything.
         var sizesWindowsIndividually = false
-        /// Per-window sizes requested by whichever macOS window is showing each tmux window.
-        var desiredWindowSizes: [String: (cols: Int, rows: Int)] = [:]
-        var lastSentWindowSizes: [String: (cols: Int, rows: Int)] = [:]
-        /// Which view owns each tmux window's size.
-        ///
-        /// One tmux window can be on screen in two macOS windows of different sizes. Letting both
-        /// drive `resize-window` makes them fight: each `%layout-change` prompts the other to ask for
-        /// its own size back, forever. The focused view owns the size; the other letterboxes.
-        var windowSizeOwners: [String: UUID] = [:]
         var windowResizeTask: Task<Void, Never>?
         /// Debounce for re-reading `list-clients` after tmux says a client came, went, or moved.
         var clientRefreshTask: Task<Void, Never>?
@@ -423,6 +416,36 @@ public actor SessionService {
     /// the tmux server was restarted underneath us.
     private var reconnectTarget: [String: String] = [:]
 
+    // MARK: - Geometry the views asked for (§3.3)
+
+    /// What the views on screen want, per host: the client's size, and one entry per tmux window
+    /// whose container is measuring itself.
+    ///
+    /// **Host-level and not on `Connection`, which is the whole of it.** A size is a *view's*
+    /// statement about its own frame, and a channel dying does not make it untrue — but held on the
+    /// channel it died with it, and the replacement started with nothing to say. Nothing re-asks
+    /// either: a container's triggers are `proxy.size` and `\.displayScale`, both of which have
+    /// long since fired and settled by the time a reconnect completes. So a laptop closed on one
+    /// display and woken on another of a different density re-measured while the link was down, had
+    /// the request dropped on the floor for want of a connection, and came back to a tmux window
+    /// still sized for the display it went to sleep on. Switching to another session and back was
+    /// the only cure, that being the one thing that tears the containers down and makes them claim
+    /// and ask again.
+    private var desiredClientSizes: [String: (cols: Int, rows: Int)] = [:]
+    private var desiredWindowSizes: [String: [String: (cols: Int, rows: Int)]] = [:]
+    /// What has actually been sent for each window, so an unchanged size is not re-sent on every
+    /// `%layout-change`. Per host rather than per channel even though it is a memo of what went out
+    /// on the wire: `resize-window` always travels on the primary, while *any* channel's handshake
+    /// re-applies the window-size policy and has to be able to invalidate it — a follower attaching
+    /// to a session is itself a client whose arrival can resize that session's windows.
+    private var lastSentWindowSizes: [String: [String: (cols: Int, rows: Int)]] = [:]
+    /// Which view owns each tmux window's size, per host.
+    ///
+    /// One tmux window can be on screen in two macOS windows of different sizes. Letting both drive
+    /// `resize-window` makes them fight: each `%layout-change` prompts the other to ask for its own
+    /// size back, forever. The focused view owns the size; the other letterboxes.
+    private var windowSizeOwners: [String: [String: UUID]] = [:]
+
     // MARK: - Host registry
 
     public func addHost(_ config: HostConfig) {
@@ -453,6 +476,10 @@ public actor SessionService {
         displayedSessions.removeValue(forKey: hostId)
         followerChannels.removeValue(forKey: hostId)
         paneOwners.removeValue(forKey: hostId)
+        desiredClientSizes.removeValue(forKey: hostId)
+        desiredWindowSizes.removeValue(forKey: hostId)
+        lastSentWindowSizes.removeValue(forKey: hostId)
+        windowSizeOwners.removeValue(forKey: hostId)
         reconnectTarget.removeValue(forKey: hostId)
         reconnectAttempts.removeValue(forKey: hostId)
         lastDiscovery.removeValue(forKey: hostId)
@@ -1602,11 +1629,16 @@ public actor SessionService {
 
         case .layoutChange(let windowId, let layout, let visibleLayout, let flags):
             var outcome = TmuxWindow.LayoutApplyResult.unchanged
+            var reported: (cols: Int, rows: Int)?
             withHost(hostId) { host in
                 Self.mutateWindow(&host, windowId: windowId) {
                     outcome = $0.apply(layoutString: layout, visibleLayout: visibleLayout, flags: flags)
+                    // The unzoomed tree, which is the window's own size; the visible one is a pane
+                    // filling it while a zoom is on.
+                    if let tree = $0.layoutTree { reported = (tree.width, tree.height) }
                 }
             }
+            reconcileWindowSize(hostId: hostId, windowId: windowId, reported: reported)
             // The window is still rendering the layout it had, so nothing on screen went blank — but
             // it is now a grid tmux has moved on from, and no later notification repeats this one.
             if case .rejected(let reason) = outcome {
@@ -2938,9 +2970,12 @@ public actor SessionService {
     /// Asks tmux for a client size. The view never resizes a surface on its own; it waits for the
     /// `%layout-change` that comes back.
     public func requestClientSize(hostId: String, cols: Int, rows: Int) {
-        guard cols > 0, rows > 0, let connection = connections[hostId] else { return }
-        connection.desiredSize = (cols, rows)
-        guard connection.resizeTask == nil else { return }
+        guard cols > 0, rows > 0, hosts[hostId] != nil else { return }
+        desiredClientSizes[hostId] = (cols, rows)
+        // Recorded before the channel is looked for, and kept if there is none: a view that
+        // re-measures while the link is down — which is what waking on another display looks like —
+        // is stating something that is still true when the link comes back. The handshake flushes it.
+        guard let connection = connections[hostId], connection.resizeTask == nil else { return }
         connection.resizeTask = Task { [weak self, debounce = resizeDebounce] in
             try? await Task.sleep(for: debounce)
             await self?.flushResize(hostId: hostId)
@@ -2950,7 +2985,7 @@ public actor SessionService {
     private func flushResize(hostId: String) {
         guard let connection = connections[hostId] else { return }
         connection.resizeTask = nil
-        guard connection.handshakeComplete, let size = connection.desiredSize else { return }
+        guard connection.handshakeComplete, let size = desiredClientSizes[hostId] else { return }
         guard connection.lastSentSize == nil
             || connection.lastSentSize! != size else { return }
         connection.lastSentSize = size
@@ -2991,8 +3026,11 @@ public actor SessionService {
         connection.sizesWindowsIndividually = true
         send("set-option -t \(target) window-size manual", kind: .ignore, hostId: hostId, connection: connection)
         // Anything we sent before the option was in place may have been overridden by tmux's own
-        // sizing, so nothing is assumed to have taken effect.
-        connection.lastSentWindowSizes.removeAll()
+        // sizing, so nothing is assumed to have taken effect. Host-level, so that a *follower*
+        // attaching — which is a client arriving on a session whose `window-size` may still be
+        // `latest`, and can therefore resize every window in it — re-asserts what the views want
+        // rather than only clearing a memo on the channel that does not carry `resize-window`.
+        lastSentWindowSizes[hostId]?.removeAll()
         flushWindowResizes(hostId: hostId)
     }
 
@@ -3070,18 +3108,17 @@ public actor SessionService {
 
     /// Claims the right to size a tmux window. Called by a view when its macOS window takes focus.
     public func claimWindowSize(hostId: String, windowId: String, owner: UUID) {
-        guard let connection = connections[hostId] else { return }
-        guard connection.windowSizeOwners[windowId] != owner else { return }
-        connection.windowSizeOwners[windowId] = owner
+        guard hosts[hostId] != nil else { return }
+        guard windowSizeOwners[hostId]?[windowId] != owner else { return }
+        windowSizeOwners[hostId, default: [:]][windowId] = owner
         // The new owner's size may differ from the old one's, so let it through even though the
         // window's size is unchanged from tmux's point of view.
-        connection.lastSentWindowSizes.removeValue(forKey: windowId)
+        lastSentWindowSizes[hostId]?.removeValue(forKey: windowId)
     }
 
     public func releaseWindowSize(hostId: String, windowId: String, owner: UUID) {
-        guard let connection = connections[hostId],
-              connection.windowSizeOwners[windowId] == owner else { return }
-        connection.windowSizeOwners.removeValue(forKey: windowId)
+        guard windowSizeOwners[hostId]?[windowId] == owner else { return }
+        windowSizeOwners[hostId]?.removeValue(forKey: windowId)
     }
 
     /// Asks tmux to size one window, from the view that owns it.
@@ -3089,20 +3126,23 @@ public actor SessionService {
     /// Ignored when a different view owns that window: two macOS windows showing the same tmux window
     /// at different sizes would otherwise resize it back and forth without ever settling.
     public func requestWindowSize(hostId: String, windowId: String, cols: Int, rows: Int, owner: UUID) {
-        guard cols > 1, rows > 1, let connection = connections[hostId] else { return }
+        guard cols > 1, rows > 1, hosts[hostId] != nil else { return }
 
-        if let currentOwner = connection.windowSizeOwners[windowId] {
+        if let currentOwner = windowSizeOwners[hostId]?[windowId] {
             guard currentOwner == owner else { return }
         } else {
-            connection.windowSizeOwners[windowId] = owner
+            windowSizeOwners[hostId, default: [:]][windowId] = owner
         }
 
-        // Recorded even when per-window sizing is not enabled yet. The policy is decided a round trip
-        // after the handshake — the version probe has to answer first — and a view has usually finished
-        // measuring itself by then. Dropping these instead left a window unsized until the user
-        // happened to resize or refocus it; `applyWindowSizePolicy` flushes whatever accumulated.
-        connection.desiredWindowSizes[windowId] = (cols, rows)
-        guard connection.windowResizeTask == nil else { return }
+        // Recorded even when per-window sizing is not enabled yet, and even when there is no channel
+        // at all. The policy is decided a round trip after the handshake — the version probe has to
+        // answer first — and a view has usually finished measuring itself by then; a link that is
+        // down is the same gap with a longer wait in it. Dropping these instead left a window unsized
+        // until the user happened to resize or refocus it, and a window woken on another display
+        // unsized for as long as the app stayed open on it. `applyWindowSizePolicy` flushes whatever
+        // accumulated, on every handshake.
+        desiredWindowSizes[hostId, default: [:]][windowId] = (cols, rows)
+        guard let connection = connections[hostId], connection.windowResizeTask == nil else { return }
         connection.windowResizeTask = Task { [weak self, debounce = resizeDebounce] in
             try? await Task.sleep(for: debounce)
             await self?.flushWindowResizes(hostId: hostId)
@@ -3114,14 +3154,42 @@ public actor SessionService {
         connection.windowResizeTask = nil
         guard connection.handshakeComplete, connection.sizesWindowsIndividually else { return }
 
-        for (windowId, size) in connection.desiredWindowSizes {
-            if let sent = connection.lastSentWindowSizes[windowId], sent == size { continue }
-            connection.lastSentWindowSizes[windowId] = size
+        for (windowId, size) in desiredWindowSizes[hostId] ?? [:] {
+            // Only for a window some view is still showing. The desires outlive the channel now, and
+            // a handshake re-flushes all of them — so without this a reconnect would also re-assert
+            // the last size measured for a session the user has since left, resizing windows out
+            // from under whoever *is* looking at them from somewhere else. An owner is set by the
+            // container's first request and dropped when it disappears, which is exactly the
+            // distinction wanted here.
+            guard windowSizeOwners[hostId]?[windowId] != nil else { continue }
+            if let sent = lastSentWindowSizes[hostId]?[windowId], sent == size { continue }
+            lastSentWindowSizes[hostId, default: [:]][windowId] = size
             send(
                 "resize-window -t \(windowId) -x \(size.cols) -y \(size.rows)",
                 kind: .ignore, hostId: hostId, connection: connection
             )
         }
+    }
+
+    /// What tmux says the window's size *is*, against the last size we asked it for.
+    ///
+    /// `lastSentWindowSizes` is a record of what went out on the wire and nothing more, so a window
+    /// tmux sized without being asked leaves it saying the right thing has already been sent. Nothing
+    /// then corrects it: the view's own measurement has not changed, so it asks for the same size,
+    /// and the same size is the one thing `flushWindowResizes` drops. That is a permanent
+    /// disagreement between the grid tmux is filling and the frame the pane is drawn in, and there
+    /// are several ways into it — another client of the same session attaching, a second tetmux
+    /// resizing a window it also has on screen, `window-size` reverting to `latest` for the moment
+    /// between a follower being retired and one being started again.
+    ///
+    /// Forgetting the memo is deliberately all this does. Re-asserting from here would be a resize
+    /// per `%layout-change`, and against a peer that does the same thing the two would trade the
+    /// window back and forth forever; letting the *next* thing that asks through — a focus change, a
+    /// window resize, a tab switch — costs one command and cannot oscillate.
+    private func reconcileWindowSize(hostId: String, windowId: String, reported: (cols: Int, rows: Int)?) {
+        guard let reported, let sent = lastSentWindowSizes[hostId]?[windowId] else { return }
+        guard sent != reported else { return }
+        lastSentWindowSizes[hostId]?.removeValue(forKey: windowId)
     }
 
     /// Forgets a window that no longer exists, so its size and owner do not accumulate for the life of
@@ -3240,10 +3308,9 @@ public actor SessionService {
     }
 
     private func forgetWindowGeometry(hostId: String, windowId: String) {
-        guard let connection = connections[hostId] else { return }
-        connection.desiredWindowSizes.removeValue(forKey: windowId)
-        connection.lastSentWindowSizes.removeValue(forKey: windowId)
-        connection.windowSizeOwners.removeValue(forKey: windowId)
+        desiredWindowSizes[hostId]?.removeValue(forKey: windowId)
+        lastSentWindowSizes[hostId]?.removeValue(forKey: windowId)
+        windowSizeOwners[hostId]?.removeValue(forKey: windowId)
     }
 
     // MARK: - Round-trip measurement (F4.29)

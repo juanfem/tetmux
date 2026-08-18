@@ -1970,6 +1970,147 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// The size a view is asking for belongs to the *view*, and it has to outlive the channel.
+    ///
+    /// Close the lid on one display and wake on another of a different density: macOS moves the
+    /// window, the container re-measures and asks for a new grid — and that ask lands while the ssh
+    /// channel is still dead, because the link went down with the machine. Nothing repeats it. The
+    /// container's own triggers are `proxy.size` and `\.displayScale`, both of which have already
+    /// fired and settled by the time the reconnect completes, so tmux is never told, and the window
+    /// keeps the grid it had on the display the laptop went to sleep on.
+    ///
+    /// Driven through the same stand-in ssh as the chaos test so the channel can be killed outright:
+    /// a link that drops gets no chance to say anything, which is exactly the case where the request
+    /// has nowhere to go.
+    func testASizeAskedForWhileTheLinkIsDownSurvivesTheReconnect() async throws {
+        try XCTSkipIf(
+            (TmuxVersion(installedTmuxVersion() ?? "") ?? TmuxVersion("0")!) < TmuxVersion("2.9")!,
+            "per-window sizing needs tmux 2.9"
+        )
+
+        let directory = URL(fileURLWithPath: "/tmp/tetmux-wake-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("pid")
+        let script = directory.appendingPathComponent("ssh.sh")
+        try """
+        #!/bin/sh
+        echo $$ > \(pidFile.path)
+        \(matrixPathExport)exec /bin/sh -c "$1"
+        """.write(to: script, atomically: true, encoding: .utf8)
+
+        let service = SessionService()
+        await service.addHost(HostConfig(
+            id: "wake", name: "wake", isLocal: false, customCommand: "/bin/sh \(script.path)"
+        ))
+        try await service.connectHost(hostId: "wake", targetSession: sessionName)
+
+        let host = try await waitForHost(service, id: "wake", timeout: 20) { host in
+            host.connectionState == .connected && host.activeSession?.activeWindow?.layoutTree != nil
+        }
+        let windowId = try XCTUnwrap(host.activeSession?.activeWindow?.id)
+        let owner = UUID()
+        await service.claimWindowSize(hostId: "wake", windowId: windowId, owner: owner)
+
+        // The grid on the display the laptop went to sleep on.
+        await service.requestWindowSize(hostId: "wake", windowId: windowId, cols: 100, rows: 30, owner: owner)
+        let before = try await waitFor(seconds: 10) {
+            await service.getHost("wake")?.activeSession?.activeWindow?.panes.first?.cols == 100
+        }
+        XCTAssertTrue(before, "the window never took the size it had before the sleep")
+
+        let pidText = try String(contentsOf: pidFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let pid = try XCTUnwrap(pid_t(pidText), "the stand-in ssh never recorded its pid")
+        XCTAssertEqual(kill(pid, SIGKILL), 0, "could not kill the channel's process")
+
+        let noticed = try await waitFor(seconds: 30) {
+            await service.getHost("wake")?.connectionState != .connected
+        }
+        XCTAssertTrue(noticed, "the dead channel was never noticed")
+
+        // Awake on the other display, and this is the only time anything asks. The view has no
+        // reason to ask again: its own size in points and its own density are settled by now.
+        await service.requestWindowSize(hostId: "wake", windowId: windowId, cols: 132, rows: 44, owner: owner)
+
+        let recovered = try await waitFor(seconds: 60) {
+            await service.getHost("wake")?.connectionState == .connected
+        }
+        XCTAssertTrue(recovered, "the host never reconnected after its process was killed")
+
+        let resized = try await waitFor(seconds: 15) {
+            await service.getHost("wake")?.activeSession?.activeWindow?.panes.first?.cols == 132
+        }
+        let tmuxSays = tmuxQuery(
+            ["list-windows", "-t", sessionName, "-F", "#{window_width}x#{window_height}"]
+        ) ?? "(none)"
+        XCTAssertTrue(
+            resized,
+            "the reconnect dropped the size asked for while the link was down: tmux says \(tmuxSays)"
+        )
+        XCTAssertEqual(tmuxSays, "132x44", "the model and tmux disagree about the grid after the wake")
+
+        await service.disconnectHost(hostId: "wake")
+    }
+
+    /// A window tmux sized without being asked has to be correctable, and the memo of what we last
+    /// sent is what stops it being.
+    ///
+    /// Nothing about the view changed, so the size it asks for next is the size it asked for before —
+    /// and that is exactly the request `flushWindowResizes` drops as redundant. The disagreement is
+    /// then permanent: tmux fills a grid the pane is not drawn at, and no resize corrects it. Several
+    /// things put the window there — another client of the same session attaching, a second tetmux
+    /// sizing a window it also has on screen, `window-size` reverting to `latest` while a follower is
+    /// swapped — and `resize-window` from the command line stands in for all of them.
+    func testAWindowResizedBehindOurBackCanBeAskedForAgain() async throws {
+        try XCTSkipIf(
+            (TmuxVersion(installedTmuxVersion() ?? "") ?? TmuxVersion("0")!) < TmuxVersion("2.9")!,
+            "per-window sizing needs tmux 2.9"
+        )
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let host = try await waitForHost(service) { host in
+            host.connectionState == .connected && host.tmuxVersion != nil
+                && host.activeSession?.activeWindow?.layoutTree != nil
+        }
+        let windowId = try XCTUnwrap(host.activeSession?.activeWindow?.id)
+
+        let owner = UUID()
+        await service.claimWindowSize(hostId: "local", windowId: windowId, owner: owner)
+        await service.requestWindowSize(hostId: "local", windowId: windowId, cols: 100, rows: 30, owner: owner)
+        let sized = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.activeSession?.activeWindow?.panes.first?.cols == 100
+        }
+        XCTAssertTrue(sized, "the window never took the size the view asked for")
+
+        // Somebody else's client, with its own idea of how big this window is.
+        runTmux(["resize-window", "-t", windowId, "-x", "80", "-y", "24"])
+        let clobbered = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.activeSession?.activeWindow?.panes.first?.cols == 80
+        }
+        XCTAssertTrue(clobbered, "the resize from outside never reached the model")
+
+        // The view asks for what it has always wanted. Nothing about it has changed, and that is the
+        // point: this is the request that used to be dropped as one already sent.
+        await service.requestWindowSize(hostId: "local", windowId: windowId, cols: 100, rows: 30, owner: owner)
+        let corrected = try await waitFor(seconds: 10) {
+            await service.getHost("local")?.activeSession?.activeWindow?.panes.first?.cols == 100
+        }
+        XCTAssertTrue(
+            corrected,
+            "the window kept the size it was given behind our back: tmux says "
+                + (tmuxQuery(["list-windows", "-t", sessionName, "-F", "#{window_width}x#{window_height}"]) ?? "(none)")
+        )
+        XCTAssertEqual(
+            tmuxQuery(["list-windows", "-t", sessionName, "-F", "#{window_width}x#{window_height}"]),
+            "100x30"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     /// `window-size manual` is a change to the user's own session and a manual size persists, so a
     /// deliberate disconnect has to put the option back — otherwise a later plain `tmux attach` finds
     /// windows that no longer follow the terminal.

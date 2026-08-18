@@ -208,6 +208,35 @@ frame is put back, since tmux owns a pane's grid and its answer to the new size 
 the pane already had, in which case no `%layout-change` arrives to correct anything. §4.6's
 passthrough surface takes the frame-derived grid instead — there is no tmux behind it to own one.
 
+**The size a view asks for belongs to the view, so it outlives the channel — and the memo of what
+was sent is not evidence of what tmux has.** Both halves of this were on `Connection`, and both were
+wrong there. `desiredWindowSizes` and `desiredSize` are a container's statement about its own frame:
+a channel dying does not make one untrue, but held on the channel they died with it, and the
+replacement handshake had nothing to flush. Nothing re-asks either — a container's triggers are
+`proxy.size` and `\.displayScale`, and both have long since fired and settled by the time a
+reconnect completes. So a laptop closed on one display and woken on another of a different density
+re-measured while the link was down, had the request dropped for want of a connection, and came back
+to a tmux window still sized for the display it went to sleep on. `lastSentWindowSizes` is the other
+half: it records what went out on the wire, and `flushWindowResizes` drops a request that matches it
+— so once tmux sizes a window *without being asked*, the memo says the right thing has already been
+sent and the view, whose measurement has not changed, can only ask for the same size again. There
+are several ways in: another client of the session attaching, a second tetmux sizing a window it also
+has on screen, `window-size` reverting to `latest` for the moment between a follower being retired
+and one being started again. Both failures present identically — tmux fills a grid the pane is not
+drawn at, a dead strip or clipped columns that no resize corrects — and both have the same cure,
+switching to another session and back, because that is what tears the containers down and makes them
+release, claim and ask again. The desires and the memo are now per *host*: any channel's
+`applyWindowSizePolicy` clears the memo and re-flushes, which covers a follower's handshake as well
+as the primary's (the follower is itself a client whose arrival can resize a session's windows, and
+`resize-window` always travels on the primary, so a memo on the follower cleared nothing that
+mattered). `reconcileWindowSize` forgets the memo when a `%layout-change` reports a size we did not
+ask for. One thing the re-flush is gated on: a window some view still *owns*, since the desires now
+outlive the channel and a handshake would otherwise re-assert the last size measured for a session
+the user has since left — resizing windows out from under whoever is looking at them from somewhere
+else. Deliberately only *forgets*: re-asserting from there is a resize per `%layout-change`, and
+against a peer doing the same thing the two would trade the window back and forth forever, while
+letting the next thing that asks through costs one command and cannot oscillate.
+
 **A drag on a window edge asks tmux nothing until it ends (R3.7).** §3.3 asks for a debounce *and*
 for suppression during live resize; only the debounce existed, so dragging an edge was a
 `refresh-client -C` every 100 ms, each answered with a `%layout-change`, each relaying out every
