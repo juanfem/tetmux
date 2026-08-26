@@ -1505,35 +1505,45 @@ struct EmptyStateView: View {
 
 /// F4.30 — every known session, reachable without going to the Dock.
 ///
-/// Two rules make this useful once more than one window is open (items 9 and 10). Picking a session
-/// brings forward the window that is *already showing it* rather than retargeting whichever window
-/// happened to be used last — with several windows open, hijacking one of them to show a session
-/// another window is already displaying is both surprising and destructive of what was there. And
-/// holding Option opens a new window instead of reusing any, which is the standard macOS modifier for
-/// "somewhere else, not here".
+/// The list is ordered by what is already on screen: the sessions a macOS window is showing come
+/// first in each host's section, in bold, and everything else follows. That is the one distinction
+/// worth making here, because it is what a click *means*. A session already open is somewhere to go
+/// back to, so picking it raises the window showing it. A session that is not open has no window to
+/// raise, so picking it gets one of its own — every time, with no modifier to hold: a tray that
+/// retargeted whichever window was last used would take a window away from what it was showing to
+/// put something else there, which is the thing `showSession`'s first rule exists to avoid, arrived
+/// at from the other side.
+///
+/// **The second level is for the case a single click cannot answer.** With two windows on one
+/// session, "the one showing it" is a guess; the submenu names them all — most recently focused
+/// first, which is also what the row itself raises — and adds "Open in New Window" so that a third
+/// is still one click away. It is the same list `windows(showing:on:)` gives, so what the rows say
+/// and what the row above them does cannot disagree.
 struct MenuBarContent: View {
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
-    /// The shared monitor rather than one of its own: its tracking observers live for the whole
-    /// process, so the type owns the single copy — see `MenuModifierMonitor.shared`. Reading it
-    /// from here still keeps the items and the hint below them agreeing about what ⌥ is doing.
-    private let menuModifiers = MenuModifierMonitor.shared
 
-    /// What every item in this menu does while ⌥ is held, and the icon that says so.
-    private var newWindowIcon: String { "macwindow.on.rectangle" }
+    /// A window this session already has, and one it does not: the glyph says which kind of click
+    /// this is, which is what the ⌥ this menu used to advertise was for.
+    private let openIcon = "macwindow"
+    private let newWindowIcon = "macwindow.badge.plus"
 
     var body: some View {
         ForEach(model.hosts) { host in
             Section(host.config.name) {
                 // F4.4 — including the sessions a probe found on a host nothing is attached to, which
                 // is what makes this menu's "every known session" true rather than "every session we
-                // happen to have a client on". Picking one attaches to *it*; picking one on a
-                // connected host shows the window already displaying it, as before.
-                ForEach(host.browsableSessions) { session in
-                    Button {
-                        open(host: host, session: session)
-                    } label: {
-                        Label(session.name, systemImage: icon(live: host.isLive(session.id)))
+                // happen to have a client on". Picking one attaches to *it*; a discovered session is
+                // never open, since nothing is showing what nothing is attached to.
+                ForEach(model.menuBarSessions(for: host)) { entry in
+                    if entry.isOpen {
+                        openSession(host: host, entry: entry)
+                    } else {
+                        Button {
+                            openInNewWindow(host: host, session: entry.session)
+                        } label: {
+                            Label(entry.session.name, systemImage: newWindowIcon)
+                        }
                     }
                 }
                 // Item 10 — a host with no sessions still needs a way to get one, and a host with
@@ -1553,27 +1563,54 @@ struct MenuBarContent: View {
                 Button {
                     newSession(host: host)
                 } label: {
-                    Label("New Session", systemImage: menuModifiers.isOptionHeld ? newWindowIcon : "plus")
+                    Label("New Session", systemImage: "plus")
                 }
             }
         }
-        Divider()
-        // The modifier is not discoverable otherwise: a menu item cannot show its own alternate
-        // behaviour the way AppKit's `isAlternate` does, so the icons above are swapped by hand
-        // while ⌥ is down and this says what they mean.
-        Label(
-            menuModifiers.isOptionHeld ? "Opening in a new window" : "Hold ⌥ to open sessions in a new window",
-            systemImage: newWindowIcon
-        )
-        .font(.caption)
         Divider()
         Button("Quit tetmux") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
     }
 
-    private func icon(live: Bool) -> String {
-        if menuModifiers.isOptionHeld { return newWindowIcon }
-        return live ? "macwindow.badge.plus" : "macwindow"
+    /// A session with a window on it: click to raise that window, or open the submenu to say which.
+    ///
+    /// `primaryAction` is what keeps the row clickable at all — an item with a submenu and nothing
+    /// else is a heading you can only hover — and it is the same call the first row of the submenu
+    /// makes, since both mean "the window you were last in".
+    private func openSession(host: HostState, entry: AppModel.MenuBarSession) -> some View {
+        Menu {
+            ForEach(entry.windows) { window in
+                Button(title(of: window)) { focus(host: host, session: entry.session, in: window) }
+            }
+            Divider()
+            Button {
+                openInNewWindow(host: host, session: entry.session)
+            } label: {
+                Label("Open in New Window", systemImage: newWindowIcon)
+            }
+        } label: {
+            Label {
+                Text(entry.session.name).fontWeight(.bold)
+            } icon: {
+                Image(systemName: openIcon)
+            }
+        } primaryAction: {
+            focus(host: host, session: entry.session, in: entry.windows.first)
+        }
+    }
+
+    /// What to call one macOS window in the submenu.
+    ///
+    /// Numbered by *registration* order rather than by its place in this list, which is recency and
+    /// moves: the number is how the user tells two windows apart, so it has to be the same number
+    /// the next time the menu opens. The tab it is showing is what actually identifies it on screen,
+    /// and "Window" here means the macOS one, as it does everywhere else in the UI.
+    private func title(of state: WindowState) -> String {
+        let number = (model.openWindows.firstIndex { $0 === state } ?? 0) + 1
+        guard let tab = state.selectedWindow(in: model.hosts)?.displayLabel, !tab.isEmpty else {
+            return "Window \(number)"
+        }
+        return "Window \(number) — \(tab)"
     }
 
     /// Leaves the model able to open a window on its own.
@@ -1586,49 +1623,59 @@ struct MenuBarContent: View {
         model.openAppWindow = { openWindow(id: RootScene.mainWindowId) }
     }
 
-    private func open(host: HostState, session: TmuxSession) {
+    /// Brings a window that is already showing this session forward.
+    ///
+    /// The window is optional because the menu is built once and clicked afterwards: the window
+    /// named by a row can have closed in between, and the ordinary router is the right answer then —
+    /// another window may still be showing the session, and if none is, the last-used one takes it
+    /// rather than the click doing nothing.
+    private func focus(host: HostState, session: TmuxSession, in state: WindowState?) {
         adoptWindowOpener()
-        // Read at click time, not from `optionKey`, which is a poll and so can be a frame behind:
-        // `MenuBarExtra` gives no event, but the flags are current while the item's action runs.
-        let wantsNewWindow = OptionKey.isHeld
+        if let state {
+            model.showSession(hostId: host.id, sessionId: session.id, in: state)
+        } else {
+            model.showSession(
+                hostId: host.id, sessionId: session.id, windowId: session.activeWindow?.id
+            )
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// A window of this session's own — every click on a closed session, and the submenu's last row.
+    ///
+    /// One function for both because they are the same request: the difference between them is
+    /// whether the session already had a window, which is exactly what the caller's own row says.
+    private func openInNewWindow(host: HostState, session: TmuxSession) {
+        adoptWindowOpener()
         // F4.4 — a session a probe found has no windows and no channel behind it, so there is
         // nothing to *show* yet: it has to be attached first, by name, and the window follows when
         // the topology arrives. `showSession` would look for a session id no client has reported.
         if session.windows.isEmpty, !host.connectionState.isActive {
             model.attachDiscoveredSession(
-                hostId: host.id,
-                named: session.name,
-                in: model.activeWindowState ?? model.lastUsedWindow,
-                preferNewWindow: wantsNewWindow
+                hostId: host.id, named: session.name, in: nil, preferNewWindow: true
             )
             NSApp.activate(ignoringOtherApps: true)
             return
         }
-        // No `fallback:`, so this lands on the last-used window — item 9's "otherwise the one that
-        // was last used".
         model.showSession(
             hostId: host.id,
             sessionId: session.id,
             windowId: session.activeWindow?.id,
-            collapseSidebar: wantsNewWindow,
-            preferNewWindow: wantsNewWindow
+            collapseSidebar: true,
+            preferNewWindow: true
         )
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// ⌥ means the same thing here as it does on a session row: somewhere else, not here.
+    /// A session that does not exist yet is open in no window, so it gets one — the same rule the
+    /// closed rows follow, reached before there is anything to click.
     ///
     /// The window cannot be opened now — `new-session` answers with no id — so the intent travels
     /// with the reveal request and the window appears when tmux confirms the session.
     private func newSession(host: HostState) {
         adoptWindowOpener()
-        let wantsNewWindow = OptionKey.isHeld
-        // No window may be key — the menu bar is reachable with the app in the background — so name
-        // the window explicitly rather than relying on focus.
         model.createSessionWithDefaultName(
-            hostId: host.id,
-            revealIn: model.activeWindowState ?? model.lastUsedWindow,
-            preferNewWindow: wantsNewWindow
+            hostId: host.id, revealIn: nil, preferNewWindow: true
         )
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -1636,9 +1683,9 @@ struct MenuBarContent: View {
 
 /// ⌥ as it is *at this instant*, for an action that has already been triggered.
 ///
-/// Every control that treats ⌥ as part of the click reads it here rather than from either monitor
-/// below: both of those exist to keep a *display* current and are allowed to be a frame behind, and
-/// a button whose behaviour disagreed with its own icon by one frame would be the one bug this is
+/// Every control that treats ⌥ as part of the click reads it here rather than from the monitor
+/// below: that one exists to keep a *display* current and is allowed to be a frame behind, and a
+/// button whose behaviour disagreed with its own icon by one frame would be the one bug this is
 /// least able to explain to the person it happened to. The flags are live and correct for as long as
 /// the action's own call stack, wherever it was triggered from.
 @MainActor
@@ -1646,92 +1693,19 @@ enum OptionKey {
     static var isHeld: Bool { NSEvent.modifierFlags.contains(.option) }
 }
 
-/// Whether ⌥ is down *right now*, so the `MenuBarExtra`'s open menu can show what clicking it
-/// would do.
-///
-/// Polled, which wants justifying. The modifier cannot come from the items themselves — a swapped
-/// *icon* on one item is not an alternate item, which is the only modifier mechanism a menu offers
-/// (`.modifierKeyAlternate`, macOS 15+, is how the sidebar's attach-command copy advertises ⌥, and
-/// is the better mechanism wherever the difference can be carried by a whole item). It cannot come
-/// from an event monitor either: a menu tracks events in a run loop of its own, where a local
-/// monitor sees nothing, and a global monitor for a keyboard event needs the Accessibility
-/// permission this app otherwise has no use for. So the hardware state is read on a timer —
-/// scheduled in the *common* run-loop modes, which is the part that makes it fire during menu
-/// tracking at all — and only between `NSMenu` beginning and ending its tracking, so nothing wakes
-/// up while no menu is open.
-///
-/// This reaches only menus whose SwiftUI content re-renders while they are open, which
-/// `MenuBarExtra`'s does and a `.contextMenu`'s does not (its `NSMenu` snapshots the items at
-/// open — verified against the running app 2026-08-11, which is why the tree's attach-command
-/// title is an alternate item and not a reader of this: the value could never reach it, not even
-/// at open, since the timer starts with tracking and the content is built before tracking begins).
-@MainActor
-@Observable
-final class MenuModifierMonitor {
-    /// The one instance, and `init` is private because a second would be a leak: it registers
-    /// `NSMenu` tracking observers that live as long as the process. A per-view copy — and a
-    /// `@State` *default value* is re-evaluated on every construction of the view struct — would
-    /// leave a discarded pair of observers registered on every body pass, walked on every menu
-    /// open forever, and put one more 20 Hz timer behind every open menu. The flags being sampled
-    /// are global hardware state, so one answer serves every surface — which is also what makes
-    /// two menus unable to disagree about when they sampled.
-    static let shared = MenuModifierMonitor()
-
-    private(set) var isOptionHeld = false
-
-    @ObservationIgnored private var timer: Timer?
-
-    private init() {
-        let center = NotificationCenter.default
-        center.addObserver(
-            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.start() }
-        }
-        center.addObserver(
-            forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.stop() }
-        }
-    }
-
-    private func start() {
-        guard timer == nil else { return }
-        sample()
-        // 20 Hz: fast enough that pressing ⌥ looks instant, slow enough to be free.
-        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sample() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-    }
-
-    private func stop() {
-        timer?.invalidate()
-        timer = nil
-        // The menu is gone; leaving this set would show the alternate icons the moment it reopens.
-        isOptionHeld = false
-    }
-
-    private func sample() {
-        if OptionKey.isHeld != isOptionHeld { isOptionHeld = OptionKey.isHeld }
-    }
-}
-
-/// The same question for an ordinary window: is ⌥ down, so a close button can say that clicking it
-/// will not stop to ask, and so the toolbar's copy can arm its glyph and its accessibility label
-/// while the shorter line is the one a click would take?
+/// Whether ⌥ is down, for a control in an ordinary window: so a close button can say that clicking
+/// it will not stop to ask, and so the toolbar's copy can arm its glyph and its accessibility label
+/// while the shorter line is the one a click would take.
 ///
 /// One flag for both, because ⌥ is the one variant modifier in this application: it is what every
 /// control means by "the other reading of this click". Nothing here samples ⌘, which is the key
 /// that *invokes* — and which a `List` row and a pane's link already answer to.
 ///
-/// Separate from `MenuModifierMonitor` because the two have opposite constraints. A window's events go
-/// through the normal responder chain, so `.flagsChanged` simply arrives — no Accessibility
-/// permission, no timer, and nothing running while the key is not being pressed. That monitor cannot
-/// use this mechanism (a menu tracks events in a run loop where a local monitor sees nothing), and
-/// this must not use that one: its 20 Hz timer is bounded by how long a menu stays open, whereas a
-/// window is open for as long as the app runs.
+/// A window's events go through the normal responder chain, so `.flagsChanged` simply arrives — no
+/// Accessibility permission, no timer, and nothing running while the key is not being pressed. A
+/// *menu* cannot be watched this way (it tracks events in a run loop of its own, where a local
+/// monitor sees nothing), which is why the menu bar extra no longer advertises a modifier at all:
+/// the polling timer that used to do it went with the ⌥ it was displaying.
 ///
 /// One instance per window, which is what SwiftUI ownership gives; the monitor is app-wide either
 /// way, so several simply agree.

@@ -572,7 +572,11 @@ tmux's prefix.
   every 10 s. Not ICMP — frequently blocked, and does not reflect the SSH path.
 - **F4.30** A menu bar extra listing all known sessions across hosts, attachable without bringing
   the main window forward — and functional when **no** window is open: the app outlives its last
-  window, so surfaces that normally hand a request to a window must be able to open one.
+  window, so surfaces that normally hand a request to a window must be able to open one. Each host's
+  sessions are ordered with the ones a macOS window is already showing first, marked as such;
+  picking one raises the window showing it (the most recently focused, where several do), and its
+  submenu names every such window individually alongside **Open in New Window**. A session no window
+  is showing — and **New Session** — always opens a window of its own. No modifier key is involved.
 - **F4.31** Notification Center alerts for configurable pane events: bell, or `%window-activity`
   on a watched window — the useful half for a long remote job that prints and does not ring.
   Coalesced (one banner per 10 s with an "and N more" body); authorisation asked on first use, a

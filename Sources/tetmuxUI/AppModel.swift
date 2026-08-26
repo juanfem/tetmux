@@ -149,7 +149,14 @@ public final class AppModel {
 
     /// Least-recently-focused first, so the tail is the window to fall back to when nothing better
     /// presents itself. Separate from `windowOrder`, which is registration order and must not move.
-    @ObservationIgnored private var focusOrder: [UUID] = []
+    ///
+    /// Tracked, unlike `windowsById`, because the menu bar extra is built *from* it: its rows are
+    /// ordered by which sessions have a window and its second level by which window was last in
+    /// front, so a menu that did not re-evaluate when a window opened, closed or took focus would
+    /// offer to raise windows that had gone and call an open session closed. The one reader in a
+    /// view body is that menu, so the invalidation reaches nothing else. `windowsById` needs no such
+    /// treatment: every mutation of it happens alongside one of this.
+    private var focusOrder: [UUID] = []
 
     private final class WeakWindow {
         weak var state: WindowState?
@@ -394,11 +401,51 @@ public final class AppModel {
     /// Most recently focused first, so with two windows on the same session the answer is the one the
     /// user was last in rather than whichever registered first.
     public func window(showing sessionId: String, on hostId: String) -> WindowState? {
-        for id in focusOrder.reversed() {
-            guard let state = windowsById[id]?.state else { continue }
-            if state.selectedHostId == hostId && state.selectedSessionId == sessionId { return state }
+        windows(showing: sessionId, on: hostId).first
+    }
+
+    /// *Every* window showing a session, most recently focused first.
+    ///
+    /// The singular form above is this list's head, and says which window a plain "show me this
+    /// session" raises. F4.30's second level needs the rest of it: with two windows on one session,
+    /// picking for the user is a guess, so the menu names them all and lets the user say — and the
+    /// order is the same one, so the row a click would take is the row the submenu lists first.
+    ///
+    /// `selectedSessionId` rather than `selectedSession(in:)`, which falls back to the host's active
+    /// session for a window that has never chosen one: that is the same predicate `showSession`
+    /// routes by, and the two must agree about which windows are already showing a session or the
+    /// menu would offer to raise a window the router would then refuse to reuse. `reconcile` fills
+    /// the id in on the first snapshot, so a window on screen has one.
+    public func windows(showing sessionId: String, on hostId: String) -> [WindowState] {
+        focusOrder.reversed().compactMap { id in
+            guard let state = windowsById[id]?.state,
+                  state.selectedHostId == hostId,
+                  state.selectedSessionId == sessionId else { return nil }
+            return state
         }
-        return nil
+    }
+
+    /// One row of F4.30's host section: a session, and the macOS windows showing it.
+    public struct MenuBarSession: Identifiable {
+        public let session: TmuxSession
+        /// Most recently focused first; empty is what "not open" means.
+        public let windows: [WindowState]
+        public var isOpen: Bool { !windows.isEmpty }
+        public var id: String { session.id }
+    }
+
+    /// F4.30's session list for one host: the ones already on screen first, each group keeping the
+    /// order the host lists them in.
+    ///
+    /// Open-first rather than by recency, because a menu whose rows reorder themselves under the
+    /// pointer is one nobody can learn: recency changes with every click, while "is there a window
+    /// on it" changes only when a window opens or closes. Within each group the host's own order
+    /// stands, so a session does not move about while it stays in the same group.
+    public func menuBarSessions(for host: HostState) -> [MenuBarSession] {
+        let all = host.browsableSessions.map {
+            MenuBarSession(session: $0, windows: windows(showing: $0.id, on: host.id))
+        }
+        return all.filter(\.isOpen) + all.filter { !$0.isOpen }
     }
 
     /// The window to use when no particular one is called for: the most recently focused that is
@@ -2026,6 +2073,22 @@ public final class AppModel {
             collapseSidebar: collapseSidebar
         ))
         return nil
+    }
+
+    /// Shows a session in one *named* window — F4.30's second level, where the user has picked the
+    /// window rather than leaving `showSession` to pick for them.
+    ///
+    /// The same two steps as that method's first rule, which is deliberate: choosing a window by
+    /// hand and having one chosen must land in the same state, or the menu's rows and its parent
+    /// item would mean subtly different things.
+    public func showSession(
+        hostId: String,
+        sessionId: String,
+        windowId: String? = nil,
+        in state: WindowState
+    ) {
+        select(in: state, host: hostId, session: sessionId, window: windowId ?? state.selectedWindowId)
+        state.bringToFront()
     }
 
     private func firstWindowId(_ hostId: String, _ sessionId: String) -> String? {

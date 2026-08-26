@@ -605,6 +605,74 @@ final class AppModelTests: XCTestCase {
         XCTAssertIdentical(model.lastUsedWindow, windows[1])
     }
 
+    // MARK: - The menu bar extra's session list (F4.30)
+
+    /// The tray's second level names every window on a session, in the order a plain click would
+    /// take them: most recently focused first. The singular form is that list's head, so the row and
+    /// the submenu's first entry cannot disagree about which window "the one showing it" is.
+    func testEveryWindowShowingASessionIsListedMostRecentlyFocusedFirst() {
+        let model = makeModel()
+        model.hosts = [twoSessionHost]
+        let windows = openWindows(model, 3)
+        model.select(in: windows[0], host: "local", session: "$2", window: "@2")
+        model.select(in: windows[1], host: "local", session: "$1", window: "@1")
+        model.select(in: windows[2], host: "local", session: "$2", window: "@2")
+        model.focus(windows[2])
+        model.focus(windows[0])
+
+        let showing = model.windows(showing: "$2", on: "local")
+
+        XCTAssertEqual(showing.map(\.id), [windows[0].id, windows[2].id])
+        XCTAssertIdentical(model.window(showing: "$2", on: "local"), showing.first)
+    }
+
+    /// Item 9 — a session with a window on it is offered first and says so, and one without is
+    /// offered as it always was. Ordering by openness rather than by recency is what lets the menu
+    /// be learned: recency moves with every click.
+    func testTheMenuBarListsOpenSessionsFirstKeepingTheHostsOrderWithinEachGroup() {
+        let model = makeModel()
+        let threeSessions = host(sessions: [
+            TmuxSession(id: "$1", name: "one", windows: [window("@1")], isAttached: true),
+            TmuxSession(id: "$2", name: "two", windows: [window("@2")]),
+            TmuxSession(id: "$3", name: "three", windows: [window("@3")]),
+        ])
+        model.hosts = [threeSessions]
+        let windows = openWindows(model, 1)
+        model.select(in: windows[0], host: "local", session: "$3", window: "@3")
+
+        let rows = model.menuBarSessions(for: threeSessions)
+
+        XCTAssertEqual(rows.map(\.id), ["$3", "$1", "$2"], "the open session should lead its host")
+        XCTAssertEqual(rows.map(\.isOpen), [true, false, false])
+        XCTAssertEqual(rows[0].windows.map(\.id), [windows[0].id])
+    }
+
+    /// And with nothing on screen every session is closed — which is what makes each of them open a
+    /// window of its own rather than retarget one.
+    func testWithNoWindowsOpenNoSessionIsListedAsOpen() {
+        let model = makeModel()
+        model.hosts = [twoSessionHost]
+
+        XCTAssertEqual(model.menuBarSessions(for: twoSessionHost).map(\.isOpen), [false, false])
+    }
+
+    /// The submenu's rows pick a window by hand, and must land where `showSession` lands when it
+    /// picks one itself: same selection, same window raised, no new window asked for.
+    func testShowingASessionInANamedWindowRetargetsThatWindowOnly() {
+        let model = makeModel()
+        model.hosts = [twoSessionHost]
+        let windows = openWindows(model, 2)
+        model.select(in: windows[0], host: "local", session: "$2", window: "@2")
+        model.focus(windows[1])
+
+        model.showSession(hostId: "local", sessionId: "$2", in: windows[0])
+
+        XCTAssertEqual(windows[0].selectedSessionId, "$2")
+        XCTAssertEqual(windows[0].selectedWindowId, "@2", "the tab it was on should have been kept")
+        XCTAssertNil(windows[1].selectedSessionId, "a window nobody named was retargeted")
+        XCTAssertNil(model.requestedWindow, "no new window should have been asked for")
+    }
+
     /// The seed is taken once. Otherwise ⌘N straight after opening a session would land on that
     /// session instead of coming up as a plain new window.
     func testASeedIsConsumedExactlyOnce() {

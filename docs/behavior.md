@@ -402,12 +402,13 @@ Quit, Copy as Pathname, ⌥-drag to copy), and ⌘ is spoken for twice on the ex
 control lives on: ⌘-click on a `List` row is discontiguous selection, and ⌘-click inside a pane
 already activates a URL (`linkHighlightMode = .hoverWithModifier`, in the OSC 8 entry below). It
 disagreed with this application's own vocabulary too, where ⌥ was already the entire answer to "the
-other reading of this click" — ⌥ on a close button skips the confirmation, ⌥ on **New Session**
-opens it in a window of its own — and the danger in those two lives in the control, not in the
-modifier, so a benign clipboard variant does not dilute anything. Holding ⌘ over an open menu is a
+other reading of this click" — ⌥ on a close button skips the confirmation, and at the time ⌥ on the
+tray's **New Session** opened it in a window of its own — and the danger in those two lives in the
+control, not in the modifier, so a benign clipboard variant does not dilute anything. Holding ⌘ over an open menu is a
 live key-equivalent posture besides, where ⌥ held is inert. The switch was **net subtraction**:
-`CommandKey` and both monitors' `isCommandHeld` went with it, `MenuModifierMonitor` is ⌥-only
-again, and the app now reads exactly one modifier anywhere.
+`CommandKey` and both monitors' `isCommandHeld` went with it, and the app now reads exactly one
+modifier anywhere — one monitor's worth, since the menu bar's own went the same way later, with the
+⌥ the tray no longer offers.
 
 Both controls show the line the click would copy *before* the click, since a clipboard is not
 somewhere a result can be checked — but **neither advertisement comes from a monitor**, because both monitor-driven versions
@@ -552,14 +553,13 @@ is running in it; holding ⌥ *is* saying so — what the modifier means on a de
 elsewhere in macOS — and it is what makes closing a run of them one click each rather than two. It
 is not a "don't ask again": nothing is remembered, so the assertion is made again for the next
 window. The flags come from `OptionKey.isHeld` inside the action, never from a monitor:
-`ModifierKeyMonitor` and `MenuModifierMonitor` keep a *display* current and are allowed to be a
-frame behind, and a button whose behaviour disagreed with its own icon for one frame is the least
-explicable bug on this list. The two monitors are separate because their constraints are opposite —
-a window's events reach a local `.flagsChanged` monitor, and a menu's do not (it tracks events in a
-run loop of its own), which is why the menu bar polls instead. **Both report ⌥ and nothing else**,
-which is the whole modifier vocabulary of this application: ⌥ means "the other reading of this
-click" on every control that has one — skip the confirmation here, a window of its own on **New
-Session**, the ssh half off F4.36's copy. Neither monitor samples ⌘, and there is no `CommandKey`:
+`ModifierKeyMonitor` keeps a *display* current and is allowed to be a frame behind, and a button
+whose behaviour disagreed with its own icon for one frame is the least explicable bug on this list.
+That monitor serves windows only — a window's events reach a local `.flagsChanged` monitor and a
+menu's do not, since a menu tracks events in a run loop of its own. **It reports ⌥ and nothing
+else**, which is the whole modifier vocabulary of this application: ⌥ means "the other reading of
+this click" on every control that has one — skip the confirmation here, the ssh half off F4.36's
+copy. It does not sample ⌘, and there is no `CommandKey`:
 the one thing that briefly read ⌘ was F4.36, and the same surfaces that made a ⌘ title impossible to
 display also made it the wrong key to ask for (see the F4.36 entry above).
 
@@ -916,7 +916,7 @@ Local Session** and **New Remote Session ▸ host** create a session and open a 
 the tree collapsed. Neither can simply open a window — control mode's `new-session` answers with no
 id, so the window can only be opened once the topology says what it should show, which is exactly
 what `RevealRequest` exists for; they go through `createSessionWithDefaultName(preferNewWindow:)`
-like the menu bar's ⌥. The menu is rebuilt on every click because AppKit asks each time and the
+like the menu bar's own New Session. The menu is rebuilt on every click because AppKit asks each time and the
 host list is live. An item with nothing to act on gets `action: nil` rather than
 `isEnabled = false` — the menu auto-enables, so a cleared flag is overwritten at display time,
 while an item with no action is greyed out for us.
@@ -924,8 +924,8 @@ while an item with no action is greyed out for us.
 **With every window closed there is nobody to claim a request, so the model performs it itself.**
 `requestedWindow` is only ever observed from inside a window, and the app deliberately outlives its
 last one (`applicationShouldTerminateAfterLastWindowClosed` is `false`, because the menu bar extra
-is the point of staying resident) — so picking a session from the tray did nothing at all, ⌥ or no
-⌥, and left the request set for the next ⌘N to inherit. `AppModel.openAppWindow` is an
+is the point of staying resident) — so picking a session from the tray did nothing at all and
+left the request set for the next ⌘N to inherit. `AppModel.openAppWindow` is an
 `OpenWindowAction` handed over by a view, since only a view can read one; it stays valid after that
 view is gone because it resolves against the scene graph. `openWindow(_:)` uses it only when
 `openWindows` is empty — calling it while a window is watching would honour the request twice. The
@@ -941,8 +941,11 @@ following its terminal, for the next plain `tmux attach` to find.
 
 **Showing a session prefers the window already showing it.** `showSession` tries, in order: the
 window already displaying that session (brought forward), then a new window if asked for one, then
-the offered fallback — the clicked window for a sidebar double-click, the last-used one for the
-menu bar extra — then a new window because nothing was open. Retargeting some other window to a
+the offered fallback — the clicked window for a sidebar double-click, the last-used one otherwise —
+then a new window because nothing was open. `windows(showing:on:)` is the plural of that first
+rule, and both match on `selectedSessionId` rather than the derived `selectedSession(in:)`: the
+router and the menu bar must agree about which windows count as already showing a session, or the
+tray would offer to raise a window the router then declines to reuse. Retargeting some other window to a
 session that is already on screen both surprises the user and discards what that window was
 showing.
 
@@ -983,15 +986,31 @@ keys cannot collide, because every name is longer than one character. What the t
 for is that the chord still *matches*, so that has its own test: `charactersIgnoringModifiers` for
 ⌃⌘Space really is `" "`, which is the character the binding holds.
 
-**The menu bar extra says what ⌥ would do, by polling.** `MenuBarExtra` hands its content no event
-and SwiftUI has no `isAlternate`, so the items' icons are swapped by hand while ⌥ is down —
-otherwise the modifier is invisible until after the click that used it. It cannot be watched with
-an event monitor: a menu tracks events in a run loop of its own where a local monitor sees nothing,
-and a global monitor for a keyboard event needs Accessibility, which this app needs for nothing
-else. `MenuModifierMonitor` therefore reads the hardware flags on a `Timer` added to the **common**
-run-loop modes — the default mode never fires during menu tracking — and only between `NSMenu`'s
-begin/end-tracking notifications, so nothing wakes up while no menu is open. The *action* still
-reads `NSEvent.modifierFlags` at click time; a 20 Hz poll is for display and can be a frame behind.
+**The menu bar extra is ordered by what is already on screen, and holds no modifier.** Each host's
+section lists the sessions a macOS window is showing first, in bold and under a `macwindow` glyph,
+and everything else after, under `macwindow.badge.plus`; within each group the host's own order
+stands, because "is there a window on it" changes only when a window opens or closes while recency
+changes with every click, and a menu whose rows move under the pointer cannot be learned. The glyph
+is the click: an **open** session is somewhere to go *back* to, so picking it raises the window
+showing it; a **closed** one has no window to raise, so picking it gets one of its own, every time.
+That is what replaced ⌥ — a tray that retargeted the last-used window would take a window away from
+what it was showing to put something else there, which is what `showSession`'s first rule exists to
+avoid, arrived at from the other side. **New Session** follows the closed rule for the same reason:
+a session that does not exist yet is open in no window.
+
+**With two windows on one session, a single click is a guess, so the second level names them.** An
+open session's item is a `Menu` with a `primaryAction` — without one it would be a heading that can
+only be hovered — listing every window showing it, most recently focused first (which is the order
+`windows(showing:on:)` returns and therefore the same window the row itself raises), then **Open in
+New Window**. A row is titled `Window N — <tab>`: **N is registration order**, not the row's place
+in the list, because the number is how the user tells two windows apart and has to be the same the
+next time the menu opens, while the list itself is recency-ordered. `showSession(…in:)` is the same
+two steps as `showSession`'s first rule — select, bring forward — so choosing a window by hand and
+having one chosen land in the same state. The window a row names can close between the menu being
+built and the click, so a missing one falls back to the ordinary router rather than doing nothing.
+The polled `MenuModifierMonitor` went with the ⌥ it existed to display: `MenuBarExtra` hands its
+content no event and SwiftUI has no `isAlternate`, so advertising a modifier there cost a 20 Hz
+timer bounded by `NSMenu`'s begin/end-tracking notifications. Nothing in the menu needs it now.
 
 **A window's label is its name only when the user chose it.** `#{automatic-rename}` is how tmux
 says which: `1` while it is naming the window after the running command, `0` once someone has
@@ -1009,9 +1028,9 @@ brings it back. `AppModel` records the intent and satisfies it on the next snaps
 selecting whichever window tmux made active would hand the selection to a window opened elsewhere
 in the meantime. Requests hold the asking window weakly and expire after 15 s: one kept
 indefinitely would eventually match an unrelated session of the same name and move somebody's
-window. ⌥ on the menu bar's **New Session** means what ⌥ means on a session row — a window of its
-own — and has to travel the same way rather than opening one at the click: there is no id to seed a
-window with until tmux answers. So the reveal request carries the intent, opens the window when the
+window. The menu bar's **New Session** opens a window of its own — the rule its
+closed session rows follow — and has to travel the same way rather than opening one at the click:
+there is no id to seed a window with until tmux answers. So the reveal request carries the intent, opens the window when the
 session arrives, and is the one kind of reveal that does *not* need the asking window to still be
 there.
 
