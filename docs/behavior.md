@@ -71,6 +71,32 @@ same emulator, leaves a clean grid. `RepaintScreenTests` pins all four cases, th
 `testAnUndeclaredRepaintIsTheOldOverdraw` — asserting the mangled rows themselves, so the others are
 known to be able to fail.
 
+**A pane leaving the alternate screen repaints the views that never saw it enter.** The other half of
+the same situation, and the one the user reported second. Painting the program's screen into the
+emulator's alternate buffer is right, but the **normal** buffer is then whatever it was — and for a
+view that subscribed mid-program that is nothing at all, because it was not there for the scrollback
+the shell printed before the program started. Left alone, the program's own `ESC[?1049l` restores that
+empty screen and the pane goes blank while tmux is still holding the history. So `requestRepaint`
+records, per subscriber, that it handed out an alternate screen (`Connection.staleNormalScreen`), and
+`#{alternate_on}`'s 1 → 0 edge spends a second repaint on exactly those views.
+
+The edge is a `refresh-client -B` subscription, `TmuxCommand.subscribePaneAlternateScreen` — the same
+mechanism the pane-command watch uses, and the only signal for "the program exited" that does not
+involve parsing pane bytes, which `SessionService` does not do and must not start doing. It is read as
+an **edge** rather than a level, which is what `Connection.panesOnAlternateScreen` is for: subscribing
+emits the current value at once (verified on 3.7b, along with exactly one notification per transition
+and none for an ordinary `echo`), so a pane already running a program announces `1` on every connect
+and a level could not tell that from a program that just started.
+
+Two things keep this from being a repaint on every editor quit. It fires **only for marked
+subscribers** — a view that watched the program start has a correct normal screen, which the emulator
+restores by itself, and repainting it would throw away local scrollback it can still reach, since
+`repaintPayload` opens with `ESC[3J`. And the marking is **per subscriber rather than per pane**,
+because two windows on one pane need not be in the same position: the second window joining a pane
+mid-program gets a targeted repaint, and only it is owed the second one. Below tmux 3.2 there is no
+subscription, so nothing is marked and nothing is owed — the blank screen stands there, and the shell's
+next prompt draws over it correctly.
+
 **One tmux client per session on screen — and the extra ones are not the connection.** `%output`
 arrives only for the session a client is attached to, and a client has exactly one session. With a
 single channel per host, every window on a second session was a `capture-pane` still frame, and the

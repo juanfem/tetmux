@@ -201,6 +201,73 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// A pane that leaves the alternate screen repaints the views that never saw it enter (F4.16).
+    ///
+    /// The other half of "say which screen a repaint is a picture of". A view that subscribes while a
+    /// full-screen program is running is handed that program's screen, correctly, into the emulator's
+    /// *alternate* buffer — but its **normal** buffer is empty, because it was not there for the
+    /// scrollback the shell printed before the program started. Left alone, the program's own
+    /// `ESC[?1049l` on exit restores that empty screen and the pane goes blank, while tmux is still
+    /// holding the history. So `#{alternate_on}`'s 1 → 0 edge spends a second repaint on exactly the
+    /// views that were marked, and this is the whole path: a real subscription, a real notification,
+    /// and a real second `capture-pane`.
+    ///
+    /// The marker is the assertion. `tetmux-before-the-program` is printed *before* anyone subscribes,
+    /// so no `%output` carries it, and the first repaint cannot either — an alternate screen holds
+    /// only what the program drew. Its arrival has exactly one possible source.
+    ///
+    /// `printf` rather than an editor: it drives `#{alternate_on}` (verified: 1 while held, 0 after)
+    /// and does not ask the machine running the suite to have vim.
+    func testLeavingTheAlternateScreenRepaintsAViewThatMissedItsStart() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+        let version = TmuxVersion(host.tmuxVersion ?? "")
+        try XCTSkipUnless(
+            version?.supportsSubscriptions == true,
+            "format subscriptions need tmux 3.2; the repaint has no edge to spend on \(host.tmuxVersion ?? "?")"
+        )
+
+        // Scrollback printed with nobody watching, then a program that takes the alternate screen.
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "clear; echo tetmux-before-the-program\r")
+        try await Task.sleep(for: .milliseconds(700))
+        await service.sendKeys(
+            hostId: "local", paneId: paneId,
+            text: "printf '\\033[?1049h'; echo tetmux-inside-the-program\r"
+        )
+        try await Task.sleep(for: .milliseconds(700))
+
+        // Only now does a view appear. This is the reattach.
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
+        let collected = collect(stream, until: "tetmux-before-the-program", seconds: 15)
+
+        try await Task.sleep(for: .milliseconds(800))
+        await service.sendKeys(hostId: "local", paneId: paneId, text: "printf '\\033[?1049l'\r")
+
+        let output = await collected.value
+        XCTAssertTrue(
+            output.contains("\u{1b}[?1049h"),
+            "the first repaint did not declare the alternate screen it was a picture of; got:\n\(output)"
+        )
+        XCTAssertTrue(
+            output.contains("tetmux-before-the-program"),
+            "the pane left the alternate screen onto an empty one: the scrollback tmux still holds was "
+                + "never repainted, so the view goes blank when the program exits. Got:\n\(output)"
+        )
+        let entered = try XCTUnwrap(output.range(of: "tetmux-inside-the-program"))
+        let restored = try XCTUnwrap(output.range(of: "tetmux-before-the-program"))
+        XCTAssertTrue(
+            restored.lowerBound > entered.lowerBound,
+            "the scrollback arrived before the program's own screen did, so it cannot be the second "
+                + "repaint this test is about"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     func testSplittingAWindowUpdatesTheLayoutTree() async throws {
         let service = SessionService()
         await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))

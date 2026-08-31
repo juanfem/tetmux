@@ -165,6 +165,22 @@ public enum TmuxCommand {
         "refresh-client -B \(paneCommandSubscription):%*:\"#{pane_current_command}\""
     }
 
+    /// The name the alternate-screen watch is subscribed under. Distinct from the one above for the
+    /// same reason that one is distinctive: the name is all that separates our notifications from
+    /// another control client's.
+    public static let alternateScreenSubscription = "tetmuxPaneAlternate"
+
+    /// Watches `#{alternate_on}` so a pane leaving the alternate screen can be repainted.
+    ///
+    /// The 1 → 0 edge is the moment a full-screen program exits, and it is the only signal for it
+    /// that does not involve parsing pane bytes — which `SessionService` does not do and should not
+    /// start doing; that is the emulator's job, and the reason 24-bit colour works with no code here.
+    /// Verified on 3.7b: subscribing emits the current value at once, then exactly one notification
+    /// per transition, and nothing at all for ordinary commands (`echo` produced none).
+    public static func subscribePaneAlternateScreen() -> String {
+        "refresh-client -B \(alternateScreenSubscription):%*:\"#{alternate_on}\""
+    }
+
     // MARK: - Copy mode
 
     /// The copy-mode commands tetmux drives, and deliberately only these.

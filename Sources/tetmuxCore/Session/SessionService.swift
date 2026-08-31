@@ -221,6 +221,13 @@ public actor SessionService {
         /// belongs to. Consumed by that capture and left absent when tmux did not answer, which is
         /// what makes a server with no `#{alternate_on}` behave exactly as it did before.
         var repaintAlternateScreen: [String: Bool] = [:]
+        /// Panes tmux says are on the alternate screen right now, from the `#{alternate_on}`
+        /// subscription. Held so a notification can be read as an *edge* rather than a level.
+        var panesOnAlternateScreen: Set<String> = []
+        /// Per pane, the subscribers whose emulator has nothing behind the alternate screen it was
+        /// handed — see `noteRepaintOfAlternateScreen`. Cleared when the pane leaves it, which is the
+        /// moment they are repainted.
+        var staleNormalScreen: [String: Set<UUID>] = [:]
 
         /// Whether this server can pause a pane at all (`refresh-client -A`, tmux 3.2).
         var supportsFlowControl = false
@@ -1789,9 +1796,17 @@ public actor SessionService {
         case .subscriptionChanged(let name, _, _, _, let paneId, let value):
             // Ours or nobody's: another control client on the same server can hold subscriptions of
             // its own, and their names are the only thing separating them.
-            guard name == TmuxCommand.paneCommandSubscription else { break }
-            withHost(hostId) { host in
-                Self.mutatePane(&host, paneId: paneId) { $0.command = value }
+            switch name {
+            case TmuxCommand.paneCommandSubscription:
+                withHost(hostId) { host in
+                    Self.mutatePane(&host, paneId: paneId) { $0.command = value }
+                }
+            case TmuxCommand.alternateScreenSubscription:
+                applyAlternateScreen(
+                    hostId: hostId, paneId: paneId, isOn: value == "1", connection: connection
+                )
+            default:
+                break
             }
 
         case .paneModeChanged(let paneId):
@@ -2112,6 +2127,10 @@ public actor SessionService {
             // Consumed here: the answer describes the instant this capture was taken and must not be
             // carried over to the next repaint, which asks again.
             let alternateScreen = connection.repaintAlternateScreen.removeValue(forKey: paneId)
+            noteRepaintOfAlternateScreen(
+                alternateScreen == true, hostId: hostId, paneId: paneId,
+                target: target, connection: connection
+            )
             deliver(
                 Self.repaintPayload(from: command.lines, alternateScreen: alternateScreen),
                 hostId: hostId, paneId: paneId, target: target
@@ -2872,6 +2891,13 @@ public actor SessionService {
 
     private func unsubscribe(hostId: String, paneId: String, id: UUID) {
         outputSubscribers[hostId]?[paneId]?.removeValue(forKey: id)
+        // The repaint this view was owed dies with it; nothing else is holding that emulator.
+        for channel in channels(of: hostId) {
+            channel.staleNormalScreen[paneId]?.remove(id)
+            if channel.staleNormalScreen[paneId]?.isEmpty == true {
+                channel.staleNormalScreen.removeValue(forKey: paneId)
+            }
+        }
         if outputSubscribers[hostId]?[paneId]?.isEmpty == true {
             outputSubscribers[hostId]?.removeValue(forKey: paneId)
             // Next time this pane is displayed it needs a fresh repaint.
@@ -2901,6 +2927,66 @@ public actor SessionService {
             "capture-pane -p -e -J -t \(paneId) -S -\(captureScrollbackLines)",
             kind: .capturePane(paneId: paneId, target: target), hostId: hostId, connection: connection
         )
+    }
+
+    /// Remembers that a repaint handed some views the alternate screen with nothing behind it.
+    ///
+    /// A repaint taken while a full-screen program is running paints that program's screen into the
+    /// emulator's *alternate* buffer, which is right — but the emulator's **normal** buffer is then
+    /// whatever it was, and for a view that subscribed mid-program that is nothing at all: it was not
+    /// there for the scrollback the shell printed before the program started. When the program exits,
+    /// the emulator restores that empty screen and the pane goes blank, while tmux still holds the
+    /// history. So the panes in this set owe a second repaint at the moment they leave the alternate
+    /// screen, and `applyAlternateScreen` is what spends it.
+    ///
+    /// **Recorded per subscriber, not per pane**, because a repaint is the one thing that destroys
+    /// local scrollback (`repaintPayload` opens with `ESC[3J`) and the two windows on one pane need
+    /// not be in the same position: one may have been watching since before the program started, in
+    /// which case its normal screen is *correct* and repainting it would throw away history it can
+    /// still scroll to. A broadcast repaint claims every subscriber it actually reached; a targeted
+    /// one — the second window joining a pane that is already painted — claims only its own.
+    private func noteRepaintOfAlternateScreen(
+        _ alternateScreen: Bool, hostId: String, paneId: String, target: UUID?, connection: Connection
+    ) {
+        // Without the subscription there is no edge to wait for, so nothing would ever spend this.
+        guard connection.version?.supportsSubscriptions == true else { return }
+        guard alternateScreen else {
+            // The capture is of the normal screen, so every view it reached now holds the real thing.
+            if let target { connection.staleNormalScreen[paneId]?.remove(target) }
+            else { connection.staleNormalScreen.removeValue(forKey: paneId) }
+            return
+        }
+        let claimed = target.map { [$0] } ?? Set(outputSubscribers[hostId]?[paneId]?.keys ?? [:].keys)
+        guard !claimed.isEmpty else { return }
+        connection.staleNormalScreen[paneId, default: []].formUnion(claimed)
+        connection.panesOnAlternateScreen.insert(paneId)
+    }
+
+    /// `#{alternate_on}` changed for a pane (tmux ≥ 3.2).
+    ///
+    /// Read as an **edge**, which is the whole reason `panesOnAlternateScreen` is kept: subscribing
+    /// emits the current value immediately, so a pane already running a program announces `1` on every
+    /// connect, and a level would make that indistinguishable from a program that just started.
+    ///
+    /// Only the 1 → 0 edge does anything, and only for the views `noteRepaintOfAlternateScreen`
+    /// marked. Repainting every pane that leaves the alternate screen would be a full
+    /// `capture-pane -S -2000` every time anyone quits an editor, and — worse — it would clear the
+    /// local scrollback of views whose normal screen the emulator restored perfectly well by itself.
+    private func applyAlternateScreen(hostId: String, paneId: String, isOn: Bool, connection: Connection) {
+        let wasOn = connection.panesOnAlternateScreen.contains(paneId)
+        if isOn {
+            connection.panesOnAlternateScreen.insert(paneId)
+            return
+        }
+        connection.panesOnAlternateScreen.remove(paneId)
+        guard wasOn, let owed = connection.staleNormalScreen.removeValue(forKey: paneId) else { return }
+        // Still-subscribed views only: one that has gone away takes its emulator with it.
+        let live = owed.filter { outputSubscribers[hostId]?[paneId]?[$0] != nil }
+        guard !live.isEmpty else { return }
+        log("[\(hostId)] \(paneId) left the alternate screen with \(live.count) view(s) owed a repaint")
+        for subscriber in live {
+            requestRepaint(hostId: hostId, paneId: paneId, target: subscriber)
+        }
     }
 
     /// Forces a repaint even if the pane was captured before — used after reattach (F4.16).
@@ -3132,6 +3218,7 @@ public actor SessionService {
               version.supportsSubscriptions
         else { return }
         send(TmuxCommand.subscribePaneCommand(), kind: .ignore, hostId: hostId, connection: connection)
+        send(TmuxCommand.subscribePaneAlternateScreen(), kind: .ignore, hostId: hostId, connection: connection)
     }
 
     /// R3.8's 2.4–2.9 row: say once, per host, that the server is old enough to lose features.
@@ -3263,7 +3350,8 @@ public actor SessionService {
     /// the channel.
     /// Drops per-pane bookkeeping for panes the host no longer has.
     ///
-    /// `paneOwners`, `repaintedPanes`, `pausedPanes` and `lossyPanes` gain an entry for every pane
+    /// `paneOwners`, `repaintedPanes`, `pausedPanes`, `lossyPanes` and the two alternate-screen sets
+    /// gain an entry for every pane
     /// that ever produced output, and the only removals were by channel epoch or on `removeHost` —
     /// there was a `forgetWindowGeometry` for windows and no pane-level equivalent, so killing panes
     /// on a long-lived connection grew all four without bound. tmux never reuses a pane id, so it was
@@ -3289,6 +3377,10 @@ public actor SessionService {
             channel.lossyPanes.formIntersection(live)
             for paneId in channel.repaintAlternateScreen.keys where !live.contains(paneId) {
                 channel.repaintAlternateScreen.removeValue(forKey: paneId)
+            }
+            channel.panesOnAlternateScreen.formIntersection(live)
+            for paneId in channel.staleNormalScreen.keys where !live.contains(paneId) {
+                channel.staleNormalScreen.removeValue(forKey: paneId)
             }
             for paneId in channel.pausedPanes.keys where !live.contains(paneId) {
                 channel.pausedPanes.removeValue(forKey: paneId)
