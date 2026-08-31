@@ -12,7 +12,7 @@ thing it constrains, and where somebody will actually meet it. A second copy in 
 list nobody reads twice and one that drifts from the original the first time either is edited;
 `git log` holds the narrative. This paragraph replaced ninety lines of exactly that on 2026-08-07.
 
-**As of 2026-08-17: 0 open, 6 parked, and nothing here blocks a release.** On 2026-08-06 the last
+**As of 2026-08-31: 0 open, 7 parked, and nothing here blocks a release.** On 2026-08-06 the last
 two then-open entries left the list without being implemented, and both say so where it counts
 rather than here: P6.7's launch half was amended to name **warm** launch (SRD §6,
 `docs/measurements.md`), and signing moved from *blocked* to *parked* (SRD §2.5), because "blocked
@@ -164,3 +164,28 @@ Nothing.
   design against.
   `Sources/tetmuxCore/Session/SessionService.swift` (desync logging beside the `%begin` handling),
   `Sources/tetmuxCore/Core/ControlCodec.swift` (`blockAnswersOurCommand`)
+
+- [~] **A pane repainted while a full-screen program is running has an empty screen to go back to.**
+  Fixed on 2026-08-31: a repaint now declares which of the emulator's two screens it is painting into
+  (`docs/behavior.md`, "A repaint has to say which"), so quitting Claude Code or vim no longer leaves
+  the last frame on the grid for the shell prompt to overdraw. What is left is the smaller half of the
+  same situation. In the reattach case the emulator's **normal** buffer is empty — it never saw the
+  scrollback that was there before the program started, because it was not subscribed then — so when
+  the program exits the pane goes blank instead of showing the shell history tmux still holds. The
+  shell's next prompt draws normally and everything from there is correct; it is one screenful of
+  history missing exactly once, and only for a pane that was reattached mid-program.
+  *Why it is parked rather than fixed:* the fix is a second `capture-pane` at the moment the pane
+  leaves the alternate screen, and there is no cheap signal for that moment. `%output` carries the
+  `ESC[?1049l`, but `SessionService` does not parse pane bytes and should not start — that is the
+  emulator's job and the reason 24-bit colour works with no code. The supported signal is a
+  `refresh-client -B` subscription on `#{alternate_on}` (tmux 3.2+, and the machinery is already there
+  — see `TmuxCommand.paneCommandSubscription`), repainting on the 1 → 0 edge. That is a full
+  `capture-pane -S -2000` every time any program on any pane exits, against a blank screen that
+  self-corrects at the next prompt, and it would have to be suppressed for the common case where the
+  emulator saw the `1049h` itself and restores correctly on its own — otherwise it would throw away
+  local scrollback (`repaintPayload` begins with `ESC[3J`) that is not stale.
+  *If it is un-parked*, the discriminator to build is "was this pane repainted while `alternate_on`
+  was 1" — `Connection.repaintAlternateScreen` already reads that flag and would only need to remember
+  it — so that the extra repaint fires only for the panes that actually lost their normal screen.
+  `Sources/tetmuxCore/Session/SessionService.swift` (`repaintPayload`, `requestRepaint`),
+  `Tests/tetmuxTests/RenderingCorpusTests.swift` (`RepaintScreenTests`)

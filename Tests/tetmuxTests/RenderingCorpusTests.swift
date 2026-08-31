@@ -536,3 +536,116 @@ private final class NullDelegate: TerminalDelegate, @unchecked Sendable {
     func createImage(source: Terminal, bytes: inout [UInt8], width: ImageSizeRequest, height: ImageSizeRequest, preserveAspectRatio: Bool) {}
     func createImageFromBitmap(source: Terminal, bytes: inout [UInt8], width: Int, height: Int) {}
 }
+
+/// A repaint has to say which of the emulator's two screens it is painting into (F4.16).
+///
+/// `capture-pane` captures whatever the pane is *showing*, and for a pane running a full-screen
+/// program that is the alternate screen. The payload used to be plain text with no buffer statement
+/// in it, so it landed on whichever screen the emulator happened to be on — and a view that
+/// subscribed while the program was already running had never seen the program's `ESC[?1049h`, so it
+/// was on the normal one. The program's later `ESC[?1049l` then found the emulator already there,
+/// restored nothing, and left the last frame on the grid for the shell prompt to overdraw. Reported
+/// as "quit Claude Code and the pane is not cleared; the terminal draws on top of the previous view",
+/// and the overdraw is visible in `testAnUndeclaredRepaintIsTheOldOverdraw` below, where row 0 reads
+/// `$ echo POSTE_TOP` — a prompt printed into the middle of a leftover line.
+///
+/// Nothing else on the path was implicated: a real `tmux -CC` capture of vim and of Claude Code,
+/// replayed through `ControlCodec` and `ScreenTitleFilter` into this same emulator, leaves a clean
+/// grid. It is the synthesised repaint that carries no screen with it.
+@MainActor
+final class RepaintScreenTests: XCTestCase {
+
+    private static let captured = [Data("CLAUDE_FRAME_TOP".utf8), Data("CLAUDE_FRAME_BOTTOM".utf8)]
+
+    private func terminal() -> Terminal {
+        Terminal(delegate: NullDelegate(), options: TerminalOptions(cols: 40, rows: 6))
+    }
+
+    private func grid(of terminal: Terminal) -> [String] {
+        (0..<6).map { row in
+            guard let line = terminal.getLine(row: row) else { return "<no line>" }
+            let text = (0..<40).map { column -> String in
+                let character = line[column].getCharacter()
+                return character == "\0" ? " " : String(character)
+            }.joined()
+            return text.replacingOccurrences(of: " +$", with: "", options: .regularExpression)
+        }
+    }
+
+    /// A view that subscribes while a full-screen program is running, and then the program exits.
+    ///
+    /// The emulator is new, so it never saw the program's `ESC[?1049h`; the repaint is the only thing
+    /// that can tell it which screen this frame belongs to.
+    private func gridAfterTheProgramExits(alternateScreen: Bool?) -> [String] {
+        let terminal = terminal()
+        terminal.feed(byteArray: Array(
+            SessionService.repaintPayload(from: Self.captured, alternateScreen: alternateScreen)
+        ))
+        // `%output` as the program exits and the shell prints its next prompt.
+        terminal.feed(text: "\u{1b}[?1049l" + "$ echo POST\r\nPOST\r\n$ ")
+        return grid(of: terminal)
+    }
+
+    /// The fix: the repaint declares the alternate screen, so `ESC[?1049l` has something to restore.
+    func testAProgramExitingLeavesNothingOfItsFrameBehind() {
+        let grid = gridAfterTheProgramExits(alternateScreen: true)
+        XCTAssertFalse(
+            grid.contains { $0.contains("CLAUDE_FRAME") },
+            "the program's frame outlived it — the pane is not cleared on exit: \(grid)"
+        )
+        XCTAssertEqual(grid[0], "$ echo POST", "the shell did not start on the restored screen")
+        XCTAssertEqual(grid[1], "POST")
+    }
+
+    /// The negative half, and the reported bug itself: `nil` is what a tmux that does not answer
+    /// `#{alternate_on}` produces. It pins such a server as "no worse than before" and makes the test
+    /// above known to be able to fail.
+    func testAnUndeclaredRepaintIsTheOldOverdraw() {
+        let grid = gridAfterTheProgramExits(alternateScreen: nil)
+        // Both rows are the shell's text printed *into* the program's, which is what the user sees:
+        // not a stale screen, a spliced one.
+        XCTAssertEqual(
+            grid[0], "$ echo POSTE_TOP",
+            "the prompt no longer overdraws the leftover frame, so this test asserts nothing"
+        )
+        XCTAssertEqual(grid[1], "POSTDE_FRAME_BOTTOM")
+    }
+
+    /// The far commoner case — an ordinary pane, no full-screen program anywhere near it — must be
+    /// left exactly as it was. `ESC[?1047l` on a pane already on the normal screen is a no-op, which
+    /// is the whole reason it is used there rather than `ESC[?1049l`.
+    func testAnOrdinaryRepaintIsUnchanged() {
+        let declared = terminal()
+        declared.feed(byteArray: Array(
+            SessionService.repaintPayload(from: Self.captured, alternateScreen: false)
+        ))
+        declared.feed(text: "\r\n$ ")
+
+        let silent = terminal()
+        silent.feed(byteArray: Array(SessionService.repaintPayload(from: Self.captured)))
+        silent.feed(text: "\r\n$ ")
+
+        XCTAssertEqual(grid(of: declared)[0], "CLAUDE_FRAME_TOP", "an ordinary repaint lost its capture")
+        XCTAssertEqual(
+            grid(of: declared), grid(of: silent),
+            "declaring the normal screen changed what an ordinary repaint draws"
+        )
+    }
+
+    /// The other direction, which is why the `false` branch exists at all: the emulator is on the
+    /// alternate screen and the pane is not, because the `ESC[?1049l` that would have said so was one
+    /// of the bytes dropped in the overrun that ordered this repaint.
+    func testARepaintPullsAStrandedEmulatorOffTheAlternateScreen() {
+        let terminal = terminal()
+        terminal.feed(text: "\u{1b}[?1049h" + "STALE_PROGRAM_FRAME")
+        terminal.feed(byteArray: Array(
+            SessionService.repaintPayload(from: Self.captured, alternateScreen: false)
+        ))
+        let grid = grid(of: terminal)
+        XCTAssertFalse(
+            grid.contains { $0.contains("STALE_PROGRAM_FRAME") },
+            "the pane is still showing the alternate screen the program already left: \(grid)"
+        )
+        XCTAssertEqual(grid[0], "CLAUDE_FRAME_TOP")
+    }
+}

@@ -40,6 +40,37 @@ issue `switch-client`, or its panes render once from `capture-pane` and then sit
 `capture-pane -p -e -J` runs. That is what `subscribeToPane` triggers on first subscription, and
 what `completeHandshakeIfNeeded` re-triggers for every already-subscribed pane on reattach (F4.16).
 
+**A repaint has to say which of the emulator's two screens it is painting into.** `capture-pane`
+captures whatever the pane is *showing*, and for a pane running a full-screen program that is the
+alternate screen — so the payload is a picture of a screen, and used to arrive as plain text with no
+statement of which one. It therefore landed on whichever screen the emulator happened to be on, and a
+view that subscribed while the program was already running had never seen the program's `ESC[?1049h`,
+so it was on the normal one. When the program later exited, its `ESC[?1049l` found the emulator
+already there, restored nothing, and left the last frame on the grid for the shell prompt to overdraw:
+reported as *"quit Claude Code and the pane is not cleared; the terminal draws on top of the previous
+view"*, and the splice is literal — a row reading `$ echo POSTE_TOP`. `requestRepaint` therefore asks
+`#{alternate_on}` (`TmuxCommand.paneAlternateScreen`) one command ahead of the capture, and
+`repaintPayload` prefixes the answer. Every path that repaints is a way in: reattach, a workspace
+restore, a second macOS window, a released pane claim, and every repaint after byte loss.
+
+Load-bearing, and each part for its own reason. **`1049h` going in, `1047l` coming out** is not a
+symmetry mistake: `1049h` saves the cursor, so the program's own `ESC[?1049l` on exit has the normal
+screen's cursor to restore and the pair comes out balanced — while `1049l` on the way out would
+*restore* one, and on the overwhelming majority of repaints (an ordinary pane that was never near a
+full-screen program) that restore is unbalanced, and SwiftTerm's `cmdRestoreCursor` also reinstates
+the saved charset, origin mode, margins and wraparound. `1047l` switches screens and touches none of
+it, and on a pane already on the normal screen it is a no-op. The **`false` branch is not dead**: the
+emulator can be stranded on the alternate screen because the `ESC[?1049l` that would have said
+otherwise was one of the bytes dropped in the overrun that ordered the repaint. And an **absent**
+answer means no prefix at all, which is exactly the old behaviour, so a tmux with no `#{alternate_on}`
+is no worse off than before.
+
+Nothing else on that path was implicated, and it is worth not re-suspecting them: a real `tmux -CC`
+capture of vim and of Claude Code, replayed through `ControlCodec` and `ScreenTitleFilter` into the
+same emulator, leaves a clean grid. `RepaintScreenTests` pins all four cases, the last of them —
+`testAnUndeclaredRepaintIsTheOldOverdraw` — asserting the mangled rows themselves, so the others are
+known to be able to fail.
+
 **One tmux client per session on screen — and the extra ones are not the connection.** `%output`
 arrives only for the session a client is attached to, and a client has exactly one session. With a
 single channel per host, every window on a second session was a `capture-pane` still frame, and the

@@ -301,6 +301,22 @@ public enum TmuxCommand {
         "display-message -p -t \(quote(target)) '\(inheritedWorkingDirectoryFormat)'"
     }
 
+    /// `1` while a pane's program is on the alternate screen, `0` otherwise.
+    ///
+    /// A repaint has to say which of the emulator's two buffers it is painting into, and this is the
+    /// only way to ask: `%output` carries `ESC[?1049h` the moment a program sends it, but a view that
+    /// subscribes *after* the program started never saw it. See `SessionService.repaintPayload`.
+    static let alternateScreenFormat = "#{alternate_on}"
+
+    /// Whether one pane is on the alternate screen right now.
+    ///
+    /// A separate command rather than `…; capture-pane …` on one line: tmux answers a semicolon-joined
+    /// line with **one `%begin`/`%end` block per command**, so a single line would put one entry in the
+    /// pending-command FIFO against two blocks and slide every later correlation by one.
+    public static func paneAlternateScreen(paneId: String) -> String {
+        "display-message -p -t \(quote(paneId)) '\(alternateScreenFormat)'"
+    }
+
     /// One session's window indices, which is the one question about a *number* anything here asks.
     ///
     /// Indices are otherwise absent from this client on purpose — they are arbitrary, they are not

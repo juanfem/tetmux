@@ -36,6 +36,13 @@ rather than comparing it for equality, because it is a bitfield tmux may add to.
 field means a version this was never verified against (every one in the R3.6 matrix emits it) and
 is read as ours, since the alternative is a block that answers no command at all.
 
+**One command per `send`, even when tmux would accept two on a line.** A semicolon-joined line —
+`display-message …; capture-pane …` — is two commands to tmux and comes back as **two** `%begin`/`%end`
+blocks, verified on 3.7b. Sent as one `send` it would put one entry in the FIFO against two blocks and
+slide every later correlation by one, for the life of the channel. `requestRepaint` wants both answers
+and issues both commands separately for exactly this reason; FIFO order is what lets the second read
+what the first stored, without either naming the other.
+
 **Framing outranks dispatch.** Inside a `%begin` block every line is response content — including a
 line that starts with `%` — and only a `%end`/`%error` carrying the matching number may close the
 block. Parsing `%`-prefixed lines as notifications first cost real data and admitted forgery:
