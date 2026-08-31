@@ -216,6 +216,15 @@ final class SessionIntegrationTests: XCTestCase {
     /// so no `%output` carries it, and the first repaint cannot either — an alternate screen holds
     /// only what the program drew. Its arrival has exactly one possible source.
     ///
+    /// **Assembled by `printf` rather than typed, so the marker is not in the command that prints
+    /// it.** A shell echoes what it is sent, and that echo is an ordinary line of the pane's history:
+    /// on tmux 3.2a and 3.0, `capture-pane -S` on a pane whose program holds the alternate screen
+    /// returns that history *as well as* the alternate screen, so a literal marker came back in the
+    /// **first** repaint — inside the echo of the command, never as its output — and the ordering
+    /// assertion below read it as scrollback arriving too early. 3.3a and later do not, which is what
+    /// made this a version failure rather than a failure. Splitting the string across `printf`'s
+    /// format and its argument leaves the whole marker in the output and nowhere else.
+    ///
     /// `printf` rather than an editor: it drives `#{alternate_on}` (verified: 1 while held, 0 after)
     /// and does not ask the machine running the suite to have vim.
     func testLeavingTheAlternateScreenRepaintsAViewThatMissedItsStart() async throws {
@@ -232,11 +241,14 @@ final class SessionIntegrationTests: XCTestCase {
         )
 
         // Scrollback printed with nobody watching, then a program that takes the alternate screen.
-        await service.sendKeys(hostId: "local", paneId: paneId, text: "clear; echo tetmux-before-the-program\r")
+        await service.sendKeys(
+            hostId: "local", paneId: paneId,
+            text: "clear; printf 'tetmux-%s\\n' before-the-program\r"
+        )
         try await Task.sleep(for: .milliseconds(700))
         await service.sendKeys(
             hostId: "local", paneId: paneId,
-            text: "printf '\\033[?1049h'; echo tetmux-inside-the-program\r"
+            text: "printf '\\033[?1049h'; printf 'tetmux-%s\\n' inside-the-program\r"
         )
         try await Task.sleep(for: .milliseconds(700))
 
