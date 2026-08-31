@@ -268,6 +268,53 @@ final class SessionIntegrationTests: XCTestCase {
         await service.disconnectHost(hostId: "local")
     }
 
+    /// The repaint a new tab lands on puts the cursor where tmux has it, not at the end of the text.
+    ///
+    /// `capture-pane -J` preserves trailing spaces, and what it preserves is every cell the row has
+    /// *used* rather than the ones in front of the cursor — so a row that was once longer than it is
+    /// now comes back padded past its own end, and a repaint made of text alone leaves the cursor out
+    /// in that padding. Reported as a prompt whose cursor sat a few cells to the right of the `$` on
+    /// one host and not another, straightened out by the next Enter or `^L` because the shell redraws
+    /// from where *it* knows the cursor to be. The host it came from writes a screen title from
+    /// `PROMPT_COMMAND` before every prompt, which is how its prompt row ends up longer than itself.
+    ///
+    /// `printf 'tetmux-long-row\rtetmux'` is that shape with no shell config in it: fifteen cells
+    /// used, cursor back at column 6. `sleep` holds it there long enough to subscribe, because the
+    /// next prompt would overwrite the row this test is about.
+    func testARepaintPutsTheCursorWhereTmuxHasIt() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) { $0.activeSession?.activeWindow?.layoutTree != nil }
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        await service.sendKeys(
+            hostId: "local", paneId: paneId,
+            text: "clear; printf 'tetmux-long-row\\rtetmux'; sleep 5\r"
+        )
+        try await Task.sleep(for: .milliseconds(1200))
+
+        // The subscription is the repaint: this view has never seen this pane.
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
+        let output = await collect(stream, until: "tetmux-long-row", seconds: 15).value
+
+        XCTAssertTrue(
+            output.contains("tetmux-long-row"),
+            "the capture did not come back padded past the cursor, so there is nothing here to get "
+                + "wrong; got:\n\(output.debugDescription)"
+        )
+        // Column 7 on the wire is `#{cursor_x}` 6. Without the move the emulator would be left at
+        // column 16, which is where the row's text ends.
+        XCTAssertNotNil(
+            output.range(of: "\u{1b}\\[[0-9]+;7H", options: .regularExpression),
+            "the repaint never said where the cursor was, so it is sitting out in the row's trailing "
+                + "padding; got:\n\(output.debugDescription)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     func testSplittingAWindowUpdatesTheLayoutTree() async throws {
         let service = SessionService()
         await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))

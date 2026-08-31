@@ -49,7 +49,7 @@ so it was on the normal one. When the program later exited, its `ESC[?1049l` fou
 already there, restored nothing, and left the last frame on the grid for the shell prompt to overdraw:
 reported as *"quit Claude Code and the pane is not cleared; the terminal draws on top of the previous
 view"*, and the splice is literal — a row reading `$ echo POSTE_TOP`. `requestRepaint` therefore asks
-`#{alternate_on}` (`TmuxCommand.paneAlternateScreen`) one command ahead of the capture, and
+`#{alternate_on}` (`TmuxCommand.paneRepaintState`) one command ahead of the capture, and
 `repaintPayload` prefixes the answer. Every path that repaints is a way in: reattach, a workspace
 restore, a second macOS window, a released pane claim, and every repaint after byte loss.
 
@@ -70,6 +70,32 @@ capture of vim and of Claude Code, replayed through `ControlCodec` and `ScreenTi
 same emulator, leaves a clean grid. `RepaintScreenTests` pins all four cases, the last of them —
 `testAnUndeclaredRepaintIsTheOldOverdraw` — asserting the mangled rows themselves, so the others are
 known to be able to fail.
+
+**A repaint has to say where the cursor is, because the capture cannot.** `capture-pane -J`
+preserves trailing spaces, and what it preserves is every cell the row has *used* — not the ones in
+front of the cursor. A row that was longer once comes back padded past its own end, so a payload made
+of text alone leaves the emulator's cursor out in that padding. Reported as *"when I open a new tab
+the cursor is not next to the `$` sign, but further away"*, on one host and not another, put right by
+the next Enter or `^L` because the shell redraws from where *it* knows the cursor to be. On the host
+it came from the gap is three cells and the padding comes from a `PROMPT_COMMAND` that writes a
+screen title before every prompt; measured on that pane directly, `capture-pane -p -e -J` gives the
+prompt row 40 cells while `#{cursor_x}` says 37. A new tab is the common way in only because a pane
+subscribes for the first time with a prompt already sitting on it — every other repaint has the same
+hole.
+
+`requestRepaint` therefore asks for the cursor in the same `display-message` that already carried
+`#{alternate_on}` (`TmuxCommand.paneRepaintState`, `#{alternate_on},#{cursor_x},#{cursor_y}`, still
+one command ahead of the capture and still correlated by FIFO order), and `repaintPayload` ends with
+an **absolute** `ESC[row;colH`. Absolute is what decides the trailing blank rows: `#{cursor_y}` counts
+from the top of *tmux's* screen, so the emulator's screen has to be that same screen, which it is only
+if the capture is replayed whole. Those blank rows are the bottom of the pane, not padding to trim,
+and dropping them slides every row up by however many there were — so the trim is now conditional and
+survives only on the path with no cursor to place, where it is the old cosmetic behaviour and cannot
+be wrong about a position it never states. The fields are **read independently**, so a tmux that
+answers one and not the other loses only the half of the repaint that needed it. `RepaintScreenTests`
+pins this against a real capture of that host's prompt row and `testARepaintPutsTheCursorWhereTmuxHasIt`
+pins the whole chain against a live server; the negative twin asserts the cursor landing at column 40,
+so both are known to be able to fail.
 
 **A pane leaving the alternate screen repaints the views that never saw it enter.** The other half of
 the same situation, and the one the user reported second. Painting the program's screen into the

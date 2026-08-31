@@ -317,20 +317,28 @@ public enum TmuxCommand {
         "display-message -p -t \(quote(target)) '\(inheritedWorkingDirectoryFormat)'"
     }
 
-    /// `1` while a pane's program is on the alternate screen, `0` otherwise.
+    /// The two things a repaint needs that `capture-pane` does not carry: which of the emulator's
+    /// two buffers the frame belongs to, and where tmux is holding the cursor.
     ///
-    /// A repaint has to say which of the emulator's two buffers it is painting into, and this is the
-    /// only way to ask: `%output` carries `ESC[?1049h` the moment a program sends it, but a view that
-    /// subscribes *after* the program started never saw it. See `SessionService.repaintPayload`.
-    static let alternateScreenFormat = "#{alternate_on}"
+    /// `#{alternate_on}` is `1` while a pane's program is on the alternate screen, `0` otherwise, and
+    /// asking is the only way to know it: `%output` carries `ESC[?1049h` the moment a program sends
+    /// it, but a view that subscribes *after* the program started never saw it.
+    ///
+    /// `#{cursor_x}`/`#{cursor_y}` are the pane's cursor in *screen* coordinates, zero-based. They
+    /// cannot be recovered from the capture, because `-J` reports every cell a row has ever used
+    /// rather than the ones in front of the cursor — a prompt whose line was once longer comes back
+    /// padded, and replaying it leaves the cursor out in that padding.
+    ///
+    /// Comma-separated because all three are integers: no value here can contain the separator.
+    static let repaintStateFormat = "#{alternate_on},#{cursor_x},#{cursor_y}"
 
-    /// Whether one pane is on the alternate screen right now.
+    /// The state of one pane at the instant the repaint behind this is captured.
     ///
     /// A separate command rather than `…; capture-pane …` on one line: tmux answers a semicolon-joined
     /// line with **one `%begin`/`%end` block per command**, so a single line would put one entry in the
     /// pending-command FIFO against two blocks and slide every later correlation by one.
-    public static func paneAlternateScreen(paneId: String) -> String {
-        "display-message -p -t \(quote(paneId)) '\(alternateScreenFormat)'"
+    public static func paneRepaintState(paneId: String) -> String {
+        "display-message -p -t \(quote(paneId)) '\(repaintStateFormat)'"
     }
 
     /// One session's window indices, which is the one question about a *number* anything here asks.

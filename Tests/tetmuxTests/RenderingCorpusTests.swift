@@ -648,4 +648,76 @@ final class RepaintScreenTests: XCTestCase {
         )
         XCTAssertEqual(grid[0], "CLAUDE_FRAME_TOP")
     }
+
+    /// A real `capture-pane -p -e -J` of the pane a new tab opens on, off the host this was reported
+    /// from: a `PROMPT_COMMAND` that writes a screen title, and a prompt whose row the grid says is
+    /// 40 cells long while `#{cursor_x}` says 37.
+    ///
+    /// The three cells between them are the bug. `-J` preserves every cell the row has used, so text
+    /// alone leaves the emulator's cursor out in the padding, three columns to the right of the `$`.
+    private static let promptCapture: [Data] = {
+        let banner = "\u{1b}[1m\u{1b}[32m=> \u{1b}[0m Acc-Py base 2023.06.3 is now active"
+        let prompt = "[acc-py] \u{1b}[1m\u{1b}[37m\u{1b}[42mjuesteba@cwe-513-vml377"
+            + "\u{1b}[0m\u{1b}[39m\u{1b}[49m ~ $    "
+        return [Data(banner.utf8), Data(prompt.utf8)] + Array(repeating: Data(), count: 22)
+    }()
+
+    private func pane() -> Terminal {
+        Terminal(delegate: NullDelegate(), options: TerminalOptions(cols: 80, rows: 24))
+    }
+
+    /// The fix: tmux is asked where the cursor is, and the repaint ends by putting it there.
+    func testARepaintPutsTheCursorWhereTmuxSaysRatherThanAtTheEndOfTheText() {
+        let terminal = pane()
+        terminal.feed(byteArray: Array(SessionService.repaintPayload(
+            from: Self.promptCapture,
+            alternateScreen: false,
+            cursor: SessionService.PaneCursor(column: 37, row: 1)
+        )))
+        XCTAssertEqual(
+            terminal.buffer.x, 37,
+            "the cursor is not next to the prompt's `$` — it is out in the row's trailing padding"
+        )
+        XCTAssertEqual(terminal.buffer.y, 1, "the cursor is on the wrong row of the prompt's screen")
+    }
+
+    /// The negative half, and the reported bug itself: `nil` is a tmux that did not answer
+    /// `#{cursor_x}`, which is also what every repaint used to be.
+    func testARepaintWithNoCursorStillLandsInTheTrailingPadding() {
+        let terminal = pane()
+        terminal.feed(byteArray: Array(
+            SessionService.repaintPayload(from: Self.promptCapture, alternateScreen: false)
+        ))
+        XCTAssertEqual(
+            terminal.buffer.x, 40,
+            "nothing lands in the padding any more, so the test above asserts nothing"
+        )
+    }
+
+    /// Why the blank rows below the cursor are replayed rather than trimmed once there is a cursor.
+    ///
+    /// tmux's `#{cursor_y}` is relative to the top of *its* screen, so the move at the end is only
+    /// right if the emulator's screen is the same screen. Here the capture is six rows of history
+    /// plus a 24-row screen whose last six rows are blank: trimming those six slides every row up by
+    /// six, and row 17 would be `L17` instead of the `L23` tmux is holding the cursor on.
+    func testTrailingBlankRowsAreKeptSoTheCursorRowMeansWhatTmuxMeant() {
+        let lines = (0..<24).map { Data("L\($0)".utf8) } + Array(repeating: Data(), count: 6)
+        let terminal = pane()
+        terminal.feed(byteArray: Array(SessionService.repaintPayload(
+            from: lines,
+            alternateScreen: false,
+            cursor: SessionService.PaneCursor(column: 3, row: 17)
+        )))
+        XCTAssertEqual(terminal.buffer.y, 17)
+        XCTAssertEqual(terminal.buffer.x, 3)
+        let row = (0..<3).map { column -> String in
+            guard let line = terminal.getLine(row: 17) else { return "?" }
+            let character = line[column].getCharacter()
+            return character == "\0" ? " " : String(character)
+        }.joined()
+        XCTAssertEqual(
+            row, "L23",
+            "the cursor's row is not the one tmux put it on — the screen was shifted by the trim"
+        )
+    }
 }

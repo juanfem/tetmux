@@ -217,10 +217,11 @@ public actor SessionService {
         /// the very first keystroke of a session take the immediate path like any other isolated one.
         var lastKeyFlush: ContinuousClock.Instant?
         var repaintedPanes: Set<String> = []
-        /// Which screen each pending repaint is painting into, read one command before the capture it
-        /// belongs to. Consumed by that capture and left absent when tmux did not answer, which is
-        /// what makes a server with no `#{alternate_on}` behave exactly as it did before.
-        var repaintAlternateScreen: [String: Bool] = [:]
+        /// What each pending repaint needs to know about the pane it is a picture of — which screen,
+        /// and where the cursor is — read one command before the capture it belongs to. Consumed by
+        /// that capture and left absent when tmux did not answer, which is what makes a server with
+        /// no `#{alternate_on}` behave exactly as it did before.
+        var repaintState: [String: RepaintState] = [:]
         /// Panes tmux says are on the alternate screen right now, from the `#{alternate_on}`
         /// subscription. Held so a notification can be read as an *edge* rather than a level.
         var panesOnAlternateScreen: Set<String> = []
@@ -372,10 +373,10 @@ public actor SessionService {
             /// two macOS windows, and the payload begins by clearing the screen *and* the scrollback —
             /// broadcasting a late joiner's repaint would wipe the history the other window is holding.
             case capturePane(paneId: String, target: UUID?)
-            /// `#{alternate_on}` for the pane the very next `.capturePane` is for — see
-            /// `repaintPayload`. Its own kind rather than a field on the capture because the answer
-            /// does not exist yet when the capture is queued.
-            case paneAlternateScreen(paneId: String)
+            /// `#{alternate_on}` and the cursor for the pane the very next `.capturePane` is for —
+            /// see `repaintPayload`. Its own kind rather than a field on the capture because the
+            /// answer does not exist yet when the capture is queued.
+            case paneRepaintState(paneId: String)
             case roundTrip(sentAt: ContinuousClock.Instant)
             /// Like `.ignore`, but somebody is waiting to hear that tmux ran it. A refusal counts:
             /// the point is that the command has been *dealt with*, not that it succeeded.
@@ -1599,11 +1600,11 @@ public actor SessionService {
             case .capturePane(let paneId, _):
                 // The pane vanished between subscribe and capture; let a later attempt retry.
                 connection.repaintedPanes.remove(paneId)
-                connection.repaintAlternateScreen.removeValue(forKey: paneId)
-            case .paneAlternateScreen(let paneId):
+                connection.repaintState.removeValue(forKey: paneId)
+            case .paneRepaintState(let paneId):
                 // The capture behind it is still queued and still worth painting; it just goes out
-                // without a buffer statement, which is where this started.
-                connection.repaintAlternateScreen.removeValue(forKey: paneId)
+                // without a buffer statement and without a cursor, which is where this started.
+                connection.repaintState.removeValue(forKey: paneId)
             case .userCommand(let action):
                 // §7 — the user asked for this and it did not happen. Saying so, in tmux's own words,
                 // is the difference between a command that failed and one that silently did nothing.
@@ -2114,25 +2115,44 @@ public actor SessionService {
             let clients = applyClients(text(), hostId: hostId)
             if reconcileStale { reconcileStaleClients(clients, hostId: hostId) }
 
-        case .paneAlternateScreen(let paneId):
-            // "1" or "0". Anything else — an empty line from a tmux that does not know the format —
-            // leaves no entry, and the capture behind it goes out unprefixed.
-            switch text().first?.trimmingCharacters(in: .whitespaces) {
-            case "1": connection.repaintAlternateScreen[paneId] = true
-            case "0": connection.repaintAlternateScreen[paneId] = false
-            default: connection.repaintAlternateScreen.removeValue(forKey: paneId)
+        case .paneRepaintState(let paneId):
+            // `alternate_on,cursor_x,cursor_y`. Read field by field, because a tmux that does not
+            // know one format still answers the others: an unparsable field leaves that half absent
+            // and the capture behind it goes out without whatever the field was for.
+            let fields = (text().first?.trimmingCharacters(in: .whitespaces) ?? "")
+                .split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+            func field(_ index: Int) -> Int? {
+                index < fields.count ? Int(fields[index]) : nil
+            }
+            var state = RepaintState()
+            switch field(0) {
+            case 1: state.alternateScreen = true
+            case 0: state.alternateScreen = false
+            default: break
+            }
+            if let column = field(1), let row = field(2), column >= 0, row >= 0 {
+                state.cursor = PaneCursor(column: column, row: row)
+            }
+            if state.alternateScreen == nil, state.cursor == nil {
+                connection.repaintState.removeValue(forKey: paneId)
+            } else {
+                connection.repaintState[paneId] = state
             }
 
         case .capturePane(let paneId, let target):
             // Consumed here: the answer describes the instant this capture was taken and must not be
             // carried over to the next repaint, which asks again.
-            let alternateScreen = connection.repaintAlternateScreen.removeValue(forKey: paneId)
+            let state = connection.repaintState.removeValue(forKey: paneId)
             noteRepaintOfAlternateScreen(
-                alternateScreen == true, hostId: hostId, paneId: paneId,
+                state?.alternateScreen == true, hostId: hostId, paneId: paneId,
                 target: target, connection: connection
             )
             deliver(
-                Self.repaintPayload(from: command.lines, alternateScreen: alternateScreen),
+                Self.repaintPayload(
+                    from: command.lines,
+                    alternateScreen: state?.alternateScreen,
+                    cursor: state?.cursor
+                ),
                 hostId: hostId, paneId: paneId, target: target
             )
 
@@ -2150,6 +2170,27 @@ public actor SessionService {
         }
     }
 
+    /// Where tmux is holding a pane's cursor, in the pane's own screen coordinates, zero-based.
+    public struct PaneCursor: Equatable, Sendable {
+        public var column: Int
+        public var row: Int
+
+        public init(column: Int, row: Int) {
+            self.column = column
+            self.row = row
+        }
+    }
+
+    /// The answers `TmuxCommand.paneRepaintState` brings back, held for the capture behind it.
+    ///
+    /// Both halves are independently optional: a tmux that does not know one of the formats renders
+    /// it as an empty field rather than failing the command, and each missing answer costs only the
+    /// part of the repaint that needed it.
+    struct RepaintState {
+        var alternateScreen: Bool?
+        var cursor: PaneCursor?
+    }
+
     /// Turns `capture-pane -p -e -J` output into bytes a terminal emulator can replay (F4.16).
     ///
     /// **A repaint has to say which of the emulator's two screens it is painting into.** `capture-pane`
@@ -2164,15 +2205,39 @@ public actor SessionService {
     /// it". `ScreenTitleFilter` and the codec were never involved: replaying a real capture of a vim
     /// or Claude Code session through them end to end leaves a clean grid.
     ///
+    /// **A repaint has to say where the cursor is, because the capture cannot.** `capture-pane -J`
+    /// preserves trailing spaces, and what it preserves is every cell the row has *ever* used, not
+    /// the ones up to the cursor: a prompt drawn over a longer one comes back padded past its own
+    /// end. Replaying that text and stopping leaves the emulator's cursor out in the padding — the
+    /// bug it was found as is a prompt whose cursor sits a few cells to the right of the `$`, on one
+    /// host and not another, straightened out by the next keystroke because the shell redraws from
+    /// where it knows the cursor to be. Anything that repaints is a way in; a new tab is the common
+    /// one, because a pane subscribes for the first time with a prompt already on screen.
+    ///
+    /// `cursor` is `#{cursor_x}`/`#{cursor_y}`, so the move at the end is **absolute**, and that is
+    /// what decides the blank rows above it. tmux's coordinates are relative to the top of *its*
+    /// screen, so the emulator's screen has to be the same screen — which it is only if the capture
+    /// is replayed whole. The trailing blank rows are not padding to be trimmed: they are the bottom
+    /// of the pane, and dropping them slides everything up by however many there were. Trimming them
+    /// is therefore conditional on having no cursor to place, where it is the old cosmetic behaviour
+    /// and cannot be wrong about a position it never states.
+    ///
     /// `alternateScreen` is tmux's own `#{alternate_on}`, asked one command earlier for this same pane.
     /// `nil` means the server did not answer — no prefix then, which is exactly the old behaviour, so
     /// a tmux without that format is no worse off than before.
-    static func repaintPayload(from lines: [Data], alternateScreen: Bool? = nil) -> Data {
+    static func repaintPayload(
+        from lines: [Data],
+        alternateScreen: Bool? = nil,
+        cursor: PaneCursor? = nil
+    ) -> Data {
         var lines = lines
-        // capture-pane pads the screen to its full height; replaying twenty blank rows just pushes
-        // the real content off the top of the view.
-        while let last = lines.last, last.allSatisfy({ $0 == UInt8(ascii: " ") }) {
-            lines.removeLast()
+        if cursor == nil {
+            // capture-pane pads the screen to its full height; with nothing to say about the cursor
+            // there is nothing to line those rows up with, and replaying twenty blank ones just
+            // pushes the real content off the top of the view.
+            while let last = lines.last, last.allSatisfy({ $0 == UInt8(ascii: " ") }) {
+                lines.removeLast()
+            }
         }
 
         var payload = Data()
@@ -2199,6 +2264,10 @@ public actor SessionService {
             payload.append(line)
         }
         payload.append(contentsOf: Array("\u{1b}[0m".utf8))
+        // Last, so nothing drawn above can move it. One-based on the wire, zero-based from tmux.
+        if let cursor {
+            payload.append(contentsOf: Array("\u{1b}[\(cursor.row + 1);\(cursor.column + 1)H".utf8))
+        }
         return payload
     }
 
@@ -2920,8 +2989,8 @@ public actor SessionService {
         // the capture is about to be taken from. Correlation is FIFO by order, which is what lets the
         // capture read it back without either command naming the other.
         send(
-            TmuxCommand.paneAlternateScreen(paneId: paneId),
-            kind: .paneAlternateScreen(paneId: paneId), hostId: hostId, connection: connection
+            TmuxCommand.paneRepaintState(paneId: paneId),
+            kind: .paneRepaintState(paneId: paneId), hostId: hostId, connection: connection
         )
         send(
             "capture-pane -p -e -J -t \(paneId) -S -\(captureScrollbackLines)",
@@ -3375,8 +3444,8 @@ public actor SessionService {
         for channel in channels(of: hostId) {
             channel.repaintedPanes.formIntersection(live)
             channel.lossyPanes.formIntersection(live)
-            for paneId in channel.repaintAlternateScreen.keys where !live.contains(paneId) {
-                channel.repaintAlternateScreen.removeValue(forKey: paneId)
+            for paneId in channel.repaintState.keys where !live.contains(paneId) {
+                channel.repaintState.removeValue(forKey: paneId)
             }
             channel.panesOnAlternateScreen.formIntersection(live)
             for paneId in channel.staleNormalScreen.keys where !live.contains(paneId) {
