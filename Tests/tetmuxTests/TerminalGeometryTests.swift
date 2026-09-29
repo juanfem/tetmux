@@ -150,6 +150,31 @@ final class TerminalGeometryTests: XCTestCase {
         )
     }
 
+    /// …and a grid put back is not a screen put back, so the pane owes a repaint from tmux.
+    ///
+    /// The resize down reflows the buffer and clamps the cursor, and the resize back restores only
+    /// the dimensions. Claude Code redraws by relative cursor movement, so every later update landed
+    /// on the wrong rows. Nothing corrected it when tmux's answer to the new density was the grid the
+    /// pane already had, which is what a laptop put to sleep on one display and woken on another
+    /// ran into. What is pinned is that the pane asks, once per real change, and not when nothing moved.
+    func testABackingScaleChangeThatMovedTheGridAsksForARepaint() {
+        let view = PaneTerminalView(
+            frame: NSRect(x: 0, y: 0, width: 400, height: 300),
+            font: TerminalTheme.default.resolvedFont()
+        )
+        TerminalPaneView.hideReservedScroller(in: view)
+        view.resize(cols: 80, rows: 24)
+        var asked = 0
+        view.onScreenDiverged = { asked += 1 }
+
+        let otherDisplay: CGFloat = viewScaleFactor == 2 ? 1 : 2
+        view.applyBackingScaleFactor(otherDisplay)
+        XCTAssertEqual(asked, 1, "the round trip through the frame-derived grid changed what the emulator holds")
+
+        view.applyBackingScaleFactor(otherDisplay)
+        XCTAssertEqual(asked, 1, "no font reset, no damage, nothing to repaint")
+    }
+
     /// The control, and the reason the restore is on the pane subclass rather than the shared one:
     /// §4.6's passthrough surface has no tmux behind it, so its own frame is the only authority on
     /// how big its terminal is, and it must take the grid the recompute derives.

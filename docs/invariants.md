@@ -215,6 +215,20 @@ frame is put back, since tmux owns a pane's grid and its answer to the new size 
 the pane already had, in which case no `%layout-change` arrives to correct anything. §4.6's
 passthrough surface takes the frame-derived grid instead — there is no tmux behind it to own one.
 
+**…and putting tmux's grid back does not put tmux's screen back, so that pane view then owes a
+repaint.** `resetFont` resizes the emulator to the frame-derived grid, and the restore resizes it
+back. Each `resize` reflows the buffer, clamps the cursor to the narrower grid, moves rows between
+the screen and the scrollback, and ends in a `softReset`. The dimensions come back and none of the
+rest does, and tmux never hears about any of it. Claude Code redraws its interface by relative cursor
+movement, so every later update landed on the wrong rows, and it stayed garbled until a real resize
+sent SIGWINCH and made it redraw from scratch. Dragging a window between displays hid this, because
+the new cell almost always means a new column count and so a SIGWINCH. A laptop put to sleep on an
+external display and woken on its own screen evidently did not always get one: the render stayed
+broken until the user resized the window. `PaneTerminalView.adoptRecomputedCell`
+therefore fires `onScreenDiverged` whenever it had to restore, and the coordinator asks for
+`repaintPane(hostId:paneId:subscriber:)`. That repaint is *targeted*: the damage is in one emulator,
+and a broadcast would wipe the local scrollback of every other window on the pane for nothing.
+
 **The size a view asks for belongs to the view, so it outlives the channel — and the memo of what
 was sent is not evidence of what tmux has.** Both halves of this were on `Connection`, and both were
 wrong there. `desiredWindowSizes` and `desiredSize` are a container's statement about its own frame:

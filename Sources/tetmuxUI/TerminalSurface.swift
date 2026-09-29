@@ -357,6 +357,7 @@ struct TerminalPaneView: NSViewRepresentable {
 
         func attach(view: TerminalView, hostId: String, paneId: String, service: SessionService) {
             self.view = view
+            (view as? PaneTerminalView)?.onScreenDiverged = { [weak self] in self?.repaintThisView() }
             subscription?.cancel()
             subscription = Task { [weak self] in
                 let subscription = await service.subscribeToPane(hostId: hostId, paneId: paneId)
@@ -444,6 +445,15 @@ struct TerminalPaneView: NSViewRepresentable {
         private func stopFrameLink() {
             frameLink?.invalidate()
             frameLink = nil
+        }
+
+        /// Asks tmux to repaint this view only, after its emulator was changed on this side.
+        ///
+        /// Nothing to do before the subscription exists: subscribing repaints the pane anyway, and
+        /// that capture is taken after whatever caused this.
+        private func repaintThisView() {
+            guard let flow = flowControl else { return }
+            Task { await flow.service.repaintPane(hostId: flow.hostId, paneId: flow.paneId, subscriber: flow.subscriber) }
         }
 
         func detach() {
@@ -866,12 +876,28 @@ final class PaneTerminalView: ComposingTerminalView, NSMenuItemValidation {
     ///
     /// Guarded on a difference because `TerminalView.resize` ends in a `softReset`, which is not
     /// something to spend when the grid is already right.
+    ///
+    /// **Putting the grid back does not put the screen back**, so the pane then owes a repaint. The
+    /// resize down reflowed the buffer, clamped the cursor to the narrower grid, and moved rows
+    /// between the screen and the scrollback; the resize back up restores the dimensions and none of
+    /// that. tmux has no idea it happened. A program redrawing by relative cursor movement — Claude
+    /// Code's whole interface — then lands every later update on the wrong rows, and it stays that
+    /// way until a real resize makes it redraw from scratch. If tmux's answer to the new density is
+    /// the grid the pane already had, no resize ever comes. That was a laptop put to sleep on an
+    /// external display and woken on its own screen. Only tmux knows what the screen should hold,
+    /// so the fix is its capture, sent to this view alone.
     override func adoptRecomputedCell(restoringGrid grid: (cols: Int, rows: Int)) {
         let terminal = getTerminal()
         guard grid.cols > 0, grid.rows > 0,
               terminal.cols != grid.cols || terminal.rows != grid.rows else { return }
         resize(cols: grid.cols, rows: grid.rows)
+        onScreenDiverged?()
     }
+
+    /// Called when something on this side changed what the emulator holds without tmux knowing,
+    /// so the coordinator asks tmux to repaint this view. A closure rather than a direct call so a
+    /// test can see it fire without a session behind it.
+    var onScreenDiverged: (() -> Void)?
 
     /// SwiftTerm's own cell size, read back rather than recomputed.
     ///

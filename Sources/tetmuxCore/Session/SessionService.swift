@@ -3064,6 +3064,17 @@ public actor SessionService {
         requestRepaint(hostId: hostId, paneId: paneId)
     }
 
+    /// Repaints one view of a pane whose emulator no longer holds what tmux does, and nobody else's.
+    ///
+    /// For damage done on this side of the wire — a density change, whose font reset resizes the
+    /// emulator and back — so only the one emulator that took it is wrong. A broadcast would clear the
+    /// local scrollback of every other window on the pane for nothing. A subscriber that has gone away
+    /// took its emulator with it, so there is nothing to repaint.
+    public func repaintPane(hostId: String, paneId: String, subscriber: UUID) {
+        guard outputSubscribers[hostId]?[paneId]?[subscriber] != nil else { return }
+        requestRepaint(hostId: hostId, paneId: paneId, target: subscriber)
+    }
+
     /// Repaints every pane currently on screen for a host.
     private func repaintSubscribedPanes(hostId: String) {
         guard let panes = outputSubscribers[hostId]?.keys else { return }
