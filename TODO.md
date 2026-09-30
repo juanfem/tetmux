@@ -12,7 +12,7 @@ thing it constrains, and where somebody will actually meet it. A second copy in 
 list nobody reads twice and one that drifts from the original the first time either is edited;
 `git log` holds the narrative. This paragraph replaced ninety lines of exactly that on 2026-08-07.
 
-**As of 2026-08-31: 0 open, 6 parked, and nothing here blocks a release.** On 2026-08-06 the last
+**As of 2026-09-29: 1 open (a flaky test), 6 parked, and nothing here blocks a release.** On 2026-08-06 the last
 two then-open entries left the list without being implemented, and both say so where it counts
 rather than here: P6.7's launch half was amended to name **warm** launch (SRD §6,
 `docs/measurements.md`), and signing moved from *blocked* to *parked* (SRD §2.5), because "blocked
@@ -26,7 +26,24 @@ References point into current `main`. Line numbers drift; the symbol names besid
 
 ## Open
 
-Nothing.
+- [ ] **`testAStartDirectoryAndAnInitialCommandBothApply` failed once on CI and passed on a rerun.**
+  Run on `37bdd8f`, 2026-09-29, macos-15-arm64 runner with Homebrew tmux 3.7c. The pane still read
+  `bash` after the 15 s wait, where the test expects `cat`
+  (`SessionIntegrationTests.swift:632` and `:638`). Its sibling `testANewSessionRunsTheHostsInitialCommand`
+  passed in the same run. It could not be reproduced locally: 6/6 passes on 3.7b under zsh and bash,
+  3/3 on a 3.7c built from the release tarball, and the whole integration suite green on 3.7c.
+  *Suspected, not verified:* a race in how an **unattached** session's pane learns its command. The
+  `%*` pane-command subscription (`TmuxCommand.subscribePaneCommand`) is believed to cover only the
+  attached session's panes, so a session made by `newSession` reports its command through a
+  `list-panes` alone. If that list runs before `bash -c cat` has exec'd, it reads `bash`. `cat`
+  prints nothing, so `automatic-rename` does not fire, no `%unlinked-window-renamed` arrives, and
+  `schedulePaneRefresh` never runs again. If that is it, the app has the bug too, not only the test:
+  the sidebar would label such a pane with the shell until something unrelated refreshes it.
+  *To start:* confirm the subscription's scope against the 3.7c source (`control_check_subs_all_panes`)
+  or a live `tmux -CC` capture, then reproduce by delaying the exec (`initialCommand: "sleep 1; exec cat"`
+  would let `list-panes` read the shell every time). If it reproduces, fix the model rather than the
+  test, e.g. one more pane refresh shortly after a session this client created appears. If the
+  subscription does cover every session, the race is elsewhere and this reasoning is wrong.
 
 ## Parked by decision
 
