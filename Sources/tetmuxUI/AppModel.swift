@@ -1207,6 +1207,11 @@ public final class AppModel {
 
     public func requestCloseWindowFromMenu() {
         guard let state = activeWindowState else { return }
+        if state.closeTabClosesWindow(in: hosts) {
+            // The same `performClose:` as ⇧⌘W, so the window goes the way any other close takes it.
+            state.nsWindow?.performClose(nil)
+            return
+        }
         requestCloseWindow(in: state)
     }
 

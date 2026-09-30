@@ -2540,6 +2540,34 @@ final class EndedSessionOfferTests: XCTestCase {
         XCTAssertNil(state.selectedWindow(in: [after]))
     }
 
+    /// ⌘W on a session's last tab ends the session; the next ⌘W has no tab left and closes the
+    /// window. Before the session ends, and on a merely dropped link, it stays a tab close.
+    @MainActor
+    func testCloseTabClosesTheWindowOnceItsSessionHasEnded() {
+        let state = WindowState()
+        let before = connectedHost(sessions: [session("$1", "work"), session("$2", "other")])
+        state.selectedHostId = "local"
+        state.selectedSessionId = "$1"
+        state.reconcile(with: [before])
+        XCTAssertFalse(state.closeTabClosesWindow(in: [before]))
+
+        var dropped = before
+        dropped.connectionState = .disconnected
+        XCTAssertFalse(state.closeTabClosesWindow(in: [dropped]), "a dropped link is not an ended session")
+
+        let after = HostState(
+            config: before.config, connectionState: .connected,
+            sessions: [session("$2", "other")], activeSessionId: "$2"
+        )
+        state.reconcile(with: [after])
+        XCTAssertTrue(state.closeTabClosesWindow(in: [after]))
+
+        // Picking another session answers the offer, and ⌘W is a tab close again.
+        state.selectedSessionId = "$2"
+        state.reconcile(with: [after])
+        XCTAssertFalse(state.closeTabClosesWindow(in: [after]))
+    }
+
     /// The user's report: three sessions, close the last tab of one, and the window shows a tab from
     /// another session. Replays the snapshots tmux actually produces, including the intermediate one
     /// where `%window-close` has been applied but `list-sessions` has not yet removed the session.

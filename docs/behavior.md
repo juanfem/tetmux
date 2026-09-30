@@ -962,6 +962,14 @@ Replacing the group takes `Close All` out too, which is what frees ⌥⌘W. Anyt
 family is checked against the **running** menu bar; the AX attributes are what tell you a chord was
 silently dropped. ⌥⌘[ / ⌥⌘] move between panes in the **rendered** tree, so zoom is respected.
 
+**Once a window's session has ended, ⌘W closes the window.** ⌘W on a session's last tab ends the
+session, and the window stops on F4.15's offer rather than following the client; the next ⌘W then
+had no tab to act on and did nothing, the chord going dead exactly where Safari and Terminal close
+the window. `WindowState.closeTabClosesWindow` is the decision and asks `recreatableSessionName`, so
+it covers the whole-server case too and never a dropped link, whose window is still the way back to
+a session that is only out of reach. The close goes through `performClose:`, the same as ⇧⌘W.
+`testCloseTabClosesTheWindowOnceItsSessionHasEnded` pins it.
+
 **A dropped tab lands on the side the drag came from, and the marker has to agree.** The rule every
 tab bar has: the dragged tab takes the target's position and everything between shifts by one — so
 a rightward drag inserts *after* the target and a leftward one *before* it.

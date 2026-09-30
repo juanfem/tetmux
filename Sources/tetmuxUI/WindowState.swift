@@ -365,6 +365,18 @@ public final class WindowState: Identifiable {
         endedSessionName != nil && host.id == lastShownHostId && host.connectionState.isActive
     }
 
+    /// Whether ⌘W should close this macOS window rather than a tab in it.
+    ///
+    /// Only while the window holds the "that session ended" offer: the ordinary way there is ⌘W on
+    /// the session's last tab, and the next ⌘W then has no tab to act on and did nothing at all —
+    /// the same chord reading as dead exactly where Safari and Terminal close the window. Asked
+    /// through `recreatableSessionName` so that it holds for the whole-server case as well, and never
+    /// for a dropped link, whose window is still the user's way back to the session.
+    public func closeTabClosesWindow(in hosts: [HostState]) -> Bool {
+        guard let host = selectedHost(in: hosts) else { return false }
+        return recreatableSessionName(in: host) != nil
+    }
+
     /// What this window is showing, in the form every command takes.
     public func scope(in hosts: [HostState]) -> AppModel.Scope {
         let window = selectedWindow(in: hosts)
