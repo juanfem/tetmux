@@ -1897,13 +1897,13 @@ public final class AppModel {
     /// is still pointed at a host, so this keeps working in exactly the state where somebody is most
     /// likely to reach for it.
     ///
-    /// The session is revealed in the window that asked rather than a new one, which is what
-    /// `createSessionWithDefaultName` does with no `revealIn` — ⌥ on the menu bar's own New Session
-    /// is the way to ask for a window of its own, and it goes through the same call with
-    /// `preferNewWindow`.
+    /// The session opens in a window of its own rather than retargeting the one that asked, which
+    /// would take that window away from what it was showing — the rule the menu bar extra's New
+    /// Session already follows, since a session that does not exist yet is open in no window. The
+    /// sidebar's per-host New Session is the way to put one in the window it was asked from.
     public func createSessionFromMenu() {
         guard let hostId = activeScope.hostId else { return }
-        createSessionWithDefaultName(hostId: hostId)
+        createSessionWithDefaultName(hostId: hostId, preferNewWindow: true)
     }
 
     public func createSessionWithDefaultName(

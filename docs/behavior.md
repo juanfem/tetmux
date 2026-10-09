@@ -1120,7 +1120,11 @@ selecting whichever window tmux made active would hand the selection to a window
 in the meantime. Requests hold the asking window weakly and expire after 15 s: one kept
 indefinitely would eventually match an unrelated session of the same name and move somebody's
 window. The menu bar's **New Session** opens a window of its own — the rule its
-closed session rows follow — and has to travel the same way rather than opening one at the click:
+closed session rows follow — and so does File ▸ New Session (⇧⌘N), for the same reason: a
+session that does not exist yet is open in no window, and retargeting the asking one would take it
+away from what it was showing. Only the sidebar's per-host New Session reveals in the window it was
+asked from, because there the user has pointed at that window. The two that open one have to travel
+the same way rather than opening it at the click:
 there is no id to seed a window with until tmux answers. So the reveal request carries the intent, opens the window when the
 session arrives, and is the one kind of reveal that does *not* need the asking window to still be
 there.
