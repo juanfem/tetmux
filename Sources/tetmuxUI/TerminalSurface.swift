@@ -1065,7 +1065,48 @@ final class PaneTerminalView: ComposingTerminalView, NSMenuItemValidation {
     /// about the click itself changes. `focus` is a no-op for the pane that already has it.
     override func mouseDown(with event: NSEvent) {
         coordinator?.requestFocus()
+        if let activating = activatingClick, activating == event.eventNumber {
+            swallowingActivatingClick = true
+            return
+        }
+        activatingClick = nil
         super.mouseDown(with: event)
+    }
+
+    /// The click that brings a background macOS window forward also picks the pane, and does
+    /// nothing else.
+    ///
+    /// Without this AppKit spends that click on making the window key and never delivers it, so the
+    /// keyboard went to whichever pane the window had focused last — with two windows side by side,
+    /// you clicked one pane and typed into another. But the click was aimed at the window, not at
+    /// the program: passed on, it would be a mouse report (vim moves its cursor, a TUI presses
+    /// whatever is under it) and a selection change. So the gesture is swallowed from `mouseDown`
+    /// to `mouseUp` — a lone release or drag reaching SwiftTerm would be its own report.
+    ///
+    /// Recorded by event number rather than as a bare flag: AppKit may ask without the click ever
+    /// arriving, and a flag left set would eat the next real one.
+    private var activatingClick: Int?
+    private var swallowingActivatingClick = false
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        if let event, window?.isKeyWindow != true {
+            activatingClick = event.eventNumber
+        }
+        return true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !swallowingActivatingClick else { return }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard !swallowingActivatingClick else {
+            swallowingActivatingClick = false
+            activatingClick = nil
+            return
+        }
+        super.mouseUp(with: event)
     }
 
     /// Middle-click pastes the **selection**, the way it does everywhere else a terminal is used.

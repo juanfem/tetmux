@@ -228,6 +228,35 @@ final class PaneInputTests: XCTestCase {
         )
     }
 
+    /// The click that brings a background window forward picks the pane and reaches no program.
+    ///
+    /// It was aimed at the window: reported, it would move vim's cursor or press whatever a TUI has
+    /// under it. The release is swallowed with it, since a lone release is a report of its own. And
+    /// the mark is per event, so an `acceptsFirstMouse` with no click behind it eats nothing later.
+    func testTheClickThatActivatesAWindowIsNotReportedToTheProgram() {
+        let (view, recorder) = makeView()
+        view.getTerminal().feed(text: "\u{1b}[?1000h")
+
+        func mouse(_ type: NSEvent.EventType, _ number: Int) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: type, location: NSPoint(x: 40, y: 40), modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: number, clickCount: 1, pressure: 1
+            )
+        }
+        guard let down = mouse(.leftMouseDown, 1), let up = mouse(.leftMouseUp, 1),
+              let stray = mouse(.leftMouseDown, 2), let next = mouse(.leftMouseDown, 3)
+        else { return XCTFail("could not synthesise a click") }
+
+        XCTAssertTrue(view.acceptsFirstMouse(for: down), "a background window's pane ignored the click")
+        view.mouseDown(with: down)
+        view.mouseUp(with: up)
+        XCTAssertTrue(recorder.bytes.isEmpty, "the activating click was reported to the program")
+
+        _ = view.acceptsFirstMouse(for: stray)
+        view.mouseDown(with: next)
+        XCTAssertFalse(recorder.bytes.isEmpty, "a stale activation swallowed a later, ordinary click")
+    }
+
     /// …and an ordinary keystroke erases nothing.
     ///
     /// The failure this exists for is the opposite one and is far worse than the duplicate: an

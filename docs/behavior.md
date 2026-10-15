@@ -711,6 +711,16 @@ load-bearing:
   inserts the clipboard as *keystrokes*, one `send-keys` per character — the path that wedges the
   channel and cannot carry a newline safely.
 
+**The click that brings a background window forward also picks the pane, and does nothing else.**
+`PaneTerminalView` accepts the first mouse. Without that, AppKit spends the click on making the
+window key and never delivers it, so with two windows side by side the keyboard went to whichever
+pane the clicked window had focused last — click one pane, type into another. The click is aimed
+at the window rather than the program, though, so it focuses and is otherwise swallowed from
+`mouseDown` through `mouseUp`: passed on it would be a mouse report (vim moves its cursor, a TUI
+presses what is under it) and a selection change, and a lone release reaching SwiftTerm would be a
+report of its own. The activation is recorded by event number, not as a flag, because AppKit can
+ask `acceptsFirstMouse` with no click following, and a flag left set eats the next real one.
+
 **Middle-click pastes the selection, not the clipboard** — this pane's if it has one, else the last
 selection made in any pane (`PrimarySelection`), else the clipboard. It used to read the clipboard
 first, on the reasoning that macOS has no primary selection: macOS does not, but the *terminal*
