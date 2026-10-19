@@ -139,7 +139,24 @@ References point into current `main`. Line numbers drift; the symbol names besid
   mirror the rounding in `cellSize` and run `TerminalGeometryTests` first. What 1.16–1.20 would
   bring: stale rows fixed when repainting while scrolled back, cell-aligned powerline glyphs, IME
   overlays, Metal recovery.
-  `Package.swift`, `Sources/tetmuxUI/TerminalSurface.swift` (`cellSize`)
+  *2.0* (checked 2026-10-19 against `v1.99.0` and its `MigratingFrom1To2.md`): still fits — the
+  parser, `LocalProcess` and `HeadlessTerminal` changes touch nothing here, and `Terminal` stays
+  public for the tests — but it is a port, and wait for 2.0 final. It keeps the nearest-pixel
+  rounding, so everything above still applies. `TerminalView.getTerminal()` is gone; its sites map
+  to `terminalDimensions` (cols/rows), the view's own `changeScrollback` (no getter, so the
+  `options.scrollback` guard needs the last applied value kept here), `terminalStateSnapshot()`
+  (`bracketedPasteMode`, `cursor`) and `visibleRowsText` (the accessibility value). `silentLog` is
+  unreachable, which costs only `TETMUX_TERMINAL_LOG`, as release builds are already silent.
+  **Two things are not mechanical.** `terminal.link(at:mode:)` has no view-level replacement, so
+  click-to-open (`PaneLinkTests`) needs one upstream or a rebuild over `terminalContentSnapshot`.
+  And `ComposingTerminalView.isAnsweringQuery` stops working without failing a build: `send(source:
+  Terminal…)` becomes `nonisolated` and reaches the delegate through `DispatchQueue.main.async`, so
+  the `defer` has cleared the flag before `Coordinator.send` reads it, and a background pane's
+  query reply would take focus after a split again. It needs the reply marked before the hop, and
+  a test that answers a DSR from an unfocused pane. `selectionChanged(source:)` becomes
+  `nonisolated` too. `resize(cols:rows:)` still applies at once, but `setFrameSize` now defers to
+  the next frame — run `TerminalGeometryTests` before trusting §3.3.
+  `Package.swift`, `Sources/tetmuxUI/TerminalSurface.swift` (`cellSize`, `ComposingTerminalView`)
 
 - [~] **VoiceOver: announcing new output and per-line navigation.** The readable half is done —
   `accessibilityValue` is the visible viewport, bounded by the grid. Nothing posts
