@@ -18,7 +18,11 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.0.7")
+        // Held on 1.15: 1.16 started snapping the cell width to the *nearest* pixel instead of up,
+        // which squeezes the default 12pt Menlo (7.22pt advance) into 7.0pt cells — visibly tighter
+        // text. And `from:` would also admit 1.99, SwiftTerm's API-breaking preview of 2.0. See the
+        // SwiftTerm entry in TODO.md before lifting this.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", .upToNextMinor(from: "1.15.0"))
     ],
     targets: [
         // `forkpty` is in libutil on glibc and is not exposed by the Glibc module. Linux-only: the

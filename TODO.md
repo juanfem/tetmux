@@ -12,7 +12,7 @@ thing it constrains, and where somebody will actually meet it. A second copy in 
 list nobody reads twice and one that drifts from the original the first time either is edited;
 `git log` holds the narrative. This paragraph replaced ninety lines of exactly that on 2026-08-07.
 
-**As of 2026-09-29: 1 open (a flaky test), 6 parked, and nothing here blocks a release.** On 2026-08-06 the last
+**As of 2026-10-19: 1 open (a flaky test), 8 parked, and nothing here blocks a release.** On 2026-08-06 the last
 two then-open entries left the list without being implemented, and both say so where it counts
 rather than here: P6.7's launch half was amended to name **warm** launch (SRD §6,
 `docs/measurements.md`), and signing moved from *blocked* to *parked* (SRD §2.5), because "blocked
@@ -101,6 +101,45 @@ References point into current `main`. Line numbers drift; the symbol names besid
   un-notarised build hands the same Gatekeeper step to someone who did not read the README. The DMG
   stays arm64-only by decision — do not revisit universal as part of this.
   `Scripts/package-dmg.sh:136`, `.github/workflows/ci.yml`
+
+- [~] **The .dmg links the macOS 26 SDK while macOS 27 is current.** The packaging job is on
+  `macos-26` and asserts `sdk >= 26`; a local build on Xcode 27.1 links 27.0, so the app on the
+  developer's machine is not the one that ships. That is the shape of 0.3.2's Liquid Glass
+  regression (`docs/build-and-release.md`), and whether 27 gates anything visible on the SDK is
+  not known: Apple's notes promise "refreshed materials… updated tab and navigation bars" without
+  saying, and only a side-by-side build would. Parked 2026-10-19 by decision, until GitHub's
+  Xcode 27 runner image ships the Metal Toolchain: Xcode 27's SwiftPM builds with Swift Build by
+  default, which compiles SwiftTerm's `Shaders.metal` and fails outright without that component,
+  and the image is still in public preview. Downloading it in the job
+  (`xcodebuild -downloadComponent MetalToolchain`, gigabytes) is possible but Apple's forums report
+  it hanging on 27.0, which would make every tag build a coin toss.
+  *When the image has it* — check with `xcrun --find metal` *and* a build, since the stub resolves
+  without the component — move `package` to `runs-on: xcode-27` (images are now named by Xcode;
+  there is no `macos-27` label), raise the SDK assertion's floor to 27, and compare the two .dmgs'
+  windows by eye before tagging. **That move also needs `package-dmg.sh` to build with
+  `--build-system native`** (or whatever fixes Swift Build's SDK stamp by then): the default on
+  Xcode 27 writes `sdk 14.0` into the binary, which the assertion refuses. Do not loosen the
+  assertion to admit it: the stamp made no visible difference on 27.0.1, but it is still the field
+  the OS keys linked-on-or-after behaviour on, and 0.3.2 is what trusting it to not matter cost. Native also
+  never compiles the shader, so if it is still on offer the Metal Toolchain stops mattering to this
+  job at all. `test` and `matrix` stay where they are, for the reasons recorded beside them.
+  `.github/workflows/ci.yml` (the `package` job)
+
+- [~] **SwiftTerm is held on 1.15.x; 1.16 through 1.20 tighten the text.** 1.16 changed
+  `computeFontDimensions` to snap the cell width to the *nearest* pixel instead of up
+  (`(w * scale).rounded()` for `ceil`), with no release note naming it. The default 12pt Menlo
+  advances `W` by 7.22, so at 2× the cell went from 7.5pt to 7.0pt — narrower than the glyph, and
+  noticed on sight on 2026-10-19 as "the font changed". It also breaks §3.3's mirror:
+  `TerminalTheme.cellSize` still rounds up, and `TerminalGeometryTests` failed with a 96-column
+  frame drawing 109 (bisected: every release from 1.16.0). Matching the mirror is one line and
+  makes the tests pass, but leaves the squeeze, which is the part a user sees. 1.99.0 is the 2.0
+  preview and breaks API outright, which is the other half of the cap.
+  *To upgrade*: either SwiftTerm grows a way to choose the snapping, or tetmux picks a default font
+  size whose advance rounds up under both rules (Menlo 13pt is 7.83 → 8.0 at 1× and 2×), then
+  mirror the rounding in `cellSize` and run `TerminalGeometryTests` first. What 1.16–1.20 would
+  bring: stale rows fixed when repainting while scrolled back, cell-aligned powerline glyphs, IME
+  overlays, Metal recovery.
+  `Package.swift`, `Sources/tetmuxUI/TerminalSurface.swift` (`cellSize`)
 
 - [~] **VoiceOver: announcing new output and per-line navigation.** The readable half is done —
   `accessibilityValue` is the visible viewport, bounded by the grid. Nothing posts

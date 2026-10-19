@@ -43,8 +43,9 @@ there, because an unlisted requirement reads as done.
 swift build
 swift run tetmux                       # launch the GUI
 
-# Tests need Xcode's toolchain: XCTest is absent from CommandLineTools,
-# which is what `xcode-select -p` points at on this machine.
+# Tests need Xcode's toolchain: XCTest is absent from CommandLineTools.
+# On Xcode 27 every build also needs `xcodebuild -downloadComponent MetalToolchain` once — the
+# default build system changed; `docs/build-and-release.md` has what else moved with it.
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter testLayoutChangeSeparatesItsThreeFields
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter SessionIntegrationTests

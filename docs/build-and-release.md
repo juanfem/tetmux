@@ -41,6 +41,26 @@ SwiftTerm's Metal shaders and so needs a Metal toolchain component that is a sep
 multi-gigabyte download. The native path copies the `.metal` source into the resource bundle and
 never invokes the compiler. Do not revisit universal as part of other packaging work.
 
+**Swift 6.4 (Xcode 27) changed SwiftPM's default build system, and four things moved with it.**
+`swift build` now means `--build-system swiftbuild`; the old engine is `--build-system native`,
+marked deprecated. Measured on 2026-10-19, Xcode 27.1, macOS 27.0.1:
+- **It compiles `Shaders.metal`**, so a plain `swift build` fails with "cannot execute tool 'metal'
+  due to missing Metal Toolchain" until `xcodebuild -downloadComponent MetalToolchain` has run.
+  `xcrun --find metal` succeeds either way — it finds a stub — so it is no test for the component.
+- **It stamps `LC_BUILD_VERSION sdk` with the deployment target, not the SDK**: `sdk 14.0` from the
+  same tree and the same 27.0 SDK that `--build-system native` stamps `sdk 27.0`. **It did not
+  change the appearance**: compared by eye on macOS 27.0.1, the two binaries drew the same window,
+  with the current controls. So it was not 0.3.2 again, and "the window looks old" on 27 is not
+  evidence of it either — 27's sidebar *is* an opaque grey, in Finder and in a 26.5-linked 0.14.0
+  alike, which was taken for a regression before it was compared. What the stamp does break is
+  the `package` job's SDK assertion, which reads exactly this field and would refuse a Swift
+  Build binary; see the runner entry in `TODO.md` before moving that job to Xcode 27.
+- **Products move to `.build/out/Products/{Debug,Release}`**, with `.build/debug` and
+  `.build/release` left as symlinks, so every script path still resolves.
+- **The release products include the test bundles**; `package-dmg.sh` already skips them by name.
+  The resource bundles gain a full `Contents/` layout, and `PackageResources` still finds them:
+  the image built this way passed the `package` job's checks locally, `.build` moved aside.
+
 **The SDK the release links against is what the window looks like, so `package` runs on `macos-26`
 while everything else stays on `macos-15`.** macOS 26 grants an application the Liquid Glass
 appearance — rounded window corners, the translucent sidebar material — only to a binary linked
@@ -57,7 +77,7 @@ deliberately — they assert behaviour, which is the half that does not vary wit
 
 **That version behind is a *compiler* version behind too, and it compiles this package more
 strictly than the machine it is written on.** `macos-15` carries Swift 6.1.2; a current dev machine
-is on 6.3. Actor-isolation diagnostics moved between them in the permissive direction, so the skew
+is on 6.4 (it was 6.3 when this was written). Actor-isolation diagnostics moved between them in the permissive direction, so the skew
 is one-way: **a green `swift test` locally does not mean the tree compiles on CI, while the reverse
 holds.** `91f0329` made a test delegate read `isAnsweringQuery` — main-actor state, because the
 property belongs to an `NSView` subclass — from a witness of `TerminalViewDelegate`, which is a
