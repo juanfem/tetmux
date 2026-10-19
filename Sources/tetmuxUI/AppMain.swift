@@ -423,12 +423,30 @@ struct RootView: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 380)
         } detail: {
             detail
+                // On the detail column, not the split view: attached there, every item — the
+                // spacer included — went into one leading cluster, and the attach button sat
+                // beside the title instead of at the trailing edge. Checked against the running
+                // app by reading the `NSToolbar`'s item frames.
+                .toolbar {
+                    sessionTitleItem
+                    // AppKit's title used to take the free width; the drawn one does not.
+                    #if compiler(>=6.2)
+                    if #available(macOS 26, *) {
+                        ToolbarSpacer(.flexible)
+                    }
+                    #endif
+                    attachCommandItem
+                }
         }
         .overlay {
             LauncherOverlay(isPresented: $state.isLauncherPresented, items: model.launcherItems(for: state))
         }
         // Item 9 needs to bring a *particular* window forward, which SwiftUI cannot do.
-        .background(WindowAccessor { state.nsWindow = $0 })
+        .background(WindowAccessor {
+            state.nsWindow = $0
+            // `sessionTitleItem` draws the title instead, so it can be double-clicked.
+            $0.titleVisibility = .hidden
+        })
         .onAppear {
             // Handed over rather than claimed: the model has to be able to open a window when there
             // is none left to observe `requestedWindow`, and `openWindow` can only be read here.
@@ -543,7 +561,39 @@ struct RootView: View {
         // distinction only matters when it does.
         .navigationTitle(session?.name ?? "tetmux")
         .navigationSubtitle(host?.config.name ?? "")
-        .toolbar { attachCommandItem }
+    }
+
+    /// The title bar's text, drawn here rather than by AppKit so that it can be double-clicked.
+    ///
+    /// The tab strip renames a tab on double-click, and the session wants the same thing — with the
+    /// sidebar collapsed it is otherwise reachable only from the menu bar. AppKit's own title takes
+    /// no clicks of ours: a double-click on it is the window's zoom, and `.toolbarTitleMenu` draws
+    /// nothing in a window that is not a document's (checked against the running app). So
+    /// `WindowAccessor` hides the system title and this takes its place, at the leading edge where
+    /// it was. `.navigationTitle` stays set regardless — it is still what the Window menu, Mission
+    /// Control and VoiceOver read.
+    @ToolbarContentBuilder
+    private var sessionTitleItem: some ToolbarContent {
+        #if compiler(>=6.2)
+        if #available(macOS 26, *) {
+            // Liquid Glass puts a capsule behind every toolbar item, and a title is not a control.
+            ToolbarItem(placement: .automatic) { sessionTitle }
+                .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .automatic) { sessionTitle }
+        }
+        #else
+        ToolbarItem(placement: .automatic) { sessionTitle }
+        #endif
+    }
+
+    private var sessionTitle: some View {
+        SessionTitle(host: host, session: session) {
+            guard let host, let session else { return }
+            // This window's own ids rather than `activeScope`'s: the click happened here, and the
+            // menus may last have heard from another window.
+            model.requestRenameSession(in: state, hostId: host.id, sessionId: session.id)
+        }
     }
 
     /// The window's copy of the tree's Copy Attach Command, next to the title that names the session
@@ -557,7 +607,7 @@ struct RootView: View {
     /// SwiftUI re-evaluates whichever body reads one. See `AttachCommandButton`.
     @ToolbarContentBuilder
     private var attachCommandItem: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
+        ToolbarItem(placement: .automatic) {
             AttachCommandButton(model: model, host: host, session: session)
         }
     }
@@ -688,6 +738,37 @@ struct RootView: View {
             // R3.7 — this macOS window's, so a drag on another window's edge silences nothing here.
             liveResize: state.liveResize
         )
+    }
+}
+
+/// The session's name and its host, in the place and type of AppKit's title and subtitle, renamed
+/// on double-click like a tab. See `RootView.sessionTitleItem`.
+private struct SessionTitle: View {
+    let host: HostState?
+    let session: TmuxSession?
+    let rename: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(session?.name ?? "tetmux")
+                .font(.headline)
+            if let host {
+                Text(host.config.name)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .lineLimit(1)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { if session != nil { rename() } }
+        .contextMenu {
+            if session != nil {
+                Button("Rename Session…", action: rename)
+            }
+        }
+        .help(session != nil ? "Double-click to rename the session" : "")
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
     }
 }
 

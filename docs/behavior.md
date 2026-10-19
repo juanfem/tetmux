@@ -980,6 +980,24 @@ it covers the whole-server case too and never a dropped link, whose window is st
 a session that is only out of reach. The close goes through `performClose:`, the same as ⇧⌘W.
 `testCloseTabClosesTheWindowOnceItsSessionHasEnded` pins it.
 
+**The title bar renames the session it names, so tetmux draws the title itself.** Double-clicking
+a tab renames it; the session wanted the same, and with the sidebar collapsed it was reachable
+only from the menu bar. AppKit's title cannot carry it: a double-click there is the window's zoom,
+and `.toolbarTitleMenu` was tried first and draws nothing at all in a window that is not a
+document's — no chevron, no menu, checked against the running app. So `WindowAccessor` sets
+`titleVisibility = .hidden` and `RootView.sessionTitleItem` puts `SessionTitle` at the leading edge
+instead, in the same type: double-click or the context menu raise the rename sheet with this
+window's own host and session ids, never `activeScope`'s. `.navigationTitle` stays set, because the
+Window menu, Mission Control and VoiceOver still read it. On macOS 26 the item opts out of the
+shared glass capsule, which would otherwise draw a title as a button. Hiding the title also
+removed what held the attach-command button at the trailing edge — AppKit's title takes the free
+width — so the button packed against the drawn title. Neither `.automatic`, `.primaryAction` nor a
+`ToolbarSpacer` moved it while the `.toolbar` hung off the `NavigationSplitView`: the spacer was
+put at the very front of the sidebar section instead. On the detail column the spacer lands
+between the two and the button is back at the edge — verified by reading the `NSToolbar`'s item
+frames from the running app, which is how to check any change here without a screen. Below macOS
+26 there is no `ToolbarSpacer`, and the button sits beside the title.
+
 **A dropped tab lands on the side the drag came from, and the marker has to agree.** The rule every
 tab bar has: the dragged tab takes the target's position and everything between shifts by one — so
 a rightward drag inserts *after* the target and a leftward one *before* it.
