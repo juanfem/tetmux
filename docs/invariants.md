@@ -130,6 +130,22 @@ how many panes are across the widest row — a property of the layout, which is 
 size we asked for. That is the same self-feeding measurement as the pane-derived cell size below.
 Hidden, the arithmetic has one owner again.
 
+**The focused pane's frame has a band of its own, and the divider cell pays for it.** The frame
+was an overlay on the terminal, a point in from the pane's edge, and it covered the outermost row
+and column of characters. Every pane now carries `TerminalContainerView.paneInset` (2pt) on each
+side, the frame is drawn in it, and the terminal sits inside it. The room comes from two places and
+neither depends on the layout: the window's outer edge, which `requestSizes` subtracts once, and the
+divider cell between panes, which tmux reserves anyway and which is drawn as a one-point seam — so a
+cell must stay at least `2 × paneInset + 1` wide, which the 8pt minimum font meets exactly
+(`testTheSmallestCellStillHoldsTwoBandsAndASeam`). Subtracting a band per pane in `requestSizes`
+would be the scroller mistake above, a correction keyed on how many panes are across. The other
+load-bearing part is `fit`, which hands each child its cells and its bands *before* sharing the rest
+by weight: shared purely by weight, as `distribute` did, a 10-column pane beside a 100-column one
+got 76pt of the 79 it needs and its band came out of its last column — invisible at 50/50, which is
+where anybody would check (`testANarrowPaneBesideAWideOneStillGetsItsBand`). The band is filled
+with the scheme's ground and sits outside the unfocused dimming, so a dimmed pane now fades toward
+that colour rather than toward the seam colour that used to be behind it.
+
 **A tmux window's size has exactly one owner.** On tmux ≥ 2.9 each displayed window is sized
 individually — `set-option window-size manual` plus `resize-window -t @id -x -y` — which is what
 lets a torn-off macOS window size its window independently of the main one. A client has only one

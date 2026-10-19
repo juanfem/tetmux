@@ -49,6 +49,17 @@ public struct TerminalContainerView: View {
     private let dividerWidth: CGFloat = 1
     /// How wide the *draggable* part of a divider is. The seam stays one point; this is the target.
     private let grabWidth: CGFloat = 9
+    /// The band around every pane that the focus frame is drawn in, so the frame never covers text.
+    ///
+    /// The frame used to be an overlay on the terminal itself, a point in from the pane's edge, and it
+    /// sat on top of the outermost row and column of characters. Paid for without asking tmux for
+    /// anything per pane: inside the window the bands come out of the divider cell, which tmux
+    /// already reserves between panes and which is drawn as a one-point seam — so a cell has to be at
+    /// least `2 × paneInset + dividerWidth` wide, and at the 8pt minimum font it is exactly that. Only
+    /// the window's outer edge costs columns, and that is a fixed amount `requestSizes` subtracts
+    /// whatever the layout. Per-pane subtraction would be the scroller-gutter mistake again: a
+    /// correction that depends on how many panes are across, which is tmux's answer to the question.
+    static let paneInset: CGFloat = 2
 
     @State private var containerSize: CGSize = .zero
     @Environment(\.controlActiveState) private var controlActiveState
@@ -106,9 +117,7 @@ public struct TerminalContainerView: View {
         // whatever is behind it is what it fades *toward* — and a dark scheme fading toward the
         // system's white in light mode is a grey wash nobody chose. `ContrastPolicy`'s exemption
         // still applies on top of this: at increased contrast the dimming stops entirely.
-        .background(Color(nsColor: theme.colorScheme.followsSystemAppearance
-            ? .textBackgroundColor
-            : theme.colorScheme.background.nsColor))
+        .background(schemeBackground)
         // Taking focus takes over sizing, so the window in front is the one that fits.
         .onChange(of: controlActiveState) { _, state in
             guard state == .key else { return }
@@ -135,6 +144,12 @@ public struct TerminalContainerView: View {
         }
     }
 
+    private var schemeBackground: Color {
+        Color(nsColor: theme.colorScheme.followsSystemAppearance
+            ? .textBackgroundColor
+            : theme.colorScheme.background.nsColor)
+    }
+
     private func claimSize() {
         let (hostId, windowId, owner) = (self.hostId, window.id, self.owner)
         Task {
@@ -148,7 +163,11 @@ public struct TerminalContainerView: View {
         // `renderTree`, not `layoutTree`: while a pane is zoomed those differ, and tmux is emitting
         // output sized to the visible one.
         if let tree = window.renderTree {
-            let placed = geometry(tree, origin: .zero, size: size, path: "")
+            let placed = Self.geometry(
+                tree, origin: .zero, size: size, path: "",
+                cell: theme.cellSize(backingScaleFactor: backingScaleFactor), scale: backingScaleFactor,
+                dividerWidth: dividerWidth, grabWidth: grabWidth
+            )
             // Every pane in **one** `ForEach` keyed by pane id, positioned by frame and offset —
             // never nested inside a view per split, however naturally the tree suggests it.
             //
@@ -190,8 +209,8 @@ public struct TerminalContainerView: View {
         }
     }
 
-    /// Where one pane goes, and the grid tmux gave it.
-    private struct PanePlacement: Identifiable {
+    /// Where one pane goes, and the grid tmux gave it. The rect includes the pane's `paneInset` band.
+    struct PanePlacement: Identifiable {
         let paneId: String
         let cols: Int
         let rows: Int
@@ -200,7 +219,7 @@ public struct TerminalContainerView: View {
     }
 
     /// One draggable boundary: where it is, which pane setting its size moves it, and from what.
-    private struct DividerSpec: Identifiable {
+    struct DividerSpec: Identifiable {
         let id: String
         let isRow: Bool
         let rect: CGRect
@@ -210,12 +229,16 @@ public struct TerminalContainerView: View {
 
     /// Walks the layout once and answers where everything in it belongs.
     ///
-    /// Splits proportionally by the cell counts tmux chose (F4.7), so a 70/30 split on the server is
-    /// a 70/30 split on screen. One walk for both answers deliberately: the panes and the handles
-    /// between them have to agree to the point, and this arithmetic was written out twice before —
-    /// a seam that misses the boundary it belongs to is a drag that starts by jumping.
-    private func geometry(
-        _ node: LayoutNode, origin: CGPoint, size: CGSize, path: String
+    /// Gives every child the room its cells need plus its `paneInset` band, then shares out whatever
+    /// is left over in proportion to the cell counts tmux chose (F4.7), so a 70/30 split on the server
+    /// is still a 70/30 split on screen. Purely proportional, a narrow pane beside a wide one got a
+    /// sliver of the spare space and its band came out of its last column. One walk for both answers
+    /// deliberately: the panes and the handles between them have to agree to the point, and this
+    /// arithmetic was written out twice before — a seam that misses the boundary it belongs to is a
+    /// drag that starts by jumping.
+    static func geometry(
+        _ node: LayoutNode, origin: CGPoint, size: CGSize, path: String,
+        cell: CGSize, scale: CGFloat, dividerWidth: CGFloat, grabWidth: CGFloat
     ) -> (panes: [PanePlacement], dividers: [DividerSpec]) {
         guard case .container(let direction, _, _, _, _, let children) = node else {
             guard case .leaf(let paneId, let cols, let rows, _, _) = node else { return ([], []) }
@@ -228,7 +251,12 @@ public struct TerminalContainerView: View {
         let gaps = dividerWidth * CGFloat(max(children.count - 1, 0))
         let available = max((isRow ? size.width : size.height) - gaps, 1)
         let weights = children.map { isRow ? $0.width : $0.height }
-        let extents = Self.distribute(available, among: weights)
+        let cellExtent = isRow ? cell.width : cell.height
+        let extents = Self.fit(
+            available,
+            needs: weights.map { CGFloat($0) * cellExtent + 2 * paneInset },
+            weights: weights, scale: scale
+        )
 
         var panes: [PanePlacement] = []
         var specs: [DividerSpec] = []
@@ -240,7 +268,10 @@ public struct TerminalContainerView: View {
             let childSize = isRow
                 ? CGSize(width: extents[index], height: size.height)
                 : CGSize(width: size.width, height: extents[index])
-            let inside = geometry(child, origin: childOrigin, size: childSize, path: "\(path).\(index)")
+            let inside = geometry(
+                child, origin: childOrigin, size: childSize, path: "\(path).\(index)",
+                cell: cell, scale: scale, dividerWidth: dividerWidth, grabWidth: grabWidth
+            )
             panes += inside.panes
             specs += inside.dividers
 
@@ -268,6 +299,33 @@ public struct TerminalContainerView: View {
             ))
         }
         return (panes, specs)
+    }
+
+    /// Splits `available` points so that each child first gets what it `needs` — its cells and its
+    /// band — and the rest is shared by `weights`. The spare space can be negative: a container
+    /// showing a window someone else sizes, or one mid-drag under R3.7, holds a grid that is not its
+    /// own, and then every child gives up its share in the same proportion. Extents are rounded up
+    /// to the pixel grid so no text lands on a half pixel at 1×, and the last child takes the
+    /// remainder so the parts always sum to exactly the whole.
+    static func fit(
+        _ available: CGFloat, needs: [CGFloat], weights: [Int], scale: CGFloat
+    ) -> [CGFloat] {
+        guard !needs.isEmpty else { return [] }
+        let scale = scale > 0 ? scale : 1
+        let spare = available - needs.reduce(0, +)
+        let total = weights.reduce(0, +)
+        var result: [CGFloat] = []
+        var used: CGFloat = 0
+        for (need, weight) in zip(needs, weights).dropLast() {
+            let share = total > 0
+                ? spare * CGFloat(weight) / CGFloat(total)
+                : spare / CGFloat(needs.count)
+            let extent = max(((need + share) * scale).rounded(.up) / scale, 1)
+            result.append(extent)
+            used += extent
+        }
+        result.append(max(available - used, 1))
+        return result
     }
 
     @ViewBuilder
@@ -308,25 +366,6 @@ public struct TerminalContainerView: View {
                 rows: isRow ? nil : cells
             )
         }
-    }
-
-    /// Splits `available` points across children weighted by their cell counts, giving the rounding
-    /// remainder to the last child so the parts always sum to exactly the whole.
-    static func distribute(_ available: CGFloat, among weights: [Int]) -> [CGFloat] {
-        guard !weights.isEmpty else { return [] }
-        let total = weights.reduce(0, +)
-        guard total > 0 else {
-            return Array(repeating: available / CGFloat(weights.count), count: weights.count)
-        }
-        var result: [CGFloat] = []
-        var used: CGFloat = 0
-        for weight in weights.dropLast() {
-            let extent = max((available * CGFloat(weight) / CGFloat(total)).rounded(), 1)
-            result.append(extent)
-            used += extent
-        }
-        result.append(max(available - used, 1))
-        return result
     }
 
     /// How far an unfocused pane drops back when the window is split.
@@ -406,14 +445,19 @@ public struct TerminalContainerView: View {
                 ? ContrastPolicy.inactivePaneOpacity(contrast, standard: Self.inactivePaneOpacity)
                 : 1
         )
+        // The band the frame is drawn in. Outside the dimming, and filled with the scheme's ground
+        // rather than left to the seam colour behind it, so an unfocused pane fades toward the same
+        // colour its band is.
+        .padding(Self.paneInset)
+        .background(schemeBackground)
         .overlay {
             // A frame on all four sides, not an edge between two panes.
             //
             // The two-point edge this replaced was drawn along the top of the focused pane, which put
             // it exactly where the divider above it already was — so it read as a divider that had
             // turned blue, and which of the two panes it belonged to was a guess. Enclosing the pane
-            // names it. Inset by a point so the stroke never lands on the seam itself, and the
-            // dividers stay neutral so nothing competes with it.
+            // names it. Drawn in the pane's own `paneInset` band, so it never lands on the seam and
+            // never covers a character, and the dividers stay neutral so nothing competes with it.
             //
             // One point of desaturated accent, not one and a half of the full one. The saturated frame
             // was permanent and competed with the pane's own text for attention — and it is not the
@@ -425,7 +469,6 @@ public struct TerminalContainerView: View {
                         Self.activePaneBorder(contrast),
                         lineWidth: ContrastPolicy.paneBorderWidth(contrast)
                     )
-                    .padding(1)
                     .allowsHitTesting(false)
             }
         }
@@ -487,8 +530,9 @@ public struct TerminalContainerView: View {
         let cell = theme.cellSize(backingScaleFactor: backingScaleFactor)
         guard cell.width > 0, cell.height > 0 else { return }
         guard containerSize.width > 1, containerSize.height > 1 else { return }
-        let cols = Int(containerSize.width / cell.width)
-        let rows = Int(containerSize.height / cell.height)
+        // The outer edge's band, and only that: the bands between panes live in the divider cells.
+        let cols = Int((containerSize.width - 2 * Self.paneInset) / cell.width)
+        let rows = Int((containerSize.height - 2 * Self.paneInset) / cell.height)
         guard cols > 1, rows > 1 else { return }
 
         let (hostId, windowId, owner, drivesClientSize) =
