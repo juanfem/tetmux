@@ -995,9 +995,27 @@ public final class AppModel {
         // for the moment between the click and tmux answering `switch-client`.
         syncDisplayedSessions()
 
+        // Whatever was typed while a new tab was on its way belongs to the tab selected now — the new
+        // one when its reveal is what got here, and otherwise wherever the user went instead.
+        let held = state.newTabInput.end()
+        let heldTarget = held.isEmpty ? nil : hosts.first { $0.id == hostId }?
+            .sessions.first { $0.id == sessionId }?
+            .windows.first { $0.id == windowId }?.preferredPaneId
+
         Task {
             if let windowId {
                 await service.selectWindow(hostId: hostId, windowId: windowId)
+            }
+            if let heldTarget {
+                // In order and one at a time: a paste between two keystrokes has to land between them.
+                for input in held {
+                    switch input {
+                    case .keys(let bytes):
+                        await service.sendKeys(hostId: hostId, paneId: heldTarget, bytes: bytes)
+                    case .paste(let text):
+                        await service.paste(hostId: hostId, paneId: heldTarget, text: text)
+                    }
+                }
             }
         }
     }
@@ -1103,6 +1121,9 @@ public final class AppModel {
                 state: target, opensNewWindow: false, hostId: hostId, sessionName: nil,
                 sessionId: sessionId, knownWindowIds: Set(existing), madeAt: .now
             ))
+            // The old tab keeps first responder until the new one is selected a round trip from
+            // now, so anything typed in between is held for the new tab instead.
+            target.newTabInput.begin()
         }
         Task { await service.newWindow(hostId: hostId, sessionId: sessionId, fromPaneId: paneId) }
     }
@@ -1942,6 +1963,8 @@ public final class AppModel {
             Task { await service.sendPassthrough(hostId: hostId, bytes: Array(text.utf8)) }
             return
         }
+        // ⌘V straight after ⌘T is for the tab that is opening, like the typing around it.
+        if activeWindowState?.newTabInput.hold(.paste(text)) == true { return }
         guard let paneId = scope.paneId ?? window(in: scope)?.preferredPaneId else { return }
         Task { await service.paste(hostId: hostId, paneId: paneId, text: text) }
     }

@@ -141,6 +141,7 @@ Where things are, since the docs name symbols without saying which file holds th
 | `ContrastPolicy.swift` | Increase Contrast, resolved once for every site that honours it. |
 | `ColorScheme.swift` | Pane colour schemes: the 16 ANSI slots and the three named colours. |
 | `LiveResizeGate.swift` | R3.7 — one macOS window's panes stop asking tmux while its edge is dragged. |
+| `NewTabInputHold.swift` | What is typed between ⌘T and the new tab existing, held for the new tab. |
 | `PackageResources.swift` | The resource bundle, probed rather than asserted. `Bundle.module` is banned. |
 | `NotificationPolicy.swift` | F4.31 — which events earn a banner, and `WatchedWindow`. |
 | `DestructiveActionModal.swift` | The F4.10 confirmation, which says *why* the close is a kill. |

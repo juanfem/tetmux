@@ -811,6 +811,46 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(state.selectedWindowId, "@2", "selected the active window instead of the new one")
     }
 
+    /// Typing and ⌘V straight after ⌘T are held for the new tab, and the hold ends when the tab is shown.
+    ///
+    /// Between asking and the snapshot the old tab is still selected and its pane still has the
+    /// keyboard, so without the hold those keystrokes went into the tab being left.
+    func testTypingWhileANewTabOpensIsHeldUntilTheTabIsSelected() {
+        let existing = TmuxSession(
+            id: "$1", name: "one", windows: [window("@1", panes: ["%1"])], isAttached: true
+        )
+        let model = makeModel()
+        model.hosts = [host(sessions: [existing])]
+        let state = WindowState()
+        model.registerWindow(state)
+        model.select(in: state, host: "local", session: "$1", window: "@1")
+        XCTAssertFalse(state.newTabInput.isHolding, "a plain selection started a hold")
+
+        model.newWindow(hostId: "local", sessionId: "$1", revealIn: state)
+        XCTAssertTrue(state.newTabInput.isHolding, "the old tab can still take what is typed")
+        XCTAssertTrue(state.newTabInput.hold(.keys(Array("ls".utf8))))
+        XCTAssertTrue(state.newTabInput.hold(.paste(" -la")), "⌘V went to the tab being left")
+
+        var grown = existing
+        grown.windows.append(window("@2", panes: ["%2"]))
+        publish(model, [host(sessions: [grown])])
+
+        XCTAssertEqual(state.selectedWindowId, "@2")
+        XCTAssertFalse(state.newTabInput.isHolding, "the hold outlived the tab it was for")
+        XCTAssertEqual(state.newTabInput.end(), [], "the held keys were kept rather than delivered")
+    }
+
+    /// A tab that never arrives must not keep the keyboard: the hold expires and drops what it had,
+    /// rather than leaving every later keystroke swallowed.
+    func testANewTabInputHoldExpires() async throws {
+        let hold = NewTabInputHold(timeout: .milliseconds(20))
+        hold.begin()
+        XCTAssertTrue(hold.hold(.keys([0x61])))
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertFalse(hold.isHolding)
+        XCTAssertFalse(hold.hold(.keys([0x62])), "typing was still held after the expiry")
+    }
+
     /// Moving a tab into a new session shows the result, and waits for the *tab* to get there.
     ///
     /// The wait is the point. The session is made by `new-session`, which insists on making a window

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftTerm
 import XCTest
+@testable import tetmuxCore
 @testable import tetmuxUI
 
 /// F4.23 and F4.24 — mouse reporting and input-method composition, which tetmux does not implement.
@@ -196,6 +197,35 @@ final class PaneInputTests: XCTestCase {
 
         XCTAssertEqual(recorder.text, "a")
         XCTAssertEqual(recorder.answeringQuery, [false], "a keystroke was read as a terminal reply")
+    }
+
+    /// While a new tab is opening, the pane being left keeps first responder but not what is typed.
+    ///
+    /// Typed bytes go to the hold and do not focus the pane; the answer to a program's query still
+    /// leaves for the pane that was asked, since its program is waiting on it.
+    func testTypingWhileANewTabOpensIsHeldAndAQueryAnswerIsNot() {
+        var focusRequests = 0
+        let hold = NewTabInputHold()
+        let coordinator = TerminalPaneView.Coordinator(parent: TerminalPaneView(
+            hostId: "local", paneId: "%1", cols: 80, rows: 24, isFocused: true,
+            isSelectedTab: true, theme: .default, allowsRemoteClipboardWrite: false,
+            service: SessionService(), onFocusRequest: { focusRequests += 1 },
+            newTabInput: hold
+        ))
+        let view = PaneTerminalView(
+            frame: NSRect(x: 0, y: 0, width: 640, height: 400),
+            font: TerminalTheme.default.resolvedFont()
+        )
+        view.coordinator = coordinator
+        view.terminalDelegate = coordinator
+        hold.begin()
+
+        view.insertText("ls", replacementRange: NSRange(location: NSNotFound, length: 0))
+        view.getTerminal().feed(text: "\u{1b}[6n")
+
+        XCTAssertEqual(focusRequests, 0, "typing for the new tab focused the tab being left")
+        XCTAssertEqual(hold.end(), [.keys(Array("ls".utf8))],
+                       "the hold took something other than what was typed")
     }
 
     /// A mouse report is the emulator's too, and that is deliberate rather than incidental.

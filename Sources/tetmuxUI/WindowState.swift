@@ -166,6 +166,10 @@ public final class WindowState: Identifiable {
     /// window, because another window's panes are not the ones moving.
     @ObservationIgnored public let liveResize = LiveResizeGate()
 
+    /// Keystrokes typed while a new tab is on its way, for the tab rather than the one being left.
+    /// Per window, because the tab is opening in this one.
+    @ObservationIgnored public let newTabInput = NewTabInputHold()
+
     /// Where this window belongs, as soon as tmux can say where that is.
     ///
     /// Held rather than applied, because at the moment it is set the host is not connected — at

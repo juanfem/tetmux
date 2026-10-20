@@ -422,6 +422,21 @@ that same `send`, so gating focus there would have taken the click with it.
 that reports no mouse — and it leaves *motion* over a background pane meaning nothing about where
 the keyboard is.
 
+**A new tab takes the keyboard when it is asked for, not when it arrives.** Control mode answers
+`new-window` with no id, so the tab is selected only when the topology refresh brings it back — and
+the command itself waits on a `display-message` for its start directory first. Through both round
+trips the old tab is still selected and its pane is still first responder, so ⌘T followed at once by
+typing put the first keystrokes into the tab being left (reported as *"if I type too early the
+keyboard stays on the previous tab"*). `WindowState.newTabInput` holds what is typed from the
+moment of asking, and `AppModel.select` hands it to whichever tab is selected next — the new one,
+or wherever the user went instead. Only typed input is held: a query answer leaves for the pane
+whose program asked, by the same `isAnsweringQuery` split as focus. And a hold that never resolves
+expires after 15 s and *drops* what it had, because replaying it into the old pane later is typing a
+command where nobody meant it. ⌘V is held with the typing, in order, and goes through a tmux
+buffer as any paste does; a drop, a middle-click and the context menu's Paste are not, since the
+pointer has already named their pane. `testTypingWhileANewTabOpensIsHeldAndAQueryAnswerIsNot`
+and `testTypingWhileANewTabOpensIsHeldUntilTheTabIsSelected`.
+
 **Pane subscriptions outlive the channel.** `outputSubscribers` is a registry of what is on screen,
 not a property of the connection, so `teardown` must leave it alone — `completeHandshakeIfNeeded`
 repaints those panes on the next attach instead. A view subscribes exactly once, when its `NSView`

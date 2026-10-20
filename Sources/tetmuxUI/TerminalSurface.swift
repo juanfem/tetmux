@@ -172,6 +172,8 @@ struct TerminalPaneView: NSViewRepresentable {
     let allowsRemoteClipboardWrite: Bool
     let service: SessionService
     let onFocusRequest: () -> Void
+    /// The window's hold on typing while a new tab is on its way. See `NewTabInputHold`.
+    var newTabInput: NewTabInputHold? = nil
 
     func makeNSView(context: Context) -> TerminalView {
         let view = PaneTerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), font: theme.resolvedFont())
@@ -529,6 +531,9 @@ struct TerminalPaneView: NSViewRepresentable {
             let paneId = parent.paneId
             let service = parent.service
             if (source as? ComposingTerminalView)?.isAnsweringQuery != true {
+                // Typed while a new tab is opening: it is the new tab's, and this pane is the one
+                // being left, so it neither receives the bytes nor takes the focus.
+                if parent.newTabInput?.hold(.keys(bytes)) == true { return }
                 parent.onFocusRequest()
             }
             Task { await service.sendKeys(hostId: hostId, paneId: paneId, bytes: bytes) }

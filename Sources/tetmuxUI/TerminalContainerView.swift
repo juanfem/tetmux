@@ -44,6 +44,8 @@ public struct TerminalContainerView: View {
     /// R3.7 — the macOS window's live-resize gate. Held rather than read: sizing requests made while
     /// the user is dragging an edge are deferred to the size they let go of (see `LiveResizeGate`).
     let liveResize: LiveResizeGate
+    /// Typing held for a tab that is opening, which no pane of this container may take meanwhile.
+    let newTabInput: NewTabInputHold?
 
     /// Divider thickness between splits, in points.
     private let dividerWidth: CGFloat = 1
@@ -92,9 +94,11 @@ public struct TerminalContainerView: View {
         drivesClientSize: Bool = true,
         isSelectedTab: Bool = true,
         allowsRemoteClipboardWrite: Bool = false,
-        liveResize: LiveResizeGate
+        liveResize: LiveResizeGate,
+        newTabInput: NewTabInputHold? = nil
     ) {
         self.liveResize = liveResize
+        self.newTabInput = newTabInput
         self.hostId = hostId
         self.window = window
         self.theme = theme
@@ -435,7 +439,8 @@ public struct TerminalContainerView: View {
             theme: theme,
             allowsRemoteClipboardWrite: allowsRemoteClipboardWrite,
             service: service,
-            onFocusRequest: { focus(paneId) }
+            onFocusRequest: { focus(paneId) },
+            newTabInput: newTabInput
         )
         // Inactive panes step back so the focused one is findable without reading any of them. Kept
         // mild rather than dramatic: the other panes are usually still worth watching, which is the

@@ -736,7 +736,8 @@ struct RootView: View {
             // T5.6 — the host's own opt-in, denied unless someone said otherwise for this host.
             allowsRemoteClipboardWrite: host.config.allowRemoteClipboardWrite,
             // R3.7 — this macOS window's, so a drag on another window's edge silences nothing here.
-            liveResize: state.liveResize
+            liveResize: state.liveResize,
+            newTabInput: state.newTabInput
         )
     }
 }
