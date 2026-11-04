@@ -33,6 +33,12 @@ public struct WorkspaceWindow: Codable, Equatable, Sendable {
     /// and `[100, 200, 1200, 800]` reads as well as four keys would without tying the format to an
     /// AppKit struct's encoding.
     public var frame: [Double]?
+    /// The sessions pinned to this window's sidebar, in the order the user left them.
+    ///
+    /// Here rather than in the envelope beside `watchedWindows`, because a pin *is* a property of one
+    /// macOS window: closing the window is how a working set is let go of, and a pin that outlived
+    /// its window would be a bookmark, which is the global, permanent thing this deliberately is not.
+    public var pins: [PinnedSession]
 
     public init(
         hostId: String? = nil,
@@ -41,7 +47,8 @@ public struct WorkspaceWindow: Codable, Equatable, Sendable {
         windowId: String? = nil,
         windowName: String? = nil,
         sidebarShown: Bool = true,
-        frame: [Double]? = nil
+        frame: [Double]? = nil,
+        pins: [PinnedSession] = []
     ) {
         self.hostId = hostId
         self.sessionId = sessionId
@@ -50,6 +57,7 @@ public struct WorkspaceWindow: Codable, Equatable, Sendable {
         self.windowName = windowName
         self.sidebarShown = sidebarShown
         self.frame = frame
+        self.pins = pins
     }
 
     /// Field by field rather than through the synthesised initialiser, for the same reason
@@ -63,6 +71,7 @@ public struct WorkspaceWindow: Codable, Equatable, Sendable {
         windowName = try container.decodeIfPresent(String.self, forKey: .windowName)
         sidebarShown = try container.decodeIfPresent(Bool.self, forKey: .sidebarShown) ?? true
         frame = try container.decodeIfPresent([Double].self, forKey: .frame)
+        pins = try container.decodeIfPresent([PinnedSession].self, forKey: .pins) ?? []
     }
 
     /// The saved frame as a rect, if it is one. A frame with no area is discarded rather than
@@ -71,6 +80,40 @@ public struct WorkspaceWindow: Codable, Equatable, Sendable {
     public var rect: NSRect? {
         guard let frame, frame.count == 4, frame[2] > 1, frame[3] > 1 else { return nil }
         return NSRect(x: frame[0], y: frame[1], width: frame[2], height: frame[3])
+    }
+}
+
+/// One session pinned to one macOS window's sidebar: the two or three a person is moving between in
+/// that window, out of the twenty the tree is sized for.
+///
+/// Host-qualified for the reason every key here is — tmux numbers and names per server. Both an id and
+/// a name, as `WorkspaceWindow` keeps, and for the same two questions: `$3` is exact against a
+/// still-running server, and the name is what survives a restart. A session found by discovery has a
+/// name and no id we can trust across a connection, which is why the name is the required half.
+public struct PinnedSession: Codable, Equatable, Hashable, Sendable {
+    public var hostId: String
+    /// `$id`, as last seen. Refreshed whenever the pin resolves, so it follows a reissue.
+    public var sessionId: String?
+    /// As last seen. Refreshed the same way, so a rename carries the pin with it.
+    public var sessionName: String
+
+    public init(hostId: String, sessionId: String? = nil, sessionName: String) {
+        self.hostId = hostId
+        self.sessionId = sessionId
+        self.sessionName = sessionName
+    }
+
+    /// The session this pin names among `sessions`, or `nil`.
+    ///
+    /// Id *and* name first, then name, then id. The pair is the ordinary case. The name alone is a
+    /// server restarted in between, where `$3` has been reissued to somebody else's session — the
+    /// reason `resolveRestore` falls back to it too. The id alone, last, is a rename: the server is
+    /// the same one and so is the session, it is only called something else now. Ranked below the
+    /// name because after a restart an id match is a stranger, and a renamed session costs a click.
+    public func resolve(in sessions: [TmuxSession]) -> TmuxSession? {
+        sessions.first { $0.id == sessionId && $0.name == sessionName }
+            ?? sessions.first { $0.name == sessionName }
+            ?? sessionId.flatMap { id in sessions.first { $0.id == id } }
     }
 }
 

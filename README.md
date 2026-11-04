@@ -94,6 +94,9 @@ and offering only "new window" there meant a second view of what you were alread
 | `⌥⌘[` / `⌥⌘]` | Previous / next pane |
 | `⇧⌘[` / `⇧⌘]` | Previous / next tab |
 | `⌘R` / `⇧⌘R` | Rename tab / rename session |
+| `⌃⌘P` | Pin the session to this window's sidebar, or unpin it |
+| `⌃⌘1` … `⌃⌘5` | The window's first … fifth pinned session |
+| `⌃⌘L` | The session this window showed before this one (tmux's `prefix L`) |
 | `⌘F` | Find in the focused pane's scrollback |
 | `⌃⌘F` | Search tmux's own history — further back than `⌘F` can reach |
 | `⌃⌘[` | Enter copy mode |

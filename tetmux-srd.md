@@ -401,6 +401,13 @@ re-read `list-clients` as the fallback).
   activity indicator derived from `%window-*` notifications. A window's label is its name only
   when the user chose it (`#{automatic-rename}` is the tell); otherwise it is what is running —
   for a split window, every pane, so the label does not churn as focus moves between panes.
+- **F4.37** *(New.)* Each macOS window can **pin** sessions, from any host, into a Pinned section
+  above the tree, in an order the user sets by dragging. Pins belong to the window: they go when
+  it closes and come back with it on a relaunch. A pin follows its session through a rename and a
+  server restart, and is dropped only on evidence that the session ended — never because its host
+  is unreachable. Clicking one on an unreachable host connects first. ⌃⌘P pins or unpins the
+  session in front, ⌃⌘1…⌃⌘5 reach the pins by position (⌘1…⌘9 stay free for tabs), and ⌃⌘L
+  toggles to the session this window showed before — tmux's `switch-client -l`, per window.
 
 ### 4.2 Tabs, splits, and the workspace
 

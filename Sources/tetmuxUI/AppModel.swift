@@ -558,6 +558,9 @@ public final class AppModel {
         // that order: `syncDisplayedSessions` below reads the selections, and a SwiftUI `onChange` is
         // not guaranteed to have run by then. Without this a restored session got no tmux client
         // until something unrelated changed the topology again — panes on screen and frozen.
+        // Here as well as in each window's `reconcile`, so a pin dropped or renamed by this snapshot
+        // is in the save scheduled below rather than waiting for the next one.
+        for window in openWindows { window.refreshPins(with: snapshot) }
         for window in openWindows where window.pendingRestore != nil {
             window.resolveRestore(with: snapshot)
             // It landed, and it was a launcher pick: open the tree onto it. Read after the resolve
@@ -861,7 +864,10 @@ public final class AppModel {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         noteUsed(hostId: hostId, sessionName: trimmed, windowId: nil)
-        if let state, !preferNewWindow { state.selectedHostId = hostId }
+        if let state, !preferNewWindow {
+            state.noteLeaving(toHost: hostId, sessionId: nil, sessionName: trimmed, in: hosts)
+            state.selectedHostId = hostId
+        }
         // Same rule as New Session: ⌥ means somewhere else, and nothing open at all means the reveal
         // has to bring its own window or the session is attached and never shown.
         let opensNewWindow = preferNewWindow || (state == nil && openWindows.isEmpty)
@@ -980,6 +986,7 @@ public final class AppModel {
         // the launcher itself opened would leave the thing they were in five minutes ago, by any
         // other route, sitting at the bottom of the list.
         noteUsed(hostId: hostId, sessionId: sessionId, windowId: windowId)
+        state.noteLeaving(toHost: hostId, sessionId: sessionId, sessionName: nil, in: hosts)
         state.selectedHostId = hostId
         state.selectedSessionId = sessionId
         state.selectedWindowId = windowId
@@ -1077,6 +1084,10 @@ public final class AppModel {
 
     public func removeHost(_ hostId: String) {
         let config = hosts.first { $0.id == hostId }?.config
+        // A pin on a host that no longer exists can never resolve, and `refreshPins` keeps what it
+        // cannot find a host for — it cannot tell a removed host from one not loaded yet. This can.
+        for window in openWindows { window.unpinAll(hostId: hostId) }
+        scheduleWorkspaceSave()
         Task {
             await service.removeHost(hostId: hostId)
             var stored = await store.loadHosts()
@@ -2141,6 +2152,133 @@ public final class AppModel {
     }
 
 
+    // MARK: - Pinned sessions
+
+    public func pin(in state: WindowState, hostId: String, session: TmuxSession) {
+        state.pin(hostId: hostId, session: session)
+        scheduleWorkspaceSave()
+    }
+
+    public func unpin(in state: WindowState, hostId: String, session: TmuxSession) {
+        state.unpin(hostId: hostId, session: session)
+        scheduleWorkspaceSave()
+    }
+
+    public func unpin(in state: WindowState, _ pin: PinnedSession) {
+        state.unpin(pin)
+        scheduleWorkspaceSave()
+    }
+
+    public func movePins(in state: WindowState, fromOffsets source: IndexSet, toOffset destination: Int) {
+        state.movePins(fromOffsets: source, toOffset: destination)
+        scheduleWorkspaceSave()
+    }
+
+    /// What clicking a pinned row does, which depends on what can be reached.
+    ///
+    /// A live host is an ordinary `select`, keeping the tab already on screen if it belongs to the
+    /// session — the double-click rule — and otherwise landing on the session's own active window,
+    /// which is where the user left it, since tmux tracks that per session. A host nothing is
+    /// attached to takes the launcher's two routes: a session discovery has listed is attached by
+    /// name, which cannot create (F4.4); one nobody has asked about connects *targetlessly* and
+    /// lands by the restore path, for the reason `showWindowFromLauncher` gives — the remembered
+    /// name may be gone, and attaching to a gone session reads as an empty server.
+    public func openPin(_ pin: PinnedSession, in state: WindowState) {
+        guard let host = hosts.first(where: { $0.id == pin.hostId }) else { NSSound.beep(); return }
+        if host.connectionState.isActive {
+            guard let session = pin.resolve(in: host.sessions) else {
+                // §4.6 — a passthrough host has no sessions to resolve against; the host is still
+                // the right thing to show. Otherwise the topology has not arrived yet, and a chord
+                // that silently did nothing would read as a broken binding.
+                if host.passthrough != nil { state.selectedHostId = host.id } else { NSSound.beep() }
+                return
+            }
+            let window = state.selectedWindowId.flatMap { current in
+                session.windows.first { $0.id == current }?.id
+            } ?? session.activeWindow?.id
+            select(in: state, host: host.id, session: session.id, window: window)
+            return
+        }
+        if let discovered = host.discoveredSessions?.first(where: { $0.name == pin.sessionName }) {
+            attachDiscoveredSession(hostId: host.id, named: discovered.name, in: state)
+            return
+        }
+        noteUsed(hostId: host.id, sessionName: pin.sessionName, windowId: nil)
+        state.noteLeaving(toHost: host.id, sessionId: pin.sessionId, sessionName: pin.sessionName, in: hosts)
+        state.showWhenAvailable(
+            hostId: host.id, sessionId: pin.sessionId, sessionName: pin.sessionName,
+            windowId: nil, windowName: nil
+        )
+        connect(host.id)
+    }
+
+    // MARK: - Pin and previous-session shortcuts (F4.37)
+
+    /// The front window's pins, for the Session menu. Read through `activeScope`, which is observed
+    /// and reassigned on every focus, so the menu is rebuilt when a different window comes forward —
+    /// `activeWindowState` alone is untracked and would leave the last window's names on the items.
+    public var activePins: [PinnedSession] {
+        _ = activeScope
+        return activeWindowState?.pins ?? []
+    }
+
+    /// Whether the front window's session is pinned, for the menu item's title.
+    public var activeSessionIsPinned: Bool {
+        guard let state = activeWindowState, let hostId = activeScope.hostId,
+              let session = state.selectedSession(in: hosts) else { return false }
+        _ = state.pins
+        return state.isPinned(hostId: hostId, session: session)
+    }
+
+    public var activeWindowHasPreviousSession: Bool {
+        _ = activeScope
+        return activeWindowState?.previousSession != nil
+    }
+
+    /// The menu's name for a pin: the session, and the host when another pin shares the name —
+    /// `work` on two hosts is the ordinary case, and two identical items is no answer.
+    public func menuTitle(for pin: PinnedSession) -> String {
+        let shared = activePins.filter { $0.sessionName == pin.sessionName }.count > 1
+        guard shared else { return pin.sessionName }
+        let hostName = hosts.first { $0.id == pin.hostId }?.config.name ?? pin.hostId
+        return "\(pin.sessionName) on \(hostName)"
+    }
+
+    public func togglePinForActiveSession() {
+        guard let state = activeWindowState, let hostId = state.selectedHostId,
+              let session = state.selectedSession(in: hosts) else { NSSound.beep(); return }
+        if state.isPinned(hostId: hostId, session: session) {
+            unpin(in: state, hostId: hostId, session: session)
+        } else {
+            pin(in: state, hostId: hostId, session: session)
+        }
+    }
+
+    /// ⌃⌘1…⌃⌘5. A slot with nothing in it beeps, as an unbound tab number does in a browser.
+    public func openPinnedSession(at index: Int) {
+        guard let state = activeWindowState, state.pins.indices.contains(index) else { NSSound.beep(); return }
+        openPin(state.pins[index], in: state)
+    }
+
+    /// tmux's `switch-client -l`, for one macOS window.
+    ///
+    /// Through `openPin`, so it takes every route a pin does — including connect-first, since the
+    /// session left behind may be on a host that has dropped since. And `openPin` ends in `select`,
+    /// which records the session being left: pressing it twice is back where you started.
+    public func switchToPreviousSession() {
+        guard let state = activeWindowState, let previous = state.previousSession else { NSSound.beep(); return }
+        if let host = hosts.first(where: { $0.id == previous.hostId }),
+           host.connectionState.isActive, host.passthrough == nil,
+           !host.sessions.isEmpty, previous.resolve(in: host.sessions) == nil {
+            // Listed hosts and it is not among them: it ended. Forgetting it means the next press
+            // says so at once rather than beeping forever.
+            state.previousSession = nil
+            NSSound.beep()
+            return
+        }
+        openPin(previous, in: state)
+    }
+
     // MARK: - Recency (F4.25)
 
     /// Records what the user just picked, by id, resolving the session's name from the topology.
@@ -2211,6 +2349,7 @@ public final class AppModel {
             return
         }
         noteUsed(hostId: host.id, sessionName: session.name, windowId: window.id)
+        state.noteLeaving(toHost: host.id, sessionId: session.id, sessionName: session.name, in: hosts)
         // The same, once there is a session to open. It cannot be inserted here: the id is from the
         // topology this host answered with last time, and a server restarted since has reissued it.
         expandWhenRestored.insert(state.id)

@@ -1195,6 +1195,49 @@ only while the host itself is closed. That last condition is what keeps it a sta
 a tinted host row wrapped around a tinted session row reads as a selected subtree. Per window, since
 `WindowState.isShowing` is, so two windows on two sessions mark two different rows in their own trees.
 
+**Pinned sessions are a section of the tree, not a second sidebar (F4.37).** The job is
+switching between two or three sessions out of twenty, and a mode — a Bookmarks pane beside Hosts
+was the first idea — puts a flip in front of every switch and in front of the tree, which is still
+where anything unpinned is reached. So `pinnedSection` sits above HOSTS in the same `List` and is
+absent when empty. Each pin is its own `List` row, unlike a host group, which is what gives it a
+context menu that works (see the group-menu note above) and lets `onMove` reorder it. Pinning is the
+first item of a session's context menu; unpinning is the row's `−` — a third glyph, the `+` without
+its upright, because the `✕` means destroy everywhere else in the tree and unpinning destroys
+nothing. A pinned row and its tree row both carry the selection mark: they are two sections, not a
+row nested in a row, which is the thing the one-mark rule above is about.
+
+**…and a pin is dropped on evidence, never on silence.** `refreshPins` keeps a pin whose host is
+unreachable, unknown (`hosts.json` loads after the window does), or connected with no topology yet —
+the handshake reports `.connected` before `list-sessions` answers, so "connected and not listed"
+alone would empty every window's pins on every reconnect. It drops one only when the session was
+listed and then not listed on one live connection (`pinsSeenLive`, cleared per host whenever the host
+is not live), when the server announces it is empty, or when a probe answers without the name —
+current, because a connecting channel clears the probe. `AppModel.removeHost` drops a removed host's
+pins itself, since `refreshPins` cannot tell removed from not-loaded. A pin resolves by id *and* name,
+then name, then id: a restarted server hands `$3` to a stranger, so the name outranks the id, and the
+id alone is a rename. Each resolution writes the current id and name back, so the pin follows. Opening
+one takes the launcher's routes off a live host: attach by name if discovery listed it, otherwise a
+targetless connect landing through `pendingRestore`. `workspaceEntry` writes the window's *current*
+pins into a pending restore's entry, which is otherwise saved verbatim — or a pin added before a
+restored host connected would be lost on quit.
+
+**…and its chords are menu items for every slot, filled or not.** ⌃⌘1…⌃⌘5 sit in a Session ▸
+Pinned Sessions submenu with five items always present, titled by session once filled. Showing only
+the filled ones was rejected before it shipped, on reading rather than measurement: a ⌘ chord no
+menu item claims is not dropped, it goes on to the key view — `KeyEventMonitor` takes only ⌥⌘V — so
+⌃⌘3 with two pins would reach SwiftTerm and the shell. The empty item claims the chord and beeps.
+Unverified in the running app; check it before relying on it. The digits are in ⌃⌘ because ⌘1…⌘9
+is "the Nth tab" everywhere and tabs here are tmux windows. The menu reads the pins through
+`activePins`, which touches the observed `activeScope`: `activeWindowState` is untracked, so read
+alone the items kept the previous window's names after focus moved.
+
+**Previous Session (⌃⌘L) records deliberate moves only.** `WindowState.previousSession` is written
+by `noteLeaving`, called from `select` and the connect-first routes, never from `reconcile` — tmux
+moving a client, a session ending, or a restore landing are not places anybody wants to toggle
+back to. A move between tabs of one session is not a move. It goes back through `openPin`, which
+ends in `select`, so pressing it twice returns to where it started. Memory only: one restored from
+the last launch would toggle to wherever that happened to be.
+
 ## The launcher and the workspace
 
 **Workspace restoration is `pendingRestore` on each window, not `@SceneStorage`.** What has to come

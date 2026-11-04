@@ -132,6 +132,31 @@ public struct TetmuxApp: App {
             }
             .disabled(model.activeHostIsPassthrough)
             Divider()
+            // F4.37. Pinning needs a session; the other two do not, since what they reach may be on
+            // a different host from the passthrough one in front.
+            Button(model.activeSessionIsPinned ? "Unpin Session" : ApplicationShortcut.togglePinSession.title) {
+                model.togglePinForActiveSession()
+            }
+            .keyboardShortcut(.togglePinSession, in: keymap)
+            .disabled(model.activeHostIsPassthrough)
+            Button(ApplicationShortcut.previousSession.title) { model.switchToPreviousSession() }
+                .keyboardShortcut(.previousSession, in: keymap)
+                .disabled(!model.activeWindowHasPreviousSession)
+            // Every slot always has an item, titled with its session once it has one: the chord
+            // already says which slot it is, and the name is what the menu is for. An empty slot is
+            // still an item, and an enabled one, because a chord no menu item claims is not dropped —
+            // it falls through to the pane, and ⌃⌘3 with two pins would type into the shell. So the
+            // empty slot claims it and beeps, the way a browser answers ⌘7 with six tabs.
+            let pins = model.activePins
+            Menu("Pinned Sessions") {
+                ForEach(Array(ApplicationShortcut.pinnedSessions.enumerated()), id: \.element) { index, shortcut in
+                    Button(index < pins.count ? model.menuTitle(for: pins[index]) : shortcut.title) {
+                        model.openPinnedSession(at: index)
+                    }
+                    .keyboardShortcut(shortcut, in: keymap)
+                }
+            }
+            Divider()
             Button(ApplicationShortcut.closeWindow.title) { model.requestCloseWindowFromMenu() }
                 .keyboardShortcut(.closeWindow, in: keymap)
                 .disabled(model.activeHostIsPassthrough)

@@ -1771,6 +1771,207 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@2", onto: "@1"), .some("@1"))
     }
 
+    // MARK: - Pinned sessions
+
+    private func session(_ id: String, _ name: String) -> TmuxSession {
+        TmuxSession(id: id, name: name, windows: [window("@\(id.dropFirst())")])
+    }
+
+    /// A pin is the window's, so it has to come back with the window — and a file from before pins
+    /// existed must still load, with none.
+    func testPinsSurviveTheWorkspaceFile() throws {
+        let entry = WorkspaceWindow(
+            hostId: "local", sessionName: "work",
+            pins: [
+                PinnedSession(hostId: "remote", sessionId: "$4", sessionName: "build"),
+                PinnedSession(hostId: "local", sessionName: "notes"),
+            ]
+        )
+        let workspace = WorkspaceStore.decode(try XCTUnwrap(WorkspaceStore.encode(Workspace(windows: [entry]))))
+        XCTAssertEqual(workspace.windows, [entry])
+
+        let old = WorkspaceStore.decode(Data(#"{"windows": [{"hostId": "local"}]}"#.utf8))
+        XCTAssertEqual(old.windows.first?.pins, [])
+    }
+
+    /// The pins are current state, never the pending copy. A window restored onto a host nobody has
+    /// connected yet writes its entry back unchanged — and a pin added since must not be lost by it.
+    func testAnUnresolvedRestoreStillSavesTheCurrentPins() {
+        let state = WindowState()
+        state.beginRestore(WorkspaceWindow(
+            hostId: "remote", sessionName: "work",
+            pins: [PinnedSession(hostId: "remote", sessionName: "work")]
+        ))
+        XCTAssertEqual(state.pins.map(\.sessionName), ["work"], "restoring brings the pins back")
+        state.pin(hostId: "local", session: session("$1", "notes"))
+
+        let entry = state.workspaceEntry(in: [])
+        XCTAssertEqual(entry.sessionName, "work", "still the restore that has not landed")
+        XCTAssertEqual(entry.pins.map(\.sessionName), ["work", "notes"])
+    }
+
+    /// Id and name, then name, then id: a restarted server reissues `$2` to a stranger, so the name
+    /// outranks the id — and a renamed session is still the same session when nothing else matches.
+    func testAPinResolvesByNameBeforeIdAndFollowsARename() {
+        let pin = PinnedSession(hostId: "local", sessionId: "$2", sessionName: "work")
+        XCTAssertEqual(pin.resolve(in: [session("$2", "stranger"), session("$7", "work")])?.id, "$7")
+        XCTAssertEqual(pin.resolve(in: [session("$2", "renamed")])?.id, "$2")
+        XCTAssertNil(pin.resolve(in: [session("$3", "other")]))
+
+        let state = WindowState()
+        state.pin(hostId: "local", session: session("$2", "work"))
+        state.refreshPins(with: [host(sessions: [session("$2", "renamed")])])
+        XCTAssertEqual(state.pins, [PinnedSession(hostId: "local", sessionId: "$2", sessionName: "renamed")])
+        XCTAssertTrue(state.isPinned(hostId: "local", session: session("$2", "renamed")))
+    }
+
+    /// Pinning is per host: `work` on two hosts is two different sessions, and the ordinary case.
+    func testPinningIsHostQualifiedAndIdempotent() {
+        let state = WindowState()
+        state.pin(hostId: "local", session: session("$0", "work"))
+        state.pin(hostId: "local", session: session("$0", "work"))
+        XCTAssertEqual(state.pins.count, 1)
+        XCTAssertFalse(state.isPinned(hostId: "remote", session: session("$0", "work")))
+        state.pin(hostId: "remote", session: session("$0", "work"))
+        XCTAssertEqual(state.pins.count, 2)
+        state.unpin(hostId: "local", session: session("$0", "work"))
+        XCTAssertEqual(state.pins.map(\.hostId), ["remote"])
+    }
+
+    /// The handshake reports `.connected` before `list-sessions` has answered, so a connected host
+    /// listing nothing is not evidence of anything. Dropping on that would empty the pins of every
+    /// window at every reconnect. Seen and then gone, on one connection, is.
+    func testAPinIsDroppedOnlyWhenItsSessionIsSeenToEnd() {
+        let state = WindowState()
+        state.pin(hostId: "local", session: session("$1", "work"))
+        state.pin(hostId: "local", session: session("$2", "build"))
+
+        state.refreshPins(with: [host(sessions: [])])
+        XCTAssertEqual(state.pins.count, 2, "connected with no topology yet: nothing is known")
+
+        state.refreshPins(with: [host(sessions: [session("$1", "work"), session("$2", "build")])])
+        state.refreshPins(with: [host(sessions: [session("$1", "work")])])
+        XCTAssertEqual(state.pins.map(\.sessionName), ["work"], "listed, then not: it ended")
+    }
+
+    /// Out of reach is not gone. A dropped link keeps every pin; a reconnect has to sight the
+    /// session again before its absence means anything.
+    func testAnUnreachableHostKeepsItsPins() {
+        let state = WindowState()
+        state.pin(hostId: "remote", session: session("$1", "work"))
+        let live = host(id: "remote", sessions: [session("$1", "work")])
+        state.refreshPins(with: [live])
+
+        var dropped = live
+        dropped.connectionState = .reconnecting(attempt: 1, nextRetryInSeconds: 2)
+        state.refreshPins(with: [dropped])
+        XCTAssertEqual(state.pins.count, 1)
+
+        state.refreshPins(with: [host(id: "remote", sessions: [])])
+        XCTAssertEqual(state.pins.count, 1, "reconnected, topology not in yet")
+    }
+
+    /// Evidence from a host with no channel: the server announcing it is empty, or a probe that
+    /// answered without the name. A probe that has not answered is not evidence.
+    func testAnIdleHostDropsAPinOnEvidenceAlone() {
+        let state = WindowState()
+        state.pin(hostId: "remote", session: session("$1", "work"))
+        var idle = HostState(config: HostConfig(id: "remote", name: "remote"), connectionState: .disconnected)
+        state.refreshPins(with: [idle])
+        XCTAssertEqual(state.pins.count, 1, "nobody has asked")
+
+        idle.discoveredSessions = [session("$1", "work")]
+        state.refreshPins(with: [idle])
+        XCTAssertEqual(state.pins.count, 1)
+
+        idle.discoveredSessions = [session("$1", "other")]
+        state.refreshPins(with: [idle])
+        XCTAssertTrue(state.pins.isEmpty, "the probe answered, and work was not in it")
+
+        state.pin(hostId: "remote", session: session("$1", "work"))
+        var empty = HostState(config: HostConfig(id: "remote", name: "remote"), connectionState: .disconnected)
+        empty.endedSessionName = "work"
+        state.refreshPins(with: [empty])
+        XCTAssertTrue(state.pins.isEmpty, "the server said it has nothing left")
+    }
+
+    /// tmux's `switch-client -l`, per window: pressing it twice is back where you started, and a
+    /// tab change inside one session is not a session to go back to.
+    func testPreviousSessionTogglesBetweenTheLastTwo() {
+        let model = makeModel()
+        let state = WindowState()
+        model.registerWindow(state)
+        model.focus(state)
+        model.applyForTesting([host(sessions: [session("$1", "work"), session("$2", "build")])])
+        model.select(in: state, host: "local", session: "$1", window: "@1")
+        XCTAssertNil(state.previousSession, "landing from nothing leaves nothing behind")
+
+        model.select(in: state, host: "local", session: "$1", window: "@9")
+        XCTAssertNil(state.previousSession, "another tab of the same session is not a move")
+
+        model.select(in: state, host: "local", session: "$2", window: "@2")
+        XCTAssertEqual(state.previousSession?.sessionName, "work")
+
+        model.switchToPreviousSession()
+        XCTAssertEqual(state.selectedSessionId, "$1")
+        XCTAssertEqual(state.previousSession?.sessionName, "build")
+        model.switchToPreviousSession()
+        XCTAssertEqual(state.selectedSessionId, "$2")
+    }
+
+    /// Host-qualified like everything else: `$1` on another host is a different session.
+    func testPreviousSessionCrossesHosts() {
+        let model = makeModel()
+        let state = WindowState()
+        model.registerWindow(state)
+        model.focus(state)
+        model.applyForTesting([
+            host(sessions: [session("$1", "work")]),
+            host(id: "remote", sessions: [session("$1", "work")]),
+        ])
+        model.select(in: state, host: "local", session: "$1", window: "@1")
+        model.select(in: state, host: "remote", session: "$1", window: "@1")
+        XCTAssertEqual(state.previousSession?.hostId, "local")
+        model.switchToPreviousSession()
+        XCTAssertEqual(state.selectedHostId, "local")
+    }
+
+    /// The positional chords reach the pins in their order, and an empty slot moves nothing.
+    func testPinnedSlotsOpenInOrder() {
+        let model = makeModel()
+        let state = WindowState()
+        model.registerWindow(state)
+        model.focus(state)
+        model.applyForTesting([host(sessions: [session("$1", "work"), session("$2", "build")])])
+        model.select(in: state, host: "local", session: "$1", window: "@1")
+        model.togglePinForActiveSession()
+        state.pin(hostId: "local", session: session("$2", "build"))
+        XCTAssertEqual(model.activePins.map(\.sessionName), ["work", "build"])
+
+        model.openPinnedSession(at: 1)
+        XCTAssertEqual(state.selectedSessionId, "$2")
+        model.openPinnedSession(at: 4)
+        XCTAssertEqual(state.selectedSessionId, "$2")
+        model.openPinnedSession(at: 0)
+        XCTAssertEqual(state.selectedSessionId, "$1")
+
+        model.togglePinForActiveSession()
+        XCTAssertEqual(state.pins.map(\.sessionName), ["build"], "the same chord unpins")
+    }
+
+    /// ⌃⌘1…5, ⌃⌘L and ⌃⌘P, and ⌘1…⌘9 left for tabs.
+    func testPinShortcutsAreBoundInTheControlCommandLayer() {
+        let keymap = KeymapPolicy.default
+        for (index, shortcut) in ApplicationShortcut.pinnedSessions.enumerated() {
+            XCTAssertEqual(keymap.binding(for: shortcut), KeyBinding(Character("\(index + 1)"), [.command, .control]))
+        }
+        XCTAssertEqual(keymap.binding(for: .previousSession), KeyBinding("l", [.command, .control]))
+        XCTAssertEqual(keymap.binding(for: .togglePinSession), KeyBinding("p", [.command, .control]))
+        for digit in "123456789" {
+            XCTAssertNil(keymap.shortcut(boundTo: KeyBinding(digit)), "⌘\(digit) is the Nth tab's")
+        }
+    }
+
     // MARK: - Workspace restoration
 
     /// A relaunch against a still-running tmux server matches on the id, which is exact.

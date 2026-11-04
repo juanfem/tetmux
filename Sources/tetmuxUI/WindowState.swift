@@ -185,6 +185,22 @@ public final class WindowState: Identifiable {
     /// no-expiry rule above is what makes an ssh round trip behind it safe.
     @ObservationIgnored public var pendingRestore: WorkspaceWindow?
 
+    /// The sessions pinned to this window's sidebar, in the user's order.
+    ///
+    /// Per window, because a working set is: two windows are usually two different jobs, and pinning
+    /// the build session in one has nothing to say about the other. Persisted through
+    /// `WorkspaceWindow`, so it dies with the window and comes back with it on a relaunch.
+    public var pins: [PinnedSession] = []
+
+    /// Pins resolved while their host was connected, as they read at that moment.
+    ///
+    /// What lets a pin be dropped safely. A connected host that does not list a session has *either*
+    /// ended it *or* not answered `list-sessions` yet — the handshake reports `.connected` before the
+    /// topology arrives — and only the first is a reason to let go. Seeing it, then not seeing it, on
+    /// one live connection is the first. Cleared per host whenever that host is not live, so a
+    /// reconnect has to sight a session again before its absence means anything.
+    @ObservationIgnored private var pinsSeenLive: Set<PinnedSession> = []
+
     /// The saved frame, applied once the `NSWindow` exists. Cleared when it does, so a window later
     /// resized by the user is not snapped back by a second `WindowAccessor` pass.
     @ObservationIgnored private var restoredFrame: NSRect?
@@ -197,6 +213,7 @@ public final class WindowState: Identifiable {
     /// cannot, so it waits in `pendingRestore`.
     public func beginRestore(_ saved: WorkspaceWindow) {
         pendingRestore = saved
+        pins = saved.pins
         sidebarVisibility = saved.sidebarShown ? .all : .detailOnly
         restoredFrame = saved.rect
         applyRestoredFrame()
@@ -261,7 +278,12 @@ public final class WindowState: Identifiable {
         // An unresolved restore is written back unchanged rather than overwritten with where the
         // window has landed in the meantime. Quitting before a remote host was ever connected would
         // otherwise replace the session the user actually wants with whatever the reconciler picked.
-        if let pendingRestore { return pendingRestore }
+        //
+        // The pins are this window's own and current either way, so they are never the pending copy.
+        if var entry = pendingRestore {
+            entry.pins = pins
+            return entry
+        }
         let session = selectedSession(in: hosts)
         let window = selectedWindow(in: hosts)
         return WorkspaceWindow(
@@ -271,8 +293,120 @@ public final class WindowState: Identifiable {
             windowId: window?.id,
             windowName: window?.name,
             sidebarShown: sidebarVisibility != .detailOnly,
-            frame: currentFrame
+            frame: currentFrame,
+            pins: pins
         )
+    }
+
+    // MARK: - Previous session
+
+    /// The session this window showed before the current one, for F4.37's toggle — tmux's
+    /// `switch-client -l`, per macOS window.
+    ///
+    /// A `PinnedSession` because it needs exactly that key: host-qualified, and by id *and* name so
+    /// it resolves the same way a pin does. Kept in memory only: it is a convenience for the next
+    /// few seconds, and one restored from the last launch would toggle to wherever that happened
+    /// to be.
+    public var previousSession: PinnedSession?
+
+    /// Records what is being left, if the move is to a different session.
+    ///
+    /// Called by the deliberate navigations — `select`, and the connect-first routes that land
+    /// through `pendingRestore` — and not from `reconcile`. That keeps the record to things the
+    /// user did: tmux moving a client, a session ending, or a restore landing at launch are not a
+    /// session the user would want to toggle back to.
+    func noteLeaving(toHost hostId: String, sessionId: String?, sessionName: String?, in hosts: [HostState]) {
+        guard let currentHost = selectedHostId, let current = selectedSession(in: hosts) else { return }
+        if currentHost == hostId, current.id == sessionId || current.name == sessionName { return }
+        // A target with neither is a host click, which leaves the session to the reconciler —
+        // still a move away from this one.
+        previousSession = PinnedSession(hostId: currentHost, sessionId: current.id, sessionName: current.name)
+    }
+
+    // MARK: - Pins
+
+    public func isPinned(hostId: String, session: TmuxSession) -> Bool {
+        pinIndex(hostId: hostId, session: session) != nil
+    }
+
+    /// Adds a session to the end of the pinned list. Pinning what is already pinned is a no-op.
+    public func pin(hostId: String, session: TmuxSession) {
+        guard !isPinned(hostId: hostId, session: session) else { return }
+        pins.append(PinnedSession(hostId: hostId, sessionId: session.id, sessionName: session.name))
+    }
+
+    public func unpin(hostId: String, session: TmuxSession) {
+        guard let index = pinIndex(hostId: hostId, session: session) else { return }
+        unpin(pins[index])
+    }
+
+    public func unpin(_ pin: PinnedSession) {
+        pins.removeAll { $0 == pin }
+        pinsSeenLive.remove(pin)
+    }
+
+    /// `List`'s `onMove`, which is the only reordering there is.
+    public func movePins(fromOffsets source: IndexSet, toOffset destination: Int) {
+        pins.move(fromOffsets: source, toOffset: destination)
+    }
+
+    /// Every pin on one host, for when the host itself goes.
+    public func unpinAll(hostId: String) {
+        pins.removeAll { $0.hostId == hostId }
+        pinsSeenLive = pinsSeenLive.filter { $0.hostId != hostId }
+    }
+
+    /// Asked through `resolve` rather than by comparing fields, so "is this row pinned" and "which
+    /// row does this pin show" cannot disagree about a renamed or reissued session.
+    private func pinIndex(hostId: String, session: TmuxSession) -> Int? {
+        pins.firstIndex { $0.hostId == hostId && $0.resolve(in: [session]) != nil }
+    }
+
+    /// Keeps each pin's id and name current, and lets go of the ones whose session has ended.
+    ///
+    /// A pin is dropped on evidence and never on silence, the same rule F4.4 applies to discovery:
+    /// a host that cannot be reached is "out of reach, not gone", and a pin that vanished every time
+    /// the laptop went onto a train would be a working set rebuilt every morning. The evidence is
+    /// one of three things — the session listed and then not listed on one live connection; the
+    /// server announcing it has nothing left (`serverIsEmpty`); or a discovery probe that answered
+    /// without it, which is current because a connecting channel clears the probe.
+    ///
+    /// Non-private so the rule can be asserted from plain host lists.
+    func refreshPins(with hosts: [HostState]) {
+        guard !pins.isEmpty else { return }
+        var refreshed: [PinnedSession] = []
+        var seen = pinsSeenLive
+        for pin in pins {
+            // Not known yet — `hosts.json` loads after the window does — or removed, which
+            // `AppModel.removeHost` handles itself. Either way not this pass's to decide.
+            guard let host = hosts.first(where: { $0.id == pin.hostId }) else {
+                refreshed.append(pin)
+                continue
+            }
+            if host.connectionState.isActive {
+                if let session = pin.resolve(in: host.sessions) {
+                    let current = PinnedSession(hostId: host.id, sessionId: session.id, sessionName: session.name)
+                    seen.remove(pin)
+                    seen.insert(current)
+                    // Two pins can come to name one session — one pinned by name before a restart,
+                    // one by id after — and the row would then be listed twice.
+                    if !refreshed.contains(current) { refreshed.append(current) }
+                } else if !seen.contains(pin) {
+                    refreshed.append(pin)
+                } else {
+                    seen.remove(pin)
+                }
+                continue
+            }
+            seen.remove(pin)
+            if host.serverIsEmpty { continue }
+            if let discovered = host.discoveredSessions,
+               !discovered.contains(where: { $0.name == pin.sessionName }) { continue }
+            refreshed.append(pin)
+        }
+        pinsSeenLive = seen
+        // Only on a change: this runs on every snapshot, and `pins` is observed by the sidebar.
+        if refreshed != pins { pins = refreshed }
     }
 
     /// Brings this window to the front. Item 9's "bring forward the one already attached".
@@ -401,6 +535,7 @@ public final class WindowState: Identifiable {
     /// showing two different sessions of one host is the ordinary case, not an edge case.
     public func reconcile(with hosts: [HostState]) {
         resolveRestore(with: hosts)
+        refreshPins(with: hosts)
         if selectedHostId == nil || !hosts.contains(where: { $0.id == selectedHostId }) {
             selectedHostId = hosts.first?.id
         }

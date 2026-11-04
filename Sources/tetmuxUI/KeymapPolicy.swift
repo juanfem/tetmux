@@ -33,6 +33,19 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
     case copyModeStartSelection
     case copyModeCopy
     case copyModeSearch
+    case togglePinSession
+    case previousSession
+    case pinnedSession1
+    case pinnedSession2
+    case pinnedSession3
+    case pinnedSession4
+    case pinnedSession5
+
+    /// F4.37's positional chords, in slot order. Five rather than nine: the section is for two or
+    /// three sessions, and a sixth pinned session is a tree, which the tree already is.
+    public static let pinnedSessions: [ApplicationShortcut] = [
+        .pinnedSession1, .pinnedSession2, .pinnedSession3, .pinnedSession4, .pinnedSession5,
+    ]
 
     public var title: String {
         switch self {
@@ -76,6 +89,16 @@ public enum ApplicationShortcut: String, CaseIterable, Hashable, Sendable {
         case .copyModeStartSelection: return "Start Selection"
         case .copyModeCopy: return "Copy Selection"
         case .copyModeSearch: return "Search Backward…"
+        // Not "Pin to This Window", which the context menu says: the vocabulary test holds every
+        // title here to "Window" meaning the macOS window *and appearing nowhere else*, and the menu
+        // item flips to Unpin on its own.
+        case .togglePinSession: return "Pin Session"
+        case .previousSession: return "Previous Session"
+        case .pinnedSession1: return "Pinned Session 1"
+        case .pinnedSession2: return "Pinned Session 2"
+        case .pinnedSession3: return "Pinned Session 3"
+        case .pinnedSession4: return "Pinned Session 4"
+        case .pinnedSession5: return "Pinned Session 5"
         }
     }
 }
@@ -277,6 +300,17 @@ public struct KeymapPolicy: Sendable {
         // ⌘F is SwiftTerm's local find bar, which searches what the emulator is holding. This is
         // tmux's search, which reaches the history the emulator never received.
         .copyModeSearch: KeyBinding("f", [.command, .control]),
+        // F4.37. ⌃⌘ rather than ⌘ for the digits: ⌘1…⌘9 is "the Nth tab" in every browser and
+        // terminal, and tabs here are tmux windows, so that row stays free for them. ⌃⌘ is already
+        // this app's second layer (close pane, copy mode) and macOS claims no digit in it.
+        .pinnedSession1: KeyBinding("1", [.command, .control]),
+        .pinnedSession2: KeyBinding("2", [.command, .control]),
+        .pinnedSession3: KeyBinding("3", [.command, .control]),
+        .pinnedSession4: KeyBinding("4", [.command, .control]),
+        .pinnedSession5: KeyBinding("5", [.command, .control]),
+        // tmux's own `prefix L`, `switch-client -l`, in Cmd space — the same move as copy mode's.
+        .previousSession: KeyBinding("l", [.command, .control]),
+        .togglePinSession: KeyBinding("p", [.command, .control]),
     ])
 
     public init(bindings: [ApplicationShortcut: KeyBinding]) {

@@ -40,6 +40,9 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             List {
+                if !state.pins.isEmpty {
+                    pinnedSection
+                }
                 Section {
                     ForEach(model.hosts) { host in
                         hostGroup(host)
@@ -93,6 +96,101 @@ struct SidebarView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Pinned
+
+    /// The two or three sessions this window is moving between, above the tree they live in.
+    ///
+    /// A section of the same list rather than a second mode of the sidebar, because the job is
+    /// switching and a mode would put a flip in front of every switch — and in front of the tree
+    /// too, which is still where anything not pinned is reached. Absent when empty, so a window
+    /// nobody has pinned in looks exactly as it did. Each pin is its own `List` row, unlike a host
+    /// group, which is what gives it a context menu of its own and lets `onMove` reorder it.
+    private var pinnedSection: some View {
+        Section {
+            ForEach(Array(state.pins.enumerated()), id: \.element) { index, pin in
+                pinnedRow(pin, slot: index)
+            }
+            .onMove { model.movePins(in: state, fromOffsets: $0, toOffset: $1) }
+        } header: {
+            Text("PINNED").font(.caption).fontWeight(.semibold).foregroundStyle(.secondary)
+        }
+    }
+
+    private func pinnedRow(_ pin: PinnedSession, slot: Int) -> some View {
+        let host = model.hosts.first { $0.id == pin.hostId }
+        // `browsableSessions`, so a pin on an idle host still shows what a probe found under it.
+        let session = host.flatMap { pin.resolve(in: $0.browsableSessions) }
+        let name = session?.name ?? pin.sessionName
+        let hostName = host?.config.name ?? pin.hostId
+        let isLive = session.map { host?.isLive($0.id) == true } ?? false
+        let isSelected = session.map { state.isShowing(hostId: pin.hostId, sessionId: $0.id) } ?? false
+        // Prefixed so it can never be mistaken for a tree row's key, which the host group's
+        // context menu resolves the pointer against.
+        let rowKey = "pin|\(pin.hostId)|\(pin.sessionName)"
+        return HStack(spacing: 6) {
+            // The host's rail, one row tall: a pin is reached through its host, and whether that will
+            // connect first is the thing worth knowing before the click.
+            RoundedRectangle(cornerRadius: 1)
+                .fill(host.map { railColor($0.connectionState) } ?? .clear)
+                .frame(width: 2)
+                .accessibilityHidden(true)
+            Button { model.openPin(pin, in: state) } label: {
+                HStack(spacing: 6) {
+                    SessionStackIcon()
+                        .foregroundStyle(isLive ? Color.accentColor : .secondary)
+                    Text(name).font(.subheadline).lineLimit(1).truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    // Pins cross hosts, and `work` on two hosts is the ordinary case.
+                    Text(hostName)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            // The slot's chord, so the shortcut is learnable from the row it reaches.
+            .help("\(name) on \(hostName)" + (slotChord(slot).map { " — \($0)" } ?? ""))
+
+            rowActions {
+                RowButton(
+                    glyph: .minus,
+                    help: "Unpin \(name)",
+                    isVisible: hoveredRow == rowKey || isSelected
+                ) {
+                    model.unpin(in: state, pin)
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .modifier(TreeRowSelection(isSelected: isSelected))
+        .onHover { hovering(rowKey, $0) }
+        .contextMenu {
+            if let session, host?.connectionState.isActive == true {
+                Button("Open in New Window") {
+                    model.showSession(
+                        hostId: pin.hostId, sessionId: session.id,
+                        collapseSidebar: true, preferNewWindow: true
+                    )
+                }
+                Divider()
+            }
+            Button("Unpin from This Window") { model.unpin(in: state, pin) }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "Pinned session \(name) on \(hostName), "
+                + (isLive ? "attached" : "not attached")
+                + (isSelected ? ", showing in this window" : "")
+        )
+    }
+
+    /// `⌃⌘2`, or `nil` past the last slot or for a slot the user unbound.
+    private func slotChord(_ slot: Int) -> String? {
+        guard ApplicationShortcut.pinnedSessions.indices.contains(slot) else { return nil }
+        return model.keymap.binding(for: ApplicationShortcut.pinnedSessions[slot])?.displayString
     }
 
     private var addHostFooter: some View {
@@ -626,6 +724,14 @@ struct SidebarView: View {
     @ViewBuilder
     private func sessionMenu(host: HostState, session: TmuxSession) -> some View {
         Group {
+            // First, because it is the one item here that is about this window rather than about the
+            // session, and the one a person reaches for several times in a row.
+            if state.isPinned(hostId: host.id, session: session) {
+                Button("Unpin from This Window") { model.unpin(in: state, hostId: host.id, session: session) }
+            } else {
+                Button("Pin to This Window") { model.pin(in: state, hostId: host.id, session: session) }
+            }
+            Divider()
             Button("Rename Session…") {
                 model.requestRenameSession(in: state, hostId: host.id, sessionId: session.id)
             }
@@ -1034,7 +1140,9 @@ private struct RowButton: View {
 /// tried at. Rotating leaves the ✕ spanning 8pt where the + spans 11 — that is the optical match, not
 /// a mistake to correct.
 private struct RowActionGlyph: View {
-    enum Kind { case plus, cross }
+    /// `minus` is the plus without its upright: taking something out of a list rather than
+    /// destroying it, which is what the ✕ means everywhere else in the tree.
+    enum Kind { case plus, cross, minus }
 
     let kind: Kind
     /// Draws the same glyph at a heavier stroke, for `differentiateWithoutColor` (§7).
@@ -1056,8 +1164,10 @@ private struct RowActionGlyph: View {
 
     var body: some View {
         ZStack {
-            rule.rotationEffect(.degrees(kind == .plus ? 0 : 45))
-            rule.rotationEffect(.degrees(kind == .plus ? 90 : -45))
+            rule.rotationEffect(.degrees(kind == .cross ? 45 : 0))
+            if kind != .minus {
+                rule.rotationEffect(.degrees(kind == .plus ? 90 : -45))
+            }
         }
         .frame(width: Self.length, height: Self.length)
     }

@@ -12,7 +12,8 @@ Split out of `CLAUDE.md`. What is persisted where, and what each file's failure 
   still exists. Before that, a forward or ssh option added to a discovered host worked all session and
   vanished on relaunch, while the Keychain flag it wrote survived and the two then disagreed.
 - `~/Library/Application Support/tetmux/workspace.json` — `windows`, one entry per macOS window: host,
-  session (id *and* name), tmux window, whether the tree was showing, and the frame; plus
+  session (id *and* name), tmux window, whether the tree was showing, the frame, and F4.37's
+  `pins` (host, session id and name, in the user's order — the window's, so they go with it); plus
   `watchedWindows`, F4.31's watches, and `recents`, F4.25's ranking — both of which belong to no
   window and so had nowhere else to go. §4.3's
   view state and nothing else — tmux is the persistence layer for everything in a pane. Written
