@@ -156,15 +156,22 @@ there is no per-window sizing at all, and `window-size latest` + `refresh-client
 only mechanism — without *something* there, an old or small client clamps every window toward
 80×24 (F4.17).
 
-`window-size` is a session option, so it is re-applied after `%session-changed` and put back with
-`set-option -u` on a deliberate disconnect — and **that last command must be waited for, not merely
-written**. `teardown` hangs the channel up with `SIGHUP`, so the tmux client must have read the
+`window-size` is set per session, so it is re-applied after `%session-changed` and put back with
+`set-option -u` on a deliberate disconnect — **on every window of the session by id, not only on
+the session**. From tmux 3.0 it is a *window* option: aimed at a session it lands on that session's
+current window, and `resize-window` sets it on whichever window it sizes, so the session-level unset
+alone cleared the tab in front and left every other tab at `manual` (verified on 3.0 and 3.7b;
+`testDisconnectingRestoresWindowSizeOnEveryWindowItSized`). A window linked into another session
+that is still on screen keeps `manual`. And **the last of those commands must be waited for, not
+merely written**. `teardown` hangs the channel up with `SIGHUP`, so the tmux client must have read the
 line out of the pty before the signal lands. Writing and terminating in the same breath is a race
 an idle machine wins and a loaded one loses — it passed here six runs in a row and failed in CI on
 a commit that had passed there minutes earlier — leaving `manual` set on the user's session for the
 next plain `tmux attach` to find. `sendAndAwait` waits for tmux's own `%end`, with a timeout,
 because a channel can accept a write and never answer, and a disconnect that hangs is worse than an
-option left set. `detach-client` is waited for against the same race, for the same reason.
+option left set. `detach-client` is waited for against the same race, for the same reason. The
+restore is skipped while another tetmux is attached to the same session, which is relying on the
+option too; the last one out restores it (see F4.17's entry in `docs/behavior.md`).
 
 **A zoomed window renders the visible layout, and is a member of the full one.** tmux keeps
 `window_layout` as the layout the window would have *unzoomed*; `window_visible_layout` is what is

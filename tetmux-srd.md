@@ -314,9 +314,12 @@ its tmux window independently. A window's size has exactly **one owner** (the fo
 views of the same window render the grid the owner negotiated, because two views driving one
 window fight forever. Below 2.9 there is no per-window sizing and `window-size latest` +
 `refresh-client -C` is the only mechanism — without it an old or small client clamps every window
-toward 80×24 (F4.17's failure mode by another route). `window-size` is a *session* option: it is
+toward 80×24 (F4.17's failure mode by another route). `window-size` is set per session: it is
 re-applied after `%session-changed`, and **restored** (`set-option -u`) on deliberate disconnect
-and on quit — and that restore must be waited for against tmux's own `%end`, not merely written,
+and on quit, *(amended:)* on each window of the session as well as the session itself — from tmux
+3.0 it is a window option, which `resize-window` sets on every window it sizes and a session-level
+unset does not reach. The restore is skipped while another tetmux is attached to the session, and
+it must be waited for against tmux's own `%end`, not merely written,
 or the teardown's `SIGHUP` races the write and leaves `manual` on the user's session for the next
 plain `tmux attach` to find.
 
@@ -510,14 +513,18 @@ session contents.
   a registry of what is on screen, not a property of the connection — they survive teardown, and
   the next handshake repaints them.
 - **F4.17** Stale clients are reconciled on every attach. tmux has no settable client name
-  (`client_name` *is* the tty — verified), so the tag is `client_control_mode`: an orphan is a
-  control-mode client whose tty is not one of ours, which requires each channel to learn its own
-  `#{client_tty}` before `list-clients` answers — a FIFO-ordering guarantee. The pass is skipped
-  while any channel of the host has not answered, because a handshaking follower is
-  indistinguishable from an orphan. Ordinary `tmux attach` terminals are never candidates. Known
-  blast radius, accepted: two live tetmuxen against one server detach each other, as would
-  iTerm2's tmux integration. Without this, an orphaned client clamps every window toward 80×24 —
-  the single most common failure mode in applications of this class.
+  (`client_name` *is* the tty — verified), so each channel records the client it opened in a
+  global user option, `@tetmux_clients`, under an identity made fresh per running instance.
+  *(Amended — the tag was `client_control_mode`, which cannot tell an orphan from a second live
+  tetmux; two of them on one server detached each other in a loop.)* An orphan is a client
+  recorded under this instance, still attached, whose tty is not one of its channels' — which
+  requires each channel to learn its own tty and key before `list-clients` answers, a
+  FIFO-ordering guarantee. The pass is skipped while any channel of the host has not answered,
+  because a handshaking follower is indistinguishable from an orphan. Ordinary `tmux attach`
+  terminals, other control-mode applications, and other running tetmuxen are never candidates.
+  Accepted: the orphan of a *previous* process (a crash while the link was down) is not
+  recognised. Without this, an orphaned client clamps every window toward 80×24 — the single most
+  common failure mode in applications of this class.
 - **F4.18** **Sleep/wake and network changes drive reconnection directly**, not timeouts:
   `NSWorkspace.didWakeNotification` and `NWPathMonitor`, comparing available *interfaces* as well
   as the satisfied flag — Wi-Fi to a different Wi-Fi never reports `.unsatisfied` and is exactly
@@ -885,7 +892,7 @@ as designed and is the recommended shape for any comparable effort.
 | libghostty integration effort | Resolved: SwiftTerm chosen (Spike 1); risk retired |
 | Control-mode protocol edge cases across versions | Mitigated: five-version fixture corpus replayed in CI; integration suite runs across the built 3.0–3.5 binaries, weekly in CI, on demand, and on every release tag, where it blocks the .dmg |
 | Geometry desync between GUI and tmux | Mitigated architecturally (§3.3); live-resize suppression shipped (`LiveResizeGate`) |
-| Orphaned clients clamping window size | Mitigated (F4.17), with tests; known blast radius documented |
+| Orphaned clients clamping window size | Mitigated (F4.17), with tests; two live instances coexist; a previous process's orphan is not recognised |
 | `send-keys` round-trip latency under fast typing | Mitigated and **measured**: coalescing now flushes on the leading edge, and the round trip is under 2 ms p95 (P6.1); buffer-based paste |
 | **Display refresh dominates perceived latency** *(new)* | Accepted: with the protocol under 2 ms, keypress→glyph is one frame. P6.1 amended to name a refresh rate, and passes on both displays; a fix would have to schedule drawing differently |
 | Old tmux in institutional environments | Mitigated: passthrough shipped as a distinct channel (§4.6) |

@@ -109,7 +109,28 @@ public actor SessionService {
     /// nobody runs.
     private let now: @Sendable () -> ContinuousClock.Instant
 
-    public init(now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
+    /// Who this service is in the client registry (`TmuxCommand.clientRegistryOption`): the name
+    /// its clients are recorded under, and so the only clients F4.17 may call orphans.
+    ///
+    /// **One per service, made fresh, and never persisted.** A stored identity would be shared by
+    /// everything launched from one machine — the app, `--diagnose`, a `swift run` beside an
+    /// installed build — and each would then find the others' live clients recorded under its own
+    /// name and not among its channels, which is the definition of an orphan. What this gives up is
+    /// the orphan of a *previous* process: one that crashed while the network was also down, since a
+    /// crash with the link up takes its ssh children and their clients with it. That one waits for
+    /// "Detach Other Clients" or for the far sshd to give up on it.
+    ///
+    /// Injectable so a test can record an orphan under the name of the service that must find it.
+    public let instanceId: String
+
+    public init(
+        instanceId: String = UUID().uuidString,
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
+    ) {
+        // It is written into a tmux format, where `_` is the registry's own separator and most
+        // punctuation means something. A UUID is already all of what survives this.
+        let safe = instanceId.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        self.instanceId = safe.isEmpty ? UUID().uuidString : safe
         self.now = now
     }
 
@@ -262,9 +283,17 @@ public actor SessionService {
         var lastSentSize: (cols: Int, rows: Int)?
         var userInitiatedDisconnect = false
 
-        /// This channel's own `client_tty`, learned at handshake. F4.17's reconciliation is "every
-        /// control-mode client that is not one of ours", and this is the "ours".
+        /// This channel's own `client_tty`, learned at handshake, and how a channel recognises
+        /// itself in `list-clients`. F4.17's reconciliation never touches one of these, and does not
+        /// run at all while any channel of the host is still without one.
         var clientTty: String?
+        /// This channel's entry in the client registry, once it has been written there. What a
+        /// deliberate disconnect takes back out.
+        var registryEntry: String?
+        /// The registry as it stood when this channel asked who it was — the question that precedes
+        /// `list-clients` in the handshake, so the two describe the same moment.
+        var registryAtHandshake: [(instance: String, clientKey: String)] = []
+        var isRegistered = false
 
         /// Whether this channel was a recovery attach to the remembered session name, so a death
         /// before the handshake can be read as "that session is gone" rather than "the host is down".
@@ -361,14 +390,14 @@ public actor SessionService {
             case listWindows
             case listPanes
             /// `reconcileStale` is F4.17's detach pass, which belongs to an *attach* and to nothing
-            /// else. The same answer is now also read for the model — who else is attached, which the
-            /// destructive confirmations report — and that runs on every topology refresh. Sharing
-            /// one kind would have made every refresh a round of orphan-hunting: two live tetmuxen
-            /// against one server already detach each other on attach, and doing it every time a
-            /// window is renamed turns a known, bounded blast radius into a fight.
+            /// else: it judges the list against the registry this channel read one command earlier,
+            /// and a refresh has no such reading. The same answer is also read for the model — who
+            /// else is attached, which the destructive confirmations report — and that runs on every
+            /// topology refresh.
             case listClients(reconcileStale: Bool)
-            /// This channel's own `client_tty`, so it can exclude itself from the list above.
-            case clientTty
+            /// This channel's own tty and registry key, so it can exclude itself from the list
+            /// above, and the client registry as it stood (`TmuxCommand.clientIdentityQuery`).
+            case clientIdentity
             /// `target` scopes the repaint to a single subscriber. The same pane can be on screen in
             /// two macOS windows, and the payload begins by clearing the screen *and* the scrollback —
             /// broadcasting a late joiner's repaint would wipe the history the other window is holding.
@@ -1244,7 +1273,7 @@ public actor SessionService {
     private func retireFollower(hostId: String, sessionId: String, epoch: UUID) async {
         guard let follower = followerChannels[hostId]?[sessionId], follower.epoch == epoch else { return }
         follower.userInitiatedDisconnect = true
-        await restoreWindowSizePolicy(hostId: hostId, connection: follower)
+        await relinquish(hostId: hostId, connection: follower)
         guard followerChannels[hostId]?[sessionId]?.epoch == epoch else { return }
 
         // The decision to retire was made before that await, and the await is a round trip that can
@@ -1258,8 +1287,10 @@ public actor SessionService {
             log("[\(hostId)] \(sessionId) came back before its client was retired; keeping it")
             follower.userInitiatedDisconnect = false
             // Put back the option the restore above removed, or this session's windows would stop
-            // being sized individually for the rest of the channel's life.
+            // being sized individually for the rest of the channel's life — and the registry entry
+            // that went with it, or this client could never be recognised as ours once orphaned.
             applyWindowSizePolicy(hostId: hostId, connection: follower)
+            registerClient(hostId: hostId, connection: follower)
             updateLiveSessions(hostId: hostId)
             broadcastState()
             return
@@ -1310,7 +1341,7 @@ public actor SessionService {
             follower.userInitiatedDisconnect = true
             await retireFollower(hostId: hostId, sessionId: sessionId, epoch: follower.epoch)
         }
-        await restoreWindowSizePolicy(hostId: hostId, connection: connection)
+        await relinquish(hostId: hostId, connection: connection)
         // The channel can end while we wait — the link drops, or tmux exits — and whichever path
         // noticed has already torn it down and set the state. Tearing down a *replacement* channel,
         // or marking a freshly reconnected host disconnected, is the failure this avoids.
@@ -2038,7 +2069,7 @@ public actor SessionService {
         send("display-message -p '#{version}'", kind: .version, hostId: hostId, connection: connection)
         // Before `list-clients`, so this channel knows which of the listed clients is itself by the
         // time the answer arrives — responses come back in order.
-        send(TmuxCommand.clientTtyQuery, kind: .clientTty, hostId: hostId, connection: connection)
+        send(TmuxCommand.clientIdentityQuery, kind: .clientIdentity, hostId: hostId, connection: connection)
         // The `window-size` policy waits for that version: which of the two sizing models is available
         // depends on it, and choosing wrongly either collapses every pane toward 80x24 or leaves a
         // torn-off window unable to size itself. See `applyWindowSizePolicy`.
@@ -2108,12 +2139,12 @@ public actor SessionService {
         case .listPanes:
             applyPanes(text(), hostId: hostId)
 
-        case .clientTty:
-            connection.clientTty = text().first?.trimmingCharacters(in: .whitespaces)
+        case .clientIdentity:
+            applyClientIdentity(text().first, hostId: hostId, connection: connection)
 
         case .listClients(let reconcileStale):
             let clients = applyClients(text(), hostId: hostId)
-            if reconcileStale { reconcileStaleClients(clients, hostId: hostId) }
+            if reconcileStale { reconcileStaleClients(clients, hostId: hostId, connection: connection) }
 
         case .paneRepaintState(let paneId):
             // `alternate_on,cursor_x,cursor_y`. Read field by field, because a tmux that does not
@@ -3243,7 +3274,9 @@ public actor SessionService {
     /// **Older:** `window-size latest`, which has no per-window equivalent. Without *something* here
     /// an old or small client clamps every window toward 80x24 and every pane collapses (F4.17).
     ///
-    /// Set on the attached session rather than globally: it is a session option, and changing it
+    /// Set on the attached session rather than globally: it was a session option when this was
+    /// written and from 3.0 is a window one (aimed at a session, it lands on the current window, and
+    /// `resize-window` sets it on each window it sizes), and changing it
     /// server-wide would resize windows for the user's other clients too. `disconnectHost` puts it
     /// back — see the note there about what an unclean drop leaves behind.
     private func applyWindowSizePolicy(hostId: String, connection: Connection) {
@@ -3334,10 +3367,71 @@ public actor SessionService {
     /// Still best-effort in one direction: it can only run on a *deliberate* disconnect, so a channel
     /// that dies with the network leaves the option set. tetmux sets it again on the next attach, so
     /// the visible effect is limited to attaching with something else in the meantime.
+    ///
+    /// **Not while another tetmux is still attached to the session.** It set the same option for the
+    /// same reason and is still relying on it: unset under it, its window falls back to `latest` and
+    /// takes the size of whichever client tmux next looks at, with nothing on that side due to ask
+    /// again. The last one out puts it back. Asked of tmux at the moment of leaving rather than read
+    /// from the model, because the registry is only read at handshake and a peer may have arrived
+    /// since; no answer means a channel that would not have answered the restore either.
     private func restoreWindowSizePolicy(hostId: String, connection: Connection) async {
         guard connection.sizesWindowsIndividually, connection.handshakeComplete else { return }
         let target = TmuxCommand.quote(reconnectTarget[hostId] ?? connection.sessionTarget)
-        await sendAndAwait("set-option -u -t \(target) window-size", hostId: hostId, connection: connection)
+        guard let rows = await sendAndAwaitResult(
+            TmuxCommand.sessionClientIdentities(target: target),
+            action: nil, hostId: hostId, connection: connection, timeout: .seconds(2)
+        ) else { return }
+        let ourTtys = Set(channels(of: hostId).compactMap(\.clientTty))
+        let peerIsAttached = rows.contains { row in
+            let fields = String(decoding: row, as: UTF8.self)
+                .split(separator: "|", maxSplits: 3, omittingEmptySubsequences: false).map(String.init)
+            guard fields.count == 4, !ourTtys.contains(fields[0]),
+                  let key = TmuxCommand.clientKey(pid: fields[1], created: fields[2])
+            else { return false }
+            return TmuxCommand.parseClientRegistry(fields[3])
+                .contains { $0.clientKey == key && $0.instance != instanceId }
+        }
+        guard !peerIsAttached else {
+            log("[\(hostId)] leaving window-size alone: another tetmux is attached to \(target)")
+            return
+        }
+
+        // **Every window of the session, by id, and not only the session.** From tmux 3.0
+        // `window-size` is a window option: aimed at a session it lands on that session's *current*
+        // window, and `resize-window` sets it on whichever window it sizes. Unsetting it on the
+        // session alone therefore cleared one tab and left `manual` on every other tab tetmux had
+        // sized (verified on 3.0 and 3.7b), which is every tab, since they are all built and
+        // measured. The session-level unset stays: it is the whole of the restore where the option
+        // really is a session's, and it covers a window the model has not heard of yet.
+        var commands = ["set-option -u -t \(target) window-size"]
+        let sessionId: String? = switch connection.role {
+        case .primary: connection.attachedSessionId
+        case .follower(let sessionId): sessionId
+        }
+        // A window linked into another session we are still showing (F4.9) is still being sized
+        // from there. It keeps `manual` — put back, since the session-level unset above may have
+        // just taken it off if it happens to be this session's current window.
+        let stillShown = Set(
+            channels(of: hostId).filter { $0 !== connection }.flatMap { other -> [String] in
+                let otherSession: String? = switch other.role {
+                case .primary: other.attachedSessionId
+                case .follower(let sessionId): sessionId
+                }
+                return hosts[hostId]?.sessions.first { $0.id == otherSession }?.windows.map(\.id) ?? []
+            }
+        )
+        for window in hosts[hostId]?.sessions.first(where: { $0.id == sessionId })?.windows ?? [] {
+            commands.append(
+                stillShown.contains(window.id)
+                    ? "set-option -w -t \(window.id) window-size manual"
+                    : "set-option -wu -t \(window.id) window-size"
+            )
+        }
+        // One client's commands run in order, so waiting for the last is waiting for all of them.
+        for command in commands.dropLast() {
+            send(command, kind: .ignore, hostId: hostId, connection: connection)
+        }
+        await sendAndAwait(commands[commands.count - 1], hostId: hostId, connection: connection)
     }
 
     /// Claims the right to size a tmux window. Called by a view when its macOS window takes focus.
@@ -3475,40 +3569,105 @@ public actor SessionService {
     /// live client of the session, and below tmux 2.9 — where `window-size latest` is the only sizing
     /// mechanism there is (F4.17, and see `applyWindowSizePolicy`) — an orphan sized 80×24 drags every
     /// window in the session down to 80×24 with it. The SRD calls this the single most common failure
-    /// mode in applications of this class, and until now the probe was sent on every attach and its
-    /// answer went to `log()` and nowhere else.
+    /// mode in applications of this class.
     ///
-    /// Two things keep this from detaching something it should not:
-    ///
-    /// **Control-mode only.** Every tetmux channel is a control-mode client and an ordinary terminal
-    /// running `tmux attach` is not, so the user's own terminals are never candidates. This is the
-    /// nearest thing to the SRD's "distinctive client name": tmux has no settable client name —
-    /// `client_name` *is* the tty and no command changes it — so `client_control_mode` is the only
-    /// tag on offer. It is not perfect, and the two cases to know about are another `tmux -CC`
-    /// application on the same server (iTerm2's tmux integration is the one that exists) and a second
-    /// *live* copy of tetmux — two of those would each read the other's channels as orphans and
-    /// detach them in turn. A packaged app cannot normally be launched twice, but `swift run`
-    /// alongside an installed build can, which is worth knowing before diagnosing it as a dropped
-    /// connection. Both are still a far narrower blast radius than `detachOtherClients`, which the
-    /// menu offers and which detaches everything including the user's own terminals.
+    /// **An orphan is a client this service opened and no longer holds a channel to**: recorded under
+    /// our `instanceId` in the client registry, still in `list-clients`, and not one of our ttys.
+    /// Nothing else is touched. The rule used to be "any control-mode client that is not ours",
+    /// because tmux has no settable client name and `client_control_mode` was the only tag on offer —
+    /// and that is also a description of a second tetmux, alive, on another machine. Each detached
+    /// the other on attach; being detached is an orderly `%exit`, which the recovery answers by
+    /// attaching again; and that attach detached the other. Two instances on one server traded it
+    /// back and forth for as long as both ran. So were iTerm2's tmux integration and `--diagnose`
+    /// beside the running app, neither of which is ours to end.
     ///
     /// **Never while one of our own channels is still handshaking.** A follower that has not yet
-    /// answered `#{client_tty}` is indistinguishable from an orphan, and detaching it would kill a
-    /// client we opened a moment ago. If any channel of this host has no tty yet, the whole pass is
-    /// skipped — the next attach runs it again.
-    private func reconcileStaleClients(_ clients: [TmuxClient], hostId: String) {
+    /// answered who it is cannot be told from an orphan — it may already be in the registry, and its
+    /// tty is not yet among ours. If any channel of this host has no tty yet, nothing is detached;
+    /// the entries stay where they are and the next attach reads them again.
+    ///
+    /// The same pass sweeps the registry: an entry whose client is no longer attached describes
+    /// nothing, whoever wrote it, and an instance that crashed will never come back for its own.
+    private func reconcileStaleClients(_ clients: [TmuxClient], hostId: String, connection: Connection) {
+        let attached = Set(clients.compactMap(\.registryKey))
+        for entry in connection.registryAtHandshake where !attached.contains(entry.clientKey) {
+            send(
+                TmuxCommand.removeFromClientRegistry(
+                    TmuxCommand.clientRegistryEntry(instance: entry.instance, clientKey: entry.clientKey)
+                ),
+                kind: .ignore, hostId: hostId, connection: connection
+            )
+        }
+
         guard !channels(of: hostId).contains(where: { $0.clientTty == nil }) else {
             log("[\(hostId)] skipping client reconciliation: a channel has not identified itself yet")
             return
         }
 
-        // `isOurs` is that same tty comparison, made once where the row was parsed. The guard above
-        // is still the one that matters: it is what stops an unidentified channel of our own from
-        // being read as an orphan and detached a moment after we opened it.
+        let ours = Set(
+            connection.registryAtHandshake.filter { $0.instance == instanceId }.map(\.clientKey)
+        )
+        // `isOurs` is the tty comparison, made once where the row was parsed, and together with the
+        // guard above it is what stops a channel we opened a moment ago — registered, and so in
+        // `ours` — from being detached as its own orphan.
         for client in clients where client.isControlMode && !client.isOurs && !client.tty.isEmpty {
+            guard let key = client.registryKey, ours.contains(key) else { continue }
             log("[\(hostId)] detaching orphaned control-mode client \(client.tty)")
-            send("detach-client -t \(TmuxCommand.quote(client.tty))", kind: .ignore, hostId: hostId)
+            send("detach-client -t \(TmuxCommand.quote(client.tty))", kind: .ignore, hostId: hostId, connection: connection)
+            send(
+                TmuxCommand.removeFromClientRegistry(
+                    TmuxCommand.clientRegistryEntry(instance: instanceId, clientKey: key)
+                ),
+                kind: .ignore, hostId: hostId, connection: connection
+            )
         }
+    }
+
+    /// The answer to `clientIdentityQuery`: who this channel is, and the registry as it stood.
+    ///
+    /// Registers the channel as soon as it knows its own key, which is before `list-clients` answers
+    /// and so before anybody's reconciliation — ours included — can read the list without it.
+    private func applyClientIdentity(_ line: String?, hostId: String, connection: Connection) {
+        guard let line else { return }
+        let fields = line.split(separator: "|", maxSplits: 3, omittingEmptySubsequences: false)
+        let field = { (index: Int) in fields.count > index ? String(fields[index]) : "" }
+        connection.clientTty = field(0).trimmingCharacters(in: .whitespaces)
+        connection.registryAtHandshake = TmuxCommand.parseClientRegistry(field(3))
+
+        guard let key = TmuxCommand.clientKey(pid: field(1), created: field(2)) else {
+            log("[\(hostId)] tmux did not say which client this channel is; it will not be registered")
+            return
+        }
+        connection.registryEntry = TmuxCommand.clientRegistryEntry(instance: instanceId, clientKey: key)
+        registerClient(hostId: hostId, connection: connection)
+    }
+
+    private func registerClient(hostId: String, connection: Connection) {
+        guard let entry = connection.registryEntry, !connection.isRegistered else { return }
+        connection.isRegistered = true
+        send(TmuxCommand.addToClientRegistry(entry), kind: .ignore, hostId: hostId, connection: connection)
+    }
+
+    /// Takes back what this channel put on the user's server, on the way out: its registry entry and
+    /// the session's `window-size`.
+    ///
+    /// The entry first and *not* waited for, because the restore behind it is: tmux runs one
+    /// client's commands in order, so the `%end` that `restoreWindowSizePolicy` waits on says both
+    /// have run. Below 2.9 there is no restore to wait behind, and the removal is waited for itself.
+    /// An entry that is missed — any disconnect that is not deliberate misses it — is swept by the
+    /// next tetmux to attach, and names nothing in the meantime.
+    private func relinquish(hostId: String, connection: Connection) async {
+        guard connection.handshakeComplete else { return }
+        if let entry = connection.registryEntry, connection.isRegistered {
+            connection.isRegistered = false
+            let removal = TmuxCommand.removeFromClientRegistry(entry)
+            if connection.sizesWindowsIndividually {
+                send(removal, kind: .ignore, hostId: hostId, connection: connection)
+            } else {
+                await sendAndAwait(removal, hostId: hostId, connection: connection)
+            }
+        }
+        await restoreWindowSizePolicy(hostId: hostId, connection: connection)
     }
 
     /// Parses `list-clients` into the model: who is attached to this server, and which of them is us.
@@ -3525,7 +3684,7 @@ public actor SessionService {
         let ourTtys = Set(channels(of: hostId).compactMap(\.clientTty))
 
         let clients: [TmuxClient] = lines.compactMap { line in
-            let fields = line.split(separator: "|", maxSplits: 5, omittingEmptySubsequences: false)
+            let fields = line.split(separator: "|", maxSplits: 7, omittingEmptySubsequences: false)
             guard fields.count >= 3 else { return nil }
             let tty = String(fields[0])
             guard !tty.isEmpty else { return nil }
@@ -3541,7 +3700,8 @@ public actor SessionService {
                 terminal: field(5),
                 isControlMode: fields[1] == "1",
                 isOurs: ourTtys.contains(tty),
-                lastActivity: activity
+                lastActivity: activity,
+                registryKey: TmuxCommand.clientKey(pid: field(6), created: field(7))
             )
         }
 

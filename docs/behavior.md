@@ -184,16 +184,53 @@ glitch rather than as information. A *failed* `switch-client` must clear `pendin
 dead session reports live forever and the banner never appears over a window that has stopped
 moving.
 
-**Stale tetmux clients are detached on attach (F4.17), and the tag is `client_control_mode`.** The
-SRD asks for a distinctive client name; tmux has none to give — `client_name` *is* the tty, and
-there is no command to set it (verified on 3.7b). So an orphan is "a control-mode client whose tty
-is not one of ours", which means the handshake must learn its own `#{client_tty}` *before* the
-`list-clients` response arrives — the two are issued in that order deliberately, and the FIFO is
-what makes it work. The whole pass is skipped if any channel of the host has not yet answered its
-tty query, because a handshaking follower is indistinguishable from an orphan. Ordinary
-`tmux attach` terminals are never candidates. Known blast radius: two live tetmuxen against one
-server (a `swift run` beside an installed build) detach each other, as would iTerm2's tmux
-integration.
+**Stale tetmux clients are detached on attach (F4.17), and "ours" is what the client registry says
+it is.** The SRD asks for a distinctive client name; tmux has none to give — `client_name` *is* the
+tty, and there is no command to set it (verified on 3.7b). The tag used to be
+`client_control_mode`: an orphan was "a control-mode client whose tty is not one of ours". That is
+also an exact description of a second tetmux running on another machine, so two of them on one
+server detached each other — and not once, as this entry used to say. Being detached is an orderly
+`%exit`, the recovery for that is one `attach-session`, and every attach ran the pass again:
+`testTwoLiveInstancesLeaveEachOtherAttached` watched the client pids change on every round for as
+long as both ran. iTerm2's tmux integration and `--diagnose` beside the running app went the same
+way.
+
+So every channel records the client it opened in a global user option, `@tetmux_clients`, as
+`<instance>_<client_pid>_<client_created>`, and an orphan is **a client recorded under this
+`SessionService`'s `instanceId`, still attached, whose tty is not one of our channels'**. Anything
+unrecorded, or recorded by someone else, is left alone. The parts that are load-bearing:
+
+- **The identity query precedes `list-clients`**, in that order deliberately, and the FIFO is what
+  makes it work: one `display-message` answers this channel's tty, its key, and the registry as it
+  stood. The whole pass is skipped if any channel of the host has not yet answered, because a
+  handshaking follower may already be registered and is not yet recognisable as ours.
+- **`instanceId` is per service and never persisted.** A stored one would be shared by the app,
+  `--diagnose` and a `swift run` on the same machine, each finding the others' live clients under
+  its own name. The price is the orphan of a *previous* process — a crash while the link was also
+  down — which waits for "Detach Other Clients" or the far sshd.
+- **The key is pid and creation time, not the tty**, which is handed straight back out; an entry
+  that outlived its client would come to name somebody else's.
+- **Entries are added and removed by tmux, one command each** (`set-option -ag`, and
+  `set-option -Fg` with `#{s/ entry//:@tetmux_clients}`), never read here and written back — two
+  instances handshaking together would each write the value without the other.
+- **`_` is the separator because the removal puts the entry inside a format.** With `:` the
+  substitution fails to parse and replaces the option with nothing, everyone's entries included
+  (verified 3.0–3.7b).
+- **The option is left empty, not unset**, by the last one out: unsetting conditionally needs
+  `if-shell -F`, which answers one line with two `%begin`/`%end` blocks in control mode and would
+  break command correlation.
+- A deliberate disconnect removes its entry ahead of the awaited `window-size` restore; any other
+  exit leaves it, and the next attach by any tetmux sweeps entries whose client is gone.
+
+Two instances sharing a window (`testTwoInstancesSizingOneWindowSettleOnTheLastToAsk`): the last
+to ask has it, and the other is told and only forgets its memo, so nothing oscillates. **The
+`window-size` restore is skipped while another registered tetmux is attached to the session** — the
+one leaving used to unset `manual` on a window the one staying was still sizing, which then fell
+back to `latest` with nothing on that side due to ask again. `restoreWindowSizePolicy` asks tmux
+who is there at the moment of leaving (the registry is otherwise only read at handshake); the last
+one out puts the option back. The instance that lost the window is drawing a grid that does not
+fit its frame until it next asks; a mode that renders the owner's grid and never asks would be the
+answer to that, and is not this.
 
 **Pane commands are subscribed to on tmux ≥ 3.2 and polled below it.**
 `refresh-client -B tetmuxPaneCommand:%*:"#{pane_current_command}"` is what reports a command
@@ -577,8 +614,8 @@ is stated just as plainly — that is what makes the section trustworthy when it
 Three details:
 
 - **The detach pass belongs to an attach and nothing else.** `Kind.listClients(reconcileStale:)`
-  splits F4.17's orphan hunt from the plain re-read, or a refresh on every window rename would turn
-  a known blast radius (two live tetmuxen detaching each other once) into a fight.
+  splits F4.17's orphan hunt from the plain re-read: the pass judges the list against the registry
+  the same channel read one command earlier, and a refresh has no such reading.
 - **Our own channels are marked and excluded**, matched by tty against what each channel answered
   for `#{client_tty}` — the same "ours" F4.17 uses — or the dialog warns the user about themselves
   every time.

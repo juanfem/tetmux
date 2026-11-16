@@ -325,6 +325,9 @@ public struct TmuxClient: Identifiable, Equatable, Sendable {
     /// `client_activity` — when this client last did anything. The difference between a colleague at
     /// work in the session and a terminal somebody left open in another space last Tuesday.
     public let lastActivity: Date?
+    /// `TmuxCommand.clientKey` — what the client registry knows this client by. `nil` when tmux did
+    /// not say, and such a client is never a candidate for F4.17.
+    public let registryKey: String?
 
     public init(
         tty: String,
@@ -333,8 +336,10 @@ public struct TmuxClient: Identifiable, Equatable, Sendable {
         terminal: String = "",
         isControlMode: Bool = false,
         isOurs: Bool = false,
-        lastActivity: Date? = nil
+        lastActivity: Date? = nil,
+        registryKey: String? = nil
     ) {
+        self.registryKey = registryKey
         self.tty = tty
         self.sessionId = sessionId
         self.user = user

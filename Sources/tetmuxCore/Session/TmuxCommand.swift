@@ -113,9 +113,9 @@ public enum TmuxCommand {
     ///
     /// The SRD asks for "a distinctive client name", and tmux has none to give: `client_name` is the
     /// tty and there is no command to set it (verified on 3.7b — `display-message -p '#{client_name}'`
-    /// from a control client answers `/dev/ttys007`). `client_control_mode` is the tag that actually
-    /// exists. Every tetmux channel is a control-mode client and an ordinary terminal is not, so
-    /// "control-mode, and not one of the ttys we are holding" is the orphan.
+    /// from a control client answers `/dev/ttys007`). `client_control_mode` says a client is *a*
+    /// control-mode application and not which one, so whose it is comes from the client registry
+    /// below, matched on the last two fields here.
     ///
     /// The rest of it is who else is looking at a session, which is what the kill confirmation needs:
     /// `kill-session` ends the session for every client attached to it, and until the confirmation
@@ -138,13 +138,90 @@ public enum TmuxCommand {
     /// `client_user` arrived in tmux 3.3 (empty on 3.0 and 3.2a, checked against the matrix builds).
     /// An unknown `#{...}` expands to nothing rather than failing the command, so older servers lose
     /// the field and keep the row.
+    ///
+    /// The last two fields are `clientKey`'s, and are how a row is matched against the registry below.
     public static let clientsFormat =
         "#{client_tty}|#{client_control_mode}|#{session_id}|#{client_activity}"
-        + "|#{client_user}|#{client_termname}"
+        + "|#{client_user}|#{client_termname}|#{client_pid}|#{client_created}"
 
-    /// The tty of the client on the other end of *this* channel, which is how a channel recognises
-    /// itself in the list above.
-    public static let clientTtyQuery = "display-message -p '#{client_tty}'"
+    /// What a channel asks about itself at handshake: the tty and the key of the client on the other
+    /// end of it, which is how it recognises itself in the list above, and the registry as it stood.
+    ///
+    /// The registry goes last because it is the one field with spaces in it, and one question
+    /// because the three answers are only useful together and in this position in the FIFO.
+    public static let clientIdentityQuery = "display-message -p '\(clientIdentityFormat)'"
+
+    private static let clientIdentityFormat =
+        "#{client_tty}|#{client_pid}|#{client_created}|#{\(clientRegistryOption)}"
+
+    /// The same answer for every client of one session, registry included, in one command — so that
+    /// "who is here" and "which of them are tetmux" describe the same moment. `target` is already
+    /// quoted.
+    public static func sessionClientIdentities(target: String) -> String {
+        "list-clients -t \(target) -F '\(clientIdentityFormat)'"
+    }
+
+    // MARK: The client registry (F4.17)
+
+    /// The global user option in which every tetmux records the clients it opened.
+    ///
+    /// tmux cannot say who opened a client — `client_name` is the tty and nothing sets it — so "one
+    /// of mine from a connection that died" and "another tetmux, alive, on somebody's other Mac" are
+    /// the same row in `list-clients`. This is the missing column, kept on the server because that is
+    /// where the clients are: it lives exactly as long as they can. A *global* session option rather
+    /// than a server one (`-s`) because user options at that scope are what every tmux since 1.9 has
+    /// (it is where plugins keep theirs), and readable from any format as `#{@tetmux_clients}`.
+    public static let clientRegistryOption = "@tetmux_clients"
+
+    /// A client's identity for the registry: the pid of the tmux client process and when it attached.
+    ///
+    /// Not the tty, which is what tmux names a client by: a tty is handed straight back out, so an
+    /// entry outliving its client would in time name somebody else's. `nil` when tmux gave either
+    /// half as nothing, which is a row to leave alone rather than a key that matches other blanks.
+    public static func clientKey(pid: String, created: String) -> String? {
+        guard !pid.isEmpty, !created.isEmpty,
+              pid.allSatisfy(\.isNumber), created.allSatisfy(\.isNumber)
+        else { return nil }
+        return "\(pid)_\(created)"
+    }
+
+    /// One registry entry: which tetmux, and which client. `_` and nothing else as the separator —
+    /// `:` ends a format modifier and `,` separates a conditional's arms, and the removal below puts
+    /// the entry inside a format (verified on 3.0 through 3.7b: with `:` the substitution fails to
+    /// parse and the option is replaced by nothing at all, every other instance's entries with it).
+    public static func clientRegistryEntry(instance: String, clientKey: String) -> String {
+        "\(instance)_\(clientKey)"
+    }
+
+    /// Entries are only ever added and removed **by tmux, in one command each**, never read here and
+    /// written back: two instances handshaking at once would each write the value without the
+    /// other's entry, and an unrecorded client is one nobody will ever clean up. `-a` appends to a
+    /// string option, and every entry carries its own leading space so that removing one is removing
+    /// an exact substring.
+    public static func addToClientRegistry(_ entry: String) -> String {
+        "set-option -ag \(clientRegistryOption) \(quote(" " + entry))"
+    }
+
+    /// Removing the last entry leaves the option set and empty rather than unset. Unsetting only when
+    /// empty takes a conditional, and `if-shell -F` answers with a second `%begin`/`%end` block of
+    /// its own in control mode (verified on 3.0 and 3.7b) — one line, two responses, which is the one
+    /// thing command correlation cannot survive. An empty user option costs nothing.
+    public static func removeFromClientRegistry(_ entry: String) -> String {
+        "set-option -Fg \(clientRegistryOption) "
+            + quote("#{s/ \(entry)//:\(clientRegistryOption)}")
+    }
+
+    /// The registry as tmux reported it → its entries. Anything that is not `instance_pid_created`
+    /// is dropped: the option is on the user's server and anybody can write to it.
+    public static func parseClientRegistry(_ value: String) -> [(instance: String, clientKey: String)] {
+        value.split(separator: " ").compactMap { token in
+            let parts = token.split(separator: "_", omittingEmptySubsequences: false)
+            guard parts.count == 3, !parts[0].isEmpty,
+                  let key = clientKey(pid: String(parts[1]), created: String(parts[2]))
+            else { return nil }
+            return (String(parts[0]), key)
+        }
+    }
 
     /// The name tetmux subscribes its pane-command watch under. Distinctive so a `%subscription-changed`
     /// from something else attached to the same server is ignored rather than parsed as ours.

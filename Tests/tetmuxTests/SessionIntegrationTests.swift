@@ -2280,6 +2280,47 @@ final class SessionIntegrationTests: XCTestCase {
         )
     }
 
+    /// …on every tab, not only the one in front. From tmux 3.0 `window-size` is a window option:
+    /// `resize-window` sets it on each window it sizes, and unsetting it "on the session" reaches
+    /// that session's current window and no other. A clean quit used to leave every background tab
+    /// at `manual`, and the one-window test above could not see it.
+    func testDisconnectingRestoresWindowSizeOnEveryWindowItSized() async throws {
+        try XCTSkipIf(
+            (TmuxVersion(installedTmuxVersion() ?? "") ?? TmuxVersion("0")!) < TmuxVersion("2.9")!,
+            "per-window sizing needs tmux 2.9"
+        )
+        runTmux(["new-session", "-d", "-s", sessionName, "-x", "100", "-y", "30"])
+        runTmux(["new-window", "-d", "-t", sessionName])
+        runTmux(["new-window", "-d", "-t", sessionName])
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        let host = try await waitForHost(service) {
+            $0.activeSession?.windows.count == 3 && $0.tmuxVersion != nil
+        }
+        let windowIds = try XCTUnwrap(host.activeSession?.windows.map(\.id))
+        XCTAssertEqual(windowIds.count, 3)
+
+        // Every tab is built and measures itself, so every tab asks.
+        let view = UUID()
+        for windowId in windowIds {
+            await service.requestWindowSize(hostId: "local", windowId: windowId, cols: 90, rows: 25, owner: view)
+        }
+        let option: @Sendable (String) -> String = { windowId in
+            Self.query(["show-options", "-wv", "-t", windowId, "window-size"])
+        }
+        let allManual = try await waitFor(seconds: 10) { windowIds.allSatisfy { option($0) == "manual" } }
+        XCTAssertTrue(allManual, "not every window was sized: \(windowIds.map { "\($0)=\(option($0))" })")
+
+        // No polling, as above: the last of these is waited for, and tmux runs them in order.
+        await service.disconnectHost(hostId: "local")
+        XCTAssertEqual(
+            windowIds.filter { option($0) == "manual" }, [],
+            "window-size was left at manual on tabs the disconnect did not reach"
+        )
+    }
+
     /// `show-options -w` inherits, so this reports the session's effective value.
     private func windowSizeOption() -> String? {
         guard let tmux = PtyTransport.resolveTmux() else { return nil }
@@ -2483,6 +2524,9 @@ final class SessionIntegrationTests: XCTestCase {
     /// own pty and then simply abandoned — never read, never closed — which is exactly the state an
     /// ssh link dropping leaves behind. tmux still counts it as attached, and below 2.9 that is what
     /// drags every window in the session down to the orphan's 80×24.
+    ///
+    /// What makes it *ours* is the client registry: it is recorded there under the name of the
+    /// service that then attaches, as that service's own earlier channel would have been.
     func testAnOrphanedControlClientIsDetachedOnAttach() async throws {
         runTmux(["new-session", "-d", "-s", sessionName, "-x", "100", "-y", "30"])
 
@@ -2507,7 +2551,16 @@ final class SessionIntegrationTests: XCTestCase {
         XCTAssertTrue(attached, "the orphan never attached, so there is nothing to reconcile")
         let orphanTtys = Set(Self.clientTtys(of: session))
 
-        let service = SessionService()
+        let instance = UUID().uuidString
+        let orphanKey = try XCTUnwrap(
+            tmuxQuery(["list-clients", "-t", sessionName, "-F", "#{client_pid}_#{client_created}"])
+        )
+        // A stale entry beside it, for a client that is long gone: swept, whoever wrote it.
+        let stale = TmuxCommand.clientRegistryEntry(instance: UUID().uuidString, clientKey: "1_1")
+        runTmux(["set-option", "-g", TmuxCommand.clientRegistryOption,
+                 " \(stale) \(TmuxCommand.clientRegistryEntry(instance: instance, clientKey: orphanKey))"])
+
+        let service = SessionService(instanceId: instance)
         await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
         try await service.connectHost(hostId: "local", targetSession: sessionName)
         _ = try await waitForHost(service) { $0.connectionState == .connected }
@@ -2523,7 +2576,71 @@ final class SessionIntegrationTests: XCTestCase {
             "the orphan \(orphanTtys) was not detached; clients now \(Self.clientTtys(of: session))"
         )
 
+        // The registry now holds this service's one live client and nothing else: the orphan's entry
+        // went with the orphan, and the stale one with the sweep.
+        let liveKey = try XCTUnwrap(
+            tmuxQuery(["list-clients", "-t", sessionName, "-F", "#{client_pid}_#{client_created}"])
+        )
+        let live = TmuxCommand.clientRegistryEntry(instance: instance, clientKey: liveKey)
+        let swept = try await waitFor(seconds: 10) { Self.clientRegistry() == [live] }
+        XCTAssertTrue(swept, "registry after reconciliation: \(Self.clientRegistry()), expected [\(live)]")
+
+        // And a deliberate disconnect takes its own entry back out. No polling, for the reason
+        // `testDisconnectingRestoresTheSessionWindowSizeOption` gives: it is waited for.
         await service.disconnectHost(hostId: "local")
+        XCTAssertEqual(Self.clientRegistry(), [], "a disconnect left its client in the registry")
+    }
+
+    /// A control-mode client nobody registered is somebody else's — iTerm2's tmux integration, or a
+    /// tetmux older than the registry — and is left attached. Being control mode used to be enough
+    /// to be detached.
+    func testAnUnregisteredControlClientIsLeftAlone() async throws {
+        runTmux(["new-session", "-d", "-s", sessionName, "-x", "100", "-y", "30"])
+
+        let stranger = PtyTransport()
+        let strangerStream = try stranger.spawn(
+            executable: try XCTUnwrap(PtyTransport.resolveTmux()),
+            arguments: TmuxCommand.localArguments(mode: .attach(sessionName: sessionName)),
+            environment: Self.childLikeEnvironment(),
+            initialSize: (cols: 80, rows: 24)
+        )
+        let drain = Task { for try await _ in strangerStream {} }
+        defer { drain.cancel(); stranger.terminate() }
+
+        let session = sessionName
+        let attached = try await waitFor(seconds: 10) { !Self.controlClientPids(of: session).isEmpty }
+        XCTAssertTrue(attached, "the other control-mode client never attached")
+        let strangerPids = Set(Self.controlClientPids(of: session))
+
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+        _ = try await waitForHost(service) { $0.connectionState == .connected }
+
+        try await Task.sleep(for: .seconds(2))
+        let survivors = Set(Self.controlClientPids(of: session))
+        XCTAssertTrue(
+            strangerPids.isSubset(of: survivors),
+            "an unregistered control-mode client was detached: had \(strangerPids), now \(survivors)"
+        )
+
+        await service.disconnectHost(hostId: "local")
+    }
+
+    /// The client registry's entries, as the server holds them.
+    private static func clientRegistry() -> [String] {
+        guard let tmux = PtyTransport.resolveTmux() else { return ["(no tmux)"] }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmux)
+        process.arguments = ["show-options", "-gqv", TmuxCommand.clientRegistryOption]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+            .split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init)
     }
 
     /// The other half: a plain `tmux attach` is not control mode and must never be touched, however
@@ -2561,6 +2678,155 @@ final class SessionIntegrationTests: XCTestCase {
         )
 
         await service.disconnectHost(hostId: "local")
+    }
+
+    /// Two live tetmuxen on one server stay attached, both of them.
+    ///
+    /// F4.17 used to read "an orphan" as "any control-mode client that is not one of my channels",
+    /// which is also an exact description of another running tetmux — on a second Mac, or a second
+    /// copy on this one. Each detached the other on attach, and since being detached is an
+    /// orderly `%exit` that the recovery answers by attaching again, each attach detached the other
+    /// in turn. Two `SessionService`s in one process are two instances as far as tmux can tell.
+    ///
+    /// Asserted on the client *pids*, not on `.connected`: a client that was thrown out and came
+    /// straight back is connected too, and is exactly the failure.
+    func testTwoLiveInstancesLeaveEachOtherAttached() async throws {
+        runTmux(["new-session", "-d", "-s", sessionName, "-x", "100", "-y", "30"])
+        let session = sessionName
+
+        let first = SessionService()
+        await first.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await first.connectHost(hostId: "local", targetSession: sessionName)
+        _ = try await waitForHost(first) { $0.connectionState == .connected }
+        let firstAttached = try await waitFor(seconds: 10) { Self.controlClientPids(of: session).count == 1 }
+        XCTAssertTrue(firstAttached, "the first instance never attached")
+        let firstPids = Set(Self.controlClientPids(of: session))
+
+        let second = SessionService()
+        await second.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await second.connectHost(hostId: "local", targetSession: sessionName)
+        _ = try await waitForHost(second) { $0.connectionState == .connected }
+        let bothAttached = try await waitFor(seconds: 10) { Self.controlClientPids(of: session).count == 2 }
+        XCTAssertTrue(bothAttached, "the two instances were never attached together")
+        let bothPids = Set(Self.controlClientPids(of: session))
+        XCTAssertTrue(firstPids.isSubset(of: bothPids), "the first instance was replaced as the second attached")
+
+        // Every chance to misbehave: the detach, the `%exit`, and the re-attach that answers it.
+        try await Task.sleep(for: .seconds(3))
+        XCTAssertEqual(
+            Set(Self.controlClientPids(of: session)), bothPids,
+            "two live instances did not leave each other's clients alone"
+        )
+
+        await second.disconnectHost(hostId: "local")
+        // …and one leaving takes only its own client with it.
+        let firstSurvives = try await waitFor(seconds: 10) {
+            Set(Self.controlClientPids(of: session)) == firstPids
+        }
+        XCTAssertTrue(firstSurvives, "clients after the second instance left: \(Self.controlClientPids(of: session))")
+        await first.disconnectHost(hostId: "local")
+    }
+
+    /// Two instances showing the same tmux window: the last to ask has it, and it stays had.
+    ///
+    /// A window has one size and each instance has its own idea of what that should be, so one of
+    /// them is drawing a grid that does not fit its frame — that much is §3.3 and not a bug. What
+    /// must not happen is either of the two things that would make sharing unusable: the instances
+    /// trading the window back and forth (each `%layout-change` prompting the other to re-assert),
+    /// or one of them *leaving* and taking the other's size with it, since leaving unsets the
+    /// session's `window-size` and the one who stayed is still relying on it.
+    func testTwoInstancesSizingOneWindowSettleOnTheLastToAsk() async throws {
+        try XCTSkipIf(
+            (TmuxVersion(installedTmuxVersion() ?? "") ?? TmuxVersion("0")!) < TmuxVersion("2.9")!,
+            "per-window sizing needs tmux 2.9"
+        )
+        runTmux(["new-session", "-d", "-s", sessionName, "-x", "100", "-y", "30"])
+        let session = sessionName
+        let size: @Sendable () -> String = {
+            Self.query(["display-message", "-p", "-t", session, "#{window_width}x#{window_height}"])
+        }
+
+        let first = SessionService()
+        await first.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await first.connectHost(hostId: "local", targetSession: sessionName)
+        let host = try await waitForHost(first) { $0.activeSession?.activeWindow != nil && $0.tmuxVersion != nil }
+        let windowId = try XCTUnwrap(host.activeSession?.activeWindow?.id)
+        let firstView = UUID()
+        await first.requestWindowSize(hostId: "local", windowId: windowId, cols: 120, rows: 40, owner: firstView)
+        let firstSized = try await waitFor(seconds: 10) { size() == "120x40" }
+        XCTAssertTrue(firstSized, "the first instance never sized the window; it is \(size())")
+
+        let second = SessionService()
+        await second.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await second.connectHost(hostId: "local", targetSession: sessionName)
+        _ = try await waitForHost(second) { $0.activeSession?.activeWindow != nil && $0.tmuxVersion != nil }
+        let secondView = UUID()
+        await second.requestWindowSize(hostId: "local", windowId: windowId, cols: 90, rows: 25, owner: secondView)
+        let secondSized = try await waitFor(seconds: 10) { size() == "90x25" }
+        XCTAssertTrue(secondSized, "the second instance's request never landed; the window is \(size())")
+
+        // No fight: the first instance has been told about a size it did not ask for, and says nothing.
+        try await Task.sleep(for: .seconds(2))
+        XCTAssertEqual(size(), "90x25", "the first instance took the window back unasked")
+
+        // The first instance leaves. The second is still looking at 90x25.
+        await first.disconnectHost(hostId: "local")
+        // Typing is what makes tmux look again: under `window-size latest` — which is what the
+        // window falls back to if leaving unset `manual` on it — a keystroke makes this client the
+        // latest, and the window takes the *client's* size, which nobody chose.
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+        await second.sendKeys(hostId: "local", paneId: paneId, text: "echo hi\r")
+        try await Task.sleep(for: .seconds(1))
+        XCTAssertEqual(size(), "90x25", "an instance leaving resized the window under the one that stayed")
+        XCTAssertEqual(
+            Self.query(["show-options", "-wv", "-t", session, "window-size"]), "manual",
+            "an instance leaving took `window-size manual` off a window another instance is sizing"
+        )
+
+        // …and can still size it, which is what `window-size` being unset under it would have cost.
+        await second.requestWindowSize(hostId: "local", windowId: windowId, cols: 110, rows: 35, owner: secondView)
+        let resized = try await waitFor(seconds: 10) { size() == "110x35" }
+        XCTAssertTrue(resized, "the instance that stayed could no longer size the window; it is \(size())")
+
+        // The last one out is the one that puts it back.
+        await second.disconnectHost(hostId: "local")
+        XCTAssertNotEqual(
+            Self.query(["show-options", "-wv", "-t", session, "window-size"]), "manual",
+            "the last instance to leave left window-size at manual"
+        )
+    }
+
+    private static func query(_ arguments: [String]) -> String {
+        guard let tmux = PtyTransport.resolveTmux() else { return "" }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmux)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The pid of every control-mode client attached to `session` — a client's identity across a
+    /// detach and re-attach, which its tty is not (macOS hands the same tty straight back out).
+    private static func controlClientPids(of session: String) -> [String] {
+        guard let tmux = PtyTransport.resolveTmux() else { return [] }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmux)
+        process.arguments = ["list-clients", "-t", session, "-F", "#{client_control_mode} #{client_pid}"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+            .split(separator: "\n")
+            .filter { $0.hasPrefix("1 ") }
+            .map { String($0.dropFirst(2)) }
     }
 
     /// F4.10 — the model knows who else is attached, and knows which of them is us.
