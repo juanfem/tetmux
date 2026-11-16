@@ -12,7 +12,7 @@ thing it constrains, and where somebody will actually meet it. A second copy in 
 list nobody reads twice and one that drifts from the original the first time either is edited;
 `git log` holds the narrative. This paragraph replaced ninety lines of exactly that on 2026-08-07.
 
-**As of 2026-10-19: 1 open (a flaky test), 8 parked, and nothing here blocks a release.** On 2026-08-06 the last
+**As of 2026-11-16: 2 open (a flaky test, the web client), 8 parked, and nothing here blocks a release.** On 2026-08-06 the last
 two then-open entries left the list without being implemented, and both say so where it counts
 rather than here: P6.7's launch half was amended to name **warm** launch (SRD §6,
 `docs/measurements.md`), and signing moved from *blocked* to *parked* (SRD §2.5), because "blocked
@@ -25,6 +25,32 @@ References point into current `main`. Line numbers drift; the symbol names besid
 ---
 
 ## Open
+
+- [ ] **The web client (`Relay/`) is at step 2 of 4: one host, one pane.** Steps 1 and 2 landed on
+  2026-11-16: `tetmuxPolicy` exists, and `tetmux-relay` serves the attached session's active pane to
+  xterm.js over a WebSocket, with a key bar for the keys iOS has no keyboard for. Verified against a
+  throwaway tmux server (keys, paste, resize, repaint on reconnect, SIGTERM restoring `window-size`)
+  and in desktop Chrome — **not yet on an iPhone, which is the point of step 2**: Safari's handling
+  of xterm.js's hidden textarea (autocorrect, dictation, selection) is the risk to measure before
+  anything is built on top. What remains, in order:
+  - **Step 3, the relay protocol.** Topology diffs to the browser (hosts → sessions → windows →
+    panes), choosing which pane to show, and several hosts in one process — `SessionService` already
+    holds them; the relay currently `addHost`s one. Every host from `hosts.json`, connected on demand.
+  - **Step 4, the phone UI.** One pane at a time with a switcher, tabs as a list or swipe, the host
+    tree as a sheet. F4.9/F4.10's close goes through `ClosePolicy`, so the phone asks exactly when
+    the Mac would.
+  - **Geometry against the Mac.** Each socket claims its window's size (`claimWindowSize`), so a
+    phone that connects resizes the tmux window under a Mac showing the same one, and the Mac takes
+    it back when it next asks. A follower mode — the phone renders tmux's size, scaled or panned, and
+    never asks — is probably the right default when another client is attached.
+  - **ssh prompts.** The relay reports a waiting prompt in the page's status line and cannot answer
+    it. There is no Keychain on Linux; key auth with the relay's own key is the supported path.
+  - **xterm.js comes from jsdelivr.** Fine on a phone with internet; a relay on a closed network
+    needs it vendored into `Relay/Web`.
+  - **A shutdown that hung once.** SIGTERM with a desktop Chrome tab just closed left the process
+    running, and a second SIGTERM did nothing. Not reproduced against scripted clients (open socket,
+    keep-alive, closed socket). The relay now handles the signals itself with a 5 s deadline, so the
+    hang cannot recur in that form, but its cause is unknown.
 
 - [ ] **`testAStartDirectoryAndAnInitialCommandBothApply` failed once on CI and passed on a rerun.**
   Run on `37bdd8f`, 2026-09-29, macos-15-arm64 runner with Homebrew tmux 3.7c. The pane still read

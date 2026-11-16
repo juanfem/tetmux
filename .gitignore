@@ -18,3 +18,7 @@ xcuserdata/
 # The R3.6 tmux matrix: sources and binaries built by Scripts/build-tmux-matrix.sh. A means, not an
 # artifact — what gets committed is the fixtures they were used to capture.
 /.tmux-matrix/
+
+# The relay is its own package (Relay/Package.swift), with its own build directory.
+/Relay/.build/
+/Relay/.swiftpm/

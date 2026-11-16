@@ -1,0 +1,7 @@
+{
+  "name": "tetmux",
+  "short_name": "tetmux",
+  "display": "standalone",
+  "background_color": "#1b1b1d",
+  "theme_color": "#1b1b1d"
+}

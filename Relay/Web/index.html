@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1b1b1d">
+<link rel="manifest" href="manifest.webmanifest">
+<title>tetmux</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<style>
+  :root {
+    --bg: #1b1b1d;
+    --bar: #26262a;
+    --key: #3a3a40;
+    --key-on: #0a84ff;
+    --fg: #e8e8ea;
+    --dim: #9a9aa2;
+    --ok: #30d158;
+    --wait: #ffd60a;
+    --bad: #ff453a;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 14px -apple-system, system-ui, sans-serif; overscroll-behavior: none; }
+  /* Sized from visualViewport by script, so the key bar sits on top of the iOS keyboard rather
+     than behind it. 100% is only the first frame. */
+  #app { position: fixed; inset: 0 0 auto 0; height: 100%; display: flex; flex-direction: column;
+    padding-top: env(safe-area-inset-top); box-sizing: border-box; }
+  #top { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--bar);
+    font-size: 13px; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--wait); flex: none; }
+  #dot.ok { background: var(--ok); }
+  #dot.bad { background: var(--bad); }
+  #label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #note { color: var(--dim); }
+  /* tmux owns the grid (§3.3). When another client owns the window's size the grid can be larger
+     than the screen, and then it pans rather than reflowing. */
+  #term { flex: 1; min-height: 0; overflow: auto; padding: 4px; -webkit-overflow-scrolling: touch; }
+  #keys { display: flex; gap: 6px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    background: var(--bar); overflow-x: auto; flex: none; }
+  button { font: inherit; color: var(--fg); background: var(--key); border: 0; border-radius: 6px;
+    padding: 8px 11px; min-width: 40px; flex: none; touch-action: manipulation; }
+  button.on { background: var(--key-on); }
+  #top button { padding: 3px 9px; min-width: 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="top">
+    <span id="dot"></span>
+    <span id="label">connecting…</span>
+    <span id="note"></span>
+    <button data-font="-1" aria-label="Smaller text">A−</button>
+    <button data-font="1" aria-label="Larger text">A+</button>
+  </div>
+  <div id="term"></div>
+  <div id="keys">
+    <button data-key="esc">esc</button>
+    <button data-key="ctrl" id="ctrl">ctrl</button>
+    <button data-key="tab">tab</button>
+    <button data-key="left" aria-label="Left">←</button>
+    <button data-key="down" aria-label="Down">↓</button>
+    <button data-key="up" aria-label="Up">↑</button>
+    <button data-key="right" aria-label="Right">→</button>
+    <button data-text="|">|</button>
+    <button data-text="~">~</button>
+    <button data-text="/">/</button>
+    <button data-text="-">-</button>
+  </div>
+</div>
+<script>
+(() => {
+  const token = new URLSearchParams(location.search).get('token') || '';
+  const $ = (id) => document.getElementById(id);
+  const storage = {
+    get(key, fallback) { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } },
+    set(key, value) { try { localStorage.setItem(key, value); } catch {} },
+  };
+
+  let fontSize = Number(storage.get('fontSize', '12')) || 12;
+  const term = new Terminal({
+    fontSize,
+    fontFamily: 'Menlo, "SF Mono", ui-monospace, monospace',
+    scrollback: 5000,
+    cursorBlink: true,
+    theme: { background: '#1b1b1d' },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($('term'));
+
+  // iOS would otherwise capitalise the first letter of every command and "correct" flags.
+  const ta = term.textarea;
+  if (ta) {
+    ta.setAttribute('autocapitalize', 'off');
+    ta.setAttribute('autocorrect', 'off');
+    ta.setAttribute('autocomplete', 'off');
+    ta.spellcheck = false;
+  }
+
+  // ---- the socket -------------------------------------------------------------------------------
+
+  let ws = null;
+  let retry = 0;
+  let retryTimer = null;
+
+  function send(message) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+  }
+
+  function connect() {
+    clearTimeout(retryTimer);
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${scheme}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+    ws.binaryType = 'arraybuffer';
+    setDot('');
+    ws.onopen = () => { retry = 0; lastAsked = null; askForSize(); };
+    ws.onmessage = (event) => {
+      if (typeof event.data !== 'string') {
+        term.write(new Uint8Array(event.data));
+        return;
+      }
+      const message = JSON.parse(event.data);
+      if (message.t === 'pane') {
+        // A new stream: whatever the emulator holds belongs to another pane, or to before the link
+        // dropped. The repaint that follows starts from a clean screen.
+        term.reset();
+        adopt(message.cols, message.rows);
+        $('label').textContent = `${message.host} · ${message.session} · ${message.label}`;
+        lastAsked = null;
+        askForSize();
+      } else if (message.t === 'size') {
+        adopt(message.cols, message.rows);
+      } else if (message.t === 'status') {
+        setDot(message.state === 'connected' ? 'ok' : '');
+        $('note').textContent = message.text || (message.state === 'connected' ? '' : message.state);
+      }
+    };
+    ws.onclose = () => {
+      setDot('bad');
+      // Backed off, but short: the usual cause is iOS having suspended the page, and the user is
+      // looking at it again by the time this fires.
+      const delay = Math.min(10000, 500 * 2 ** retry++);
+      retryTimer = setTimeout(connect, delay);
+    };
+  }
+
+  // Coming back to the page is the moment the link is most likely dead and most wanted.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { retry = 0; connect(); }
+  });
+  window.addEventListener('pageshow', () => connect());
+
+  function setDot(state) { $('dot').className = state; }
+
+  // ---- geometry (§3.3: ask, then lay out what tmux answers) ---------------------------------------
+
+  let lastAsked = null;
+  let sizeTimer = null;
+
+  function adopt(cols, rows) {
+    if (cols > 0 && rows > 0 && (cols !== term.cols || rows !== term.rows)) term.resize(cols, rows);
+  }
+
+  function askForSize() {
+    clearTimeout(sizeTimer);
+    sizeTimer = setTimeout(() => {
+      const d = fit.proposeDimensions();
+      if (!d || !(d.cols > 1) || !(d.rows > 1)) return;
+      const key = `${d.cols}x${d.rows}`;
+      if (key === lastAsked) return;
+      lastAsked = key;
+      send({ t: 'resize', cols: d.cols, rows: d.rows });
+    }, 120);
+  }
+
+  function layout() {
+    const vv = window.visualViewport;
+    const app = $('app');
+    app.style.height = `${vv ? vv.height : window.innerHeight}px`;
+    app.style.transform = vv ? `translateY(${vv.offsetTop}px)` : '';
+    askForSize();
+  }
+  if (window.visualViewport) {
+    visualViewport.addEventListener('resize', layout);
+    visualViewport.addEventListener('scroll', layout);
+  }
+  window.addEventListener('resize', layout);
+
+  // ---- input --------------------------------------------------------------------------------------
+
+  let ctrl = false;
+  function setCtrl(on) { ctrl = on; $('ctrl').classList.toggle('on', on); }
+
+  function withCtrl(data) {
+    if (data.length !== 1) return data;
+    if (data === ' ') return '\x00';
+    if (data === '?') return '\x7f';
+    const code = data.toUpperCase().charCodeAt(0);
+    return code >= 64 && code <= 95 ? String.fromCharCode(code - 64) : data;
+  }
+
+  term.onData((data) => {
+    if (ctrl) { data = withCtrl(data); setCtrl(false); }
+    send({ t: 'in', d: data });
+  });
+
+  // A paste goes to tmux as a paste, so bracketed-paste markers are tmux's to add (T5.4) and a long
+  // one travels through a buffer rather than as keystrokes.
+  term.element.addEventListener('paste', (event) => {
+    const text = event.clipboardData && event.clipboardData.getData('text/plain');
+    if (!text) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    send({ t: 'paste', d: text });
+  }, true);
+
+  const keys = {
+    esc: () => '\x1b',
+    tab: () => '\t',
+    up: () => arrow('A'),
+    down: () => arrow('B'),
+    right: () => arrow('C'),
+    left: () => arrow('D'),
+  };
+  function arrow(letter) {
+    return (term.modes && term.modes.applicationCursorKeysMode ? '\x1bO' : '\x1b[') + letter;
+  }
+
+  // pointerdown + preventDefault keeps focus in the terminal, so tapping a key does not dismiss the
+  // iOS keyboard.
+  for (const button of document.querySelectorAll('button')) {
+    button.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      if (button.dataset.font) {
+        fontSize = Math.max(8, Math.min(24, fontSize + Number(button.dataset.font)));
+        storage.set('fontSize', String(fontSize));
+        term.options.fontSize = fontSize;
+        askForSize();
+        return;
+      }
+      if (button.dataset.key === 'ctrl') { setCtrl(!ctrl); term.focus(); return; }
+      let data = button.dataset.text ?? keys[button.dataset.key]();
+      if (ctrl) { data = withCtrl(data); setCtrl(false); }
+      send({ t: 'in', d: data });
+      term.focus();
+    });
+  }
+
+  layout();
+  connect();
+  term.focus();
+})();
+</script>
+</body>
+</html>
