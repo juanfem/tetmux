@@ -24,13 +24,6 @@ let package = Package(
             targets: ["tetmuxPolicy"]
         ),
     ],
-    dependencies: [
-        // Held on 1.15: 1.16 started snapping the cell width to the *nearest* pixel instead of up,
-        // which squeezes the default 12pt Menlo (7.22pt advance) into 7.0pt cells — visibly tighter
-        // text. And `from:` would also admit 1.99, SwiftTerm's API-breaking preview of 2.0. See the
-        // SwiftTerm entry in TODO.md before lifting this.
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", .upToNextMinor(from: "1.15.0"))
-    ],
     targets: [
         // `forkpty` is in libutil on glibc and is not exposed by the Glibc module. Linux-only: the
         // Darwin module already provides it, and `pty.h` does not exist on macOS.
@@ -80,6 +73,18 @@ let package = Package(
 // design. The manifest is ordinary Swift evaluated on the host, so the honest way to say "this half
 // of the package does not exist off macOS" is to not declare it there.
 #if os(macOS)
+// The dependency as well as the targets that use it. SwiftPM fetches every dependency a package
+// declares, whether or not anything being built uses it — so declared unconditionally, a Linux build
+// of the relay (`Relay/`, which depends on this package for `tetmuxCore` alone) cloned SwiftTerm for
+// nothing, and a corrupted clone in the SwiftPM cache failed a build that never compiles it.
+//
+// Held on 1.15: 1.16 started snapping the cell width to the *nearest* pixel instead of up, which
+// squeezes the default 12pt Menlo (7.22pt advance) into 7.0pt cells — visibly tighter text. And
+// `from:` would also admit 1.99, SwiftTerm's API-breaking preview of 2.0. See the SwiftTerm entry in
+// TODO.md before lifting this.
+package.dependencies.append(
+    .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", .upToNextMinor(from: "1.15.0"))
+)
 package.products.append(
     .executable(
         name: "tetmux",
