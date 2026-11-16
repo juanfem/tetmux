@@ -1942,7 +1942,18 @@ final class SessionIntegrationTests: XCTestCase {
         // `cat` writes stdin to the file verbatim and enables no bracketed-paste mode, so what the file
         // holds is what the pane received.
         await service.sendKeys(hostId: "local", paneId: paneId, text: "cat > \(destination.path)\r")
-        try await Task.sleep(for: .milliseconds(700))
+        // **Until `cat` is what the pane is running**, not for a fixed time. The session is one this
+        // test's own attach created, so its shell is still starting, and a shell with a slow rc file
+        // can take longer than any sleep chosen here. Pasting before it has started `cat` leaves the
+        // whole paste as type-ahead in the pane's tty, whose canonical input queue macOS caps at
+        // 1024 bytes: the fixture is deliberately larger, and what came out the far side had line 13
+        // replaced by a second line 12. That was this test failing on tmux 3.0 whenever one
+        // particular test ran before it and passing alone — a race in the test, found by reading the
+        // pane (`capture-pane` showed the paste echoed *above* the shell's first prompt).
+        let catIsReading = try await waitFor(seconds: 15) {
+            Self.query(["display-message", "-p", "-t", paneId, "#{pane_current_command}"]) == "cat"
+        }
+        XCTAssertTrue(catIsReading, "the pane never started `cat`, so there is nothing to paste into")
 
         await service.paste(hostId: "local", paneId: paneId, text: text)
         try await Task.sleep(for: .seconds(2))
@@ -1964,8 +1975,10 @@ final class SessionIntegrationTests: XCTestCase {
         let expectedLines = lines
         let arrivedLines = arrived.components(separatedBy: .newlines).filter { !$0.isEmpty }
         XCTAssertEqual(arrivedLines.count, expectedLines.count, "line count changed:\n\(arrived)")
-        for (expected, actual) in zip(expectedLines, arrivedLines) {
-            XCTAssertEqual(actual, expected)
+        // The whole of what arrived goes in the message: "line 12 where 13 was expected" does not say
+        // whether a line was dropped, doubled or moved, and the file is gone by the time anyone asks.
+        for (index, (expected, actual)) in zip(expectedLines, arrivedLines).enumerated() {
+            XCTAssertEqual(actual, expected, "line \(index) of what the pane received:\n\(arrived)")
         }
         // The specific corruptions the old encoding would have produced.
         XCTAssertFalse(arrived.contains(FileManager.default.homeDirectoryForCurrentUser.path),

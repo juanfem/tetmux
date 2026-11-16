@@ -167,6 +167,19 @@ cancellation reaches them (`for await` on an `AsyncStream` returns nil, `Task.sl
 returns what arrived rather than throwing, so a missed marker **fails with the output it did get**
 instead of skipping — a skip being exactly as green as a pass.
 
+**Typing into a pane waits for the program that will read it, not for a sleep.** A session the
+test's own attach created has a shell that is still starting, and what is typed before it is ready
+sits in the pane's tty as type-ahead — whose canonical input queue macOS caps at 1024 bytes.
+`testAMultiLinePasteArrivesIntact` typed `cat > file`, slept 700 ms and pasted 1.5 KB; whenever the
+shell took longer, the paste overflowed the queue and the file had line 13 replaced by a second
+line 12. It showed only on tmux 3.0, only when `testAMovedOrLinkedTabLandsAtTheEndOfTheDestination`
+ran first, and never alone, which read as a version bug in paste for as long as nobody looked at
+the pane: `capture-pane` had the paste echoed *above* the shell's first prompt. (Why that
+combination, and why later versions come through intact, was not established.) It now polls
+`#{pane_current_command}` until it is `cat`. And an assertion over lines carries **everything that
+arrived** in its message — "line 12 where 13 was expected" does not say whether a line was dropped,
+doubled or moved.
+
 Flow-control decisions are asserted through the **diagnostic logger**, not `HostState`: pausing a
 pane is a property of the channel and deliberately invisible to the model, so `LogSink` is the only
 seam there is. The stalled-viewer test never reads its stream, on purpose — reading it would make
