@@ -450,12 +450,19 @@ struct SidebarView: View {
             // Item 3 — a host is where sessions come from, so the button to make one lives on it.
             let showsActions = hoveredRow == host.id || host.id == state.selectedHostId
             rowActions {
+                // ⌥ is "the other reading of this click", as on every modified control in the tree:
+                // the new session gets a macOS window of its own instead of taking over this one.
+                // Not armed — nothing is lost either way, and red here means "will not ask".
                 RowButton(
                     glyph: .plus,
-                    help: "New session on \(host.config.name)",
+                    help: modifiers.isOptionHeld
+                        ? "New session on \(host.config.name) in a new window"
+                        : "New session on \(host.config.name)",
                     isVisible: showsActions
                 ) {
-                    model.createSessionWithDefaultName(hostId: host.id, revealIn: state)
+                    model.createSessionWithDefaultName(
+                        hostId: host.id, revealIn: state, preferNewWindow: OptionKey.isHeld
+                    )
                 }
                 // Laid out whether or not the host is live, so a host connecting or dropping does not
                 // shift the row's other button sideways under the pointer.
@@ -489,7 +496,7 @@ struct SidebarView: View {
             Button("Collapse All Sessions") { setExpanded(host, false) }
             Divider()
             if host.connectionState.isActive {
-                Button("New Session") { model.createSessionWithDefaultName(hostId: host.id, revealIn: state) }
+                newSessionItem(host: host)
                 Button("Detach Other Clients") {
                     Task { await model.service.detachOtherClients(hostId: host.id) }
                 }
@@ -515,7 +522,7 @@ struct SidebarView: View {
                 if !host.config.isLocal {
                     Button("Reconnect") { model.reconnect(host.id) }
                 }
-                Button("New Session") { model.createSessionWithDefaultName(hostId: host.id, revealIn: state) }
+                newSessionItem(host: host)
             }
             Divider()
             // The local host is editable too now — it has a start directory and a clipboard policy,
@@ -800,6 +807,32 @@ struct SidebarView: View {
                 )
             }
             .help(fullCommand)
+        }
+    }
+
+    /// The host menu's New Session, with ⌥ swapping in a window of its own — the `+` beside it does
+    /// the same. An alternate item for the reason `copyAttachCommandItem` gives: a context menu
+    /// snapshots its titles at open, so only AppKit swapping the item can keep the words and the click
+    /// in step. macOS 14 reads the click-time flags behind the plain title.
+    @ViewBuilder
+    private func newSessionItem(host: HostState) -> some View {
+        if #available(macOS 15.0, *) {
+            Button("New Session") {
+                model.createSessionWithDefaultName(hostId: host.id, revealIn: state)
+            }
+            .modifierKeyAlternate(.option) {
+                Button("New Session in New Window") {
+                    model.createSessionWithDefaultName(
+                        hostId: host.id, revealIn: state, preferNewWindow: true
+                    )
+                }
+            }
+        } else {
+            Button("New Session") {
+                model.createSessionWithDefaultName(
+                    hostId: host.id, revealIn: state, preferNewWindow: OptionKey.isHeld
+                )
+            }
         }
     }
 
