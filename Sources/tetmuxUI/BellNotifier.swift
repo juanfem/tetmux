@@ -1,5 +1,6 @@
 import AppKit
 import UserNotifications
+import tetmuxPolicy
 
 /// F4.31 — turns a pane's bell into a Notification Center alert when tetmux is in the background.
 ///

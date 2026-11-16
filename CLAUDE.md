@@ -98,19 +98,23 @@ Several fixtures in `ControlCodecTests` were produced exactly that way.
 
 ## Architecture
 
-Four layers. Everything below the UI is plain Swift with no AppKit dependency.
+Five layers. Everything below the UI is plain Swift with no AppKit dependency.
 
 ```
-tetmux      app entry point + --diagnose CLI
-tetmuxUI    SwiftUI/AppKit chrome; SwiftTerm pane surfaces; KeychainStore   (@MainActor)
-tetmuxCore  SessionService (actor) · ControlCodec · LayoutParser · PtyTransport · SshPromptDetector
-CUtil       systemLibrary shim, Linux only — `forkpty` lives in libutil on glibc
+tetmux        app entry point + --diagnose CLI
+tetmuxUI      SwiftUI/AppKit chrome; SwiftTerm pane surfaces; KeychainStore   (@MainActor)
+tetmuxPolicy  decisions needing no channel and no AppKit: ClosePolicy · ActivityPolicy · TabOrder
+tetmuxCore    SessionService (actor) · ControlCodec · LayoutParser · PtyTransport · SshPromptDetector
+CUtil         systemLibrary shim, Linux only — `forkpty` lives in libutil on glibc
 ```
 
-**`tetmuxCore` must not import AppKit, SwiftUI, or SwiftTerm.** That is the §2.4 portability hedge,
-and its immediate payoff is that the interesting logic stays headlessly testable. `NetworkStateMonitor`
-lives in `tetmuxUI` precisely because it needs `NSWorkspace`. `CUtil` and the Linux CI job are the
-other half of that hedge: a hedge that is never exercised has already stopped being a hedge.
+**`tetmuxCore` and `tetmuxPolicy` must not import AppKit, SwiftUI, or SwiftTerm.** That is the §2.4
+portability hedge, and its immediate payoff is that the interesting logic stays headlessly testable.
+`NetworkStateMonitor` lives in `tetmuxUI` precisely because it needs `NSWorkspace`. `tetmuxPolicy` is
+where a decision moves out of `AppModel` once it needs only a topology snapshot: the macOS app and
+the relay (`Relay/`, a separate package that serves a browser) then share it instead of each
+re-deriving it. `CUtil` and the Linux CI job are the other half of that hedge: a hedge that is never
+exercised has already stopped being a hedge.
 
 Where things are, since the docs name symbols without saying which file holds them:
 

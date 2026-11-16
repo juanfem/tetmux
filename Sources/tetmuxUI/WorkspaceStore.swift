@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import tetmuxCore
+import tetmuxPolicy
 
 /// One macOS window's place in the tree, as it should come back on the next launch.
 ///

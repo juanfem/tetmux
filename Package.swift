@@ -16,6 +16,13 @@ let package = Package(
             name: "tetmuxCore",
             targets: ["tetmuxCore"]
         ),
+        // The decisions that need no channel and no AppKit — F4.9's close outcome, F4.31's activity
+        // edge, the tab-drop arithmetic. A library product so that a second front end (the relay in
+        // `Relay/`, which serves a browser) asks them exactly as the macOS app does.
+        .library(
+            name: "tetmuxPolicy",
+            targets: ["tetmuxPolicy"]
+        ),
     ],
     dependencies: [
         // Held on 1.15: 1.16 started snapping the cell width to the *nearest* pixel instead of up,
@@ -35,6 +42,13 @@ let package = Package(
             ],
             path: "Sources/tetmuxCore"
         ),
+        // Linux-buildable like the core, and for the same reason: the logic that decides what a
+        // gesture *does* stays headlessly testable, and stays shared by every front end.
+        .target(
+            name: "tetmuxPolicy",
+            dependencies: ["tetmuxCore"],
+            path: "Sources/tetmuxPolicy"
+        ),
         // The half of the suite that needs nothing but `tetmuxCore` — and so the half that can run
         // on Linux, which is what turns §2.4's hedge from a claim into a fact. §8 asks for the
         // fixture replay on both platforms; the Ubuntu job built the library and ran no test at all,
@@ -49,6 +63,11 @@ let package = Package(
             // Scripts/capture-fixtures.py. `.copy` rather than `.process`: these are raw protocol
             // captures containing arbitrary bytes, and processing would be free to transform them.
             resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "tetmuxPolicyTests",
+            dependencies: ["tetmuxCore", "tetmuxPolicy"],
+            path: "Tests/tetmuxPolicyTests"
         ),
     ]
 )
@@ -72,6 +91,7 @@ package.targets.append(contentsOf: [
         name: "tetmuxUI",
         dependencies: [
             "tetmuxCore",
+            "tetmuxPolicy",
             .product(name: "SwiftTerm", package: "SwiftTerm"),
         ],
         path: "Sources/tetmuxUI",
@@ -93,7 +113,7 @@ package.targets.append(contentsOf: [
         // `tetmuxUI` as well as the core: `AppModel` holds real logic — the close decision
         // (F4.9), prompt handling, keymap resolution — that needed no AppKit to exercise and was
         // simply unreachable from a test bundle that did not link it.
-        dependencies: ["tetmuxCore", "tetmuxUI"],
+        dependencies: ["tetmuxCore", "tetmuxPolicy", "tetmuxUI"],
         path: "Tests/tetmuxTests",
         // T5.7's rendering corpus: real bytes, one file per case. `.copy` for the same reason the
         // protocol fixtures use it — the point is the exact bytes, and processing is free to

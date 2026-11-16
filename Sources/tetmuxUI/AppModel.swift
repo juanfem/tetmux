@@ -2,6 +2,7 @@ import AppKit
 import Observation
 import SwiftUI
 import tetmuxCore
+import tetmuxPolicy
 
 /// The single `@MainActor` view model. Everything below it is plain Swift with no AppKit
 /// dependency; this is the only place where the two worlds meet.
@@ -580,55 +581,8 @@ public final class AppModel {
     // MARK: - Notifications (F4.31)
 
     /// One window that has just started printing, and what to call it.
-    public struct ActivityAlert: Equatable, Sendable {
-        public let hostId: String
-        public let windowId: String
-        /// `displayLabel`, which is the name if the user chose one and what is running otherwise —
-        /// the same string the tab and the tree show, so the banner names the window they can see.
-        public let label: String
-    }
-
-    /// Which watched windows went from quiet to active between two snapshots.
-    ///
-    /// Static and pure because it is the part that is silently wrong when it is wrong. `hasActivity`
-    /// stays true until the window is looked at, so reporting on the *value* rather than on the
-    /// *transition* would re-fire on every topology snapshot for as long as the window stays unread —
-    /// a job that prints once would notify for the rest of the afternoon. A window that has only just
-    /// appeared has no previous value, and is deliberately not reported: attaching to a server with a
-    /// watched window already active is not the same event as it becoming active.
-    static func newlyActive(
-        from previous: [HostState], to current: [HostState], watching watched: Set<WatchedWindow>
-    ) -> [ActivityAlert] {
-        guard !watched.isEmpty else { return [] }
-        var wasActive: [WatchedWindow: Bool] = [:]
-        for host in previous {
-            for session in host.sessions {
-                for window in session.windows {
-                    // A window linked into several sessions appears more than once and is one window;
-                    // active anywhere is active.
-                    let key = WatchedWindow(hostId: host.id, windowId: window.id)
-                    wasActive[key] = (wasActive[key] ?? false) || window.hasActivity
-                }
-            }
-        }
-
-        var alerts: [ActivityAlert] = []
-        var reported: Set<WatchedWindow> = []
-        for host in current {
-            for session in host.sessions {
-                for window in session.windows where window.hasActivity {
-                    let key = WatchedWindow(hostId: host.id, windowId: window.id)
-                    guard watched.contains(key), !reported.contains(key) else { continue }
-                    guard let previouslyActive = wasActive[key], !previouslyActive else { continue }
-                    reported.insert(key)
-                    alerts.append(ActivityAlert(
-                        hostId: host.id, windowId: window.id, label: window.displayLabel
-                    ))
-                }
-            }
-        }
-        return alerts
-    }
+    /// F4.31's alert, which now lives in `tetmuxPolicy` beside the decision that produces it.
+    public typealias ActivityAlert = tetmuxPolicy.ActivityAlert
 
     private func reportActivity(from previous: [HostState], to current: [HostState]) {
         guard notifications.activity else { return }
@@ -641,7 +595,7 @@ public final class AppModel {
         // anything without an application, and `BellNotifier` would be posting into a process with
         // no bundle identifier, which traps.
         guard let app = NSApp, !app.isActive else { return }
-        for alert in Self.newlyActive(from: previous, to: current, watching: watchedWindows) {
+        for alert in ActivityPolicy.newlyActive(from: previous, to: current, watching: watchedWindows) {
             BellNotifier.shared.post(
                 title: "Activity in \(alert.label)",
                 body: "A tab you are watching started printing."
@@ -1156,19 +1110,10 @@ public final class AppModel {
         if let state = activeWindowState, let window = window(in: scope) {
             pendingPaneFocus.append(PaneFocusRequest(
                 state: state, hostId: hostId, windowId: window.id,
-                knownPaneIds: Self.paneIds(of: window), madeAt: .now
+                knownPaneIds: TabOrder.paneIds(of: window), madeAt: .now
             ))
         }
         Task { await service.splitPane(hostId: hostId, paneId: paneId, leftRight: leftRight) }
-    }
-
-    /// Both records of what a window holds, together.
-    ///
-    /// The layout tree is updated by `%layout-change` and `panes` by the `list-panes` that follows it,
-    /// so at the instant a split lands one of them has already grown and the other has not. A pane in
-    /// either is a pane that was already there.
-    static func paneIds(of window: TmuxWindow) -> Set<String> {
-        Set(window.panes.map(\.id)).union(window.layoutTree?.paneIds ?? [])
     }
 
     /// A split waiting on the pane it asked for.
@@ -1200,7 +1145,7 @@ public final class AppModel {
             // putting one back would hand the keyboard to a pane nobody can see.
             guard state.selectedWindowId == request.windowId else { continue }
 
-            let arrived = Self.paneIds(of: window).subtracting(request.knownPaneIds)
+            let arrived = TabOrder.paneIds(of: window).subtracting(request.knownPaneIds)
             guard !arrived.isEmpty else {
                 unresolved.append(request)
                 continue
@@ -1316,35 +1261,17 @@ public final class AppModel {
         return closeRequest(hostId: hostId, window: window)
     }
 
-    /// What closing a window will actually do (F4.9).
-    ///
-    /// Exposed, and asked by the close controls as well as by `closeWindow`, because the difference
-    /// is invisible and irreversible in one direction: linked into several sessions, closing is
-    /// `unlink-window` and nothing dies; linked into one, closing *is* killing. The confirmation
-    /// explains that at the moment of the click, but ⌥ skips the confirmation — so without something
-    /// saying it beforehand, "this tab goes away" and "this build dies" are the same gesture with no
-    /// visible difference. One decision, two readers, so a tooltip cannot promise what the action
-    /// will not do.
-    public enum CloseOutcome: Equatable {
-        /// The window leaves this session and carries on in the ones named.
-        case unlinks(remaining: [String])
-        /// This session is its only one, so removing it there is destroying it.
-        case kills
-    }
+    /// What closing a window will actually do (F4.9). The decision is `ClosePolicy`'s; this reads it
+    /// against the live model, for the close controls as well as for `closeWindow`.
+    public typealias CloseOutcome = tetmuxPolicy.CloseOutcome
 
     public func closeOutcome(hostId: String, windowId: String, in sessionId: String? = nil) -> CloseOutcome {
-        let linked = linkedSessions(hostId: hostId, windowId: windowId)
-        guard linked.count > 1 else { return .kills }
-        return .unlinks(remaining: linked.filter { $0.id != sessionId }.map(\.name))
+        ClosePolicy.outcome(in: hosts, hostId: hostId, windowId: windowId, closingIn: sessionId)
     }
 
     /// The host's sessions this window is linked into, in tree order.
-    ///
-    /// `list-windows -a` reports a linked window once per session, so the model already carries it in
-    /// each one and this is a filter rather than a query.
     public func linkedSessions(hostId: String, windowId: String) -> [TmuxSession] {
-        guard let host = hosts.first(where: { $0.id == hostId }) else { return [] }
-        return host.sessions.filter { session in session.windows.contains { $0.id == windowId } }
+        ClosePolicy.linkedSessions(in: hosts, hostId: hostId, windowId: windowId)
     }
 
     /// Whether a window is in more than one session, which is what the tree and the tab strip mark.
@@ -1353,21 +1280,12 @@ public final class AppModel {
     }
 
     /// The sentence a close control puts in its tooltip, and what a screen reader is told.
-    ///
-    /// Names the sessions rather than counting them: "it stays in build and deploy" is checkable and
-    /// "linked into 3 sessions" is a number the user then has to go and resolve. Truncated past three,
-    /// because a tooltip is not a list.
     public func closeDescription(
         hostId: String, windowId: String, in sessionId: String?, windowName: String
     ) -> String {
-        switch closeOutcome(hostId: hostId, windowId: windowId, in: sessionId) {
-        case .kills:
-            return "Close \(windowName) — this is its only session, so it ends what is running in it"
-        case .unlinks(let remaining):
-            let named = remaining.prefix(3).joined(separator: ", ")
-            let rest = remaining.count > 3 ? " and \(remaining.count - 3) more" : ""
-            return "Remove \(windowName) from this session — it keeps running in \(named)\(rest)"
-        }
+        ClosePolicy.description(
+            of: closeOutcome(hostId: hostId, windowId: windowId, in: sessionId), windowName: windowName
+        )
     }
 
     /// Only ever reached from the confirmation above, which is the single place a window is killed.
@@ -1581,36 +1499,12 @@ public final class AppModel {
 
     // MARK: - Window ordering
 
-    /// A tab dropped onto another tab, in the form `SessionService.moveWindow` takes.
-    ///
-    /// The rule is the one every tab bar has: the dragged tab takes the position of the tab it was
-    /// dropped on, and everything between them shifts up by one. Which side of the target that lands
-    /// on therefore depends on the direction of travel — dragging rightwards means *after* the
-    /// target, leftwards means *before* it — and getting that wrong makes a rightward drag by one
-    /// position do nothing at all, which reads as the whole feature being broken.
-    ///
-    /// Returns the window to insert in front of, `nil` for the end of the strip, and `.none` for a
-    /// drop that is not a move. Static and pure because the arithmetic is the whole of it: the tmux
-    /// side is one command, and this is the part that can be wrong without anything saying so.
-    static func dropDestination(order: [String], dragged: String, onto target: String) -> String?? {
-        guard dragged != target,
-              let from = order.firstIndex(of: dragged),
-              let onto = order.firstIndex(of: target) else { return .none }
-
-        var remaining = order
-        remaining.remove(at: from)
-        guard let targetIndex = remaining.firstIndex(of: target) else { return .none }
-        // Rightwards: land after the target, which is the window currently following it — or the end
-        // of the strip when the target is last. Leftwards: land on the target itself.
-        let insertAt = from < onto ? targetIndex + 1 : targetIndex
-        return .some(insertAt < remaining.count ? remaining[insertAt] : nil)
-    }
 
     /// Reorders a tab that was dragged onto another one.
     public func moveWindow(hostId: String, sessionId: String, dragged: String, onto target: String) {
         guard let session = hosts.first(where: { $0.id == hostId })?
             .sessions.first(where: { $0.id == sessionId }) else { return }
-        guard let before = Self.dropDestination(
+        guard let before = TabOrder.dropDestination(
             order: session.windows.map(\.id), dragged: dragged, onto: target
         ) else { return }
         Task {

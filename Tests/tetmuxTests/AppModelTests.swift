@@ -1,5 +1,6 @@
 import XCTest
 @testable import tetmuxCore
+import tetmuxPolicy
 @testable import tetmuxUI
 
 /// `AppModel` decisions that need no channel and no AppKit. Everything here was previously
@@ -1736,40 +1737,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(decoded[0].sidebarShown, "the tree shows unless the file says otherwise")
     }
 
-    // MARK: - Reordering tabs
-
-    /// The rule every tab bar has: the dragged tab takes the target's position and the tabs between
-    /// them shift by one. Which side of the target that is depends on the direction of travel, and
-    /// getting it wrong makes a rightward drag by one position do nothing at all.
-    func testDraggingATabRightwardsLandsAfterItsTarget() {
-        let order = ["@1", "@2", "@3", "@4"]
-        // @1 onto @3: @1 goes after @3, so it is inserted before @4.
-        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@1", onto: "@3"), .some("@4"))
-        // Onto the last one there is nothing after it, so it lands at the end.
-        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@1", onto: "@4"), .some(nil))
-    }
-
-    func testDraggingATabLeftwardsLandsOnItsTarget() {
-        let order = ["@1", "@2", "@3", "@4"]
-        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@4", onto: "@2"), .some("@2"))
-        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@3", onto: "@1"), .some("@1"))
-    }
-
-    func testDroppingATabOnItselfIsNotAMove() {
-        // Compared against a typed `.none` rather than asserted nil: the result is a *double*
-        // optional, and `XCTAssertNil` takes `Any?`, so the outer nil it is being asked about is the
-        // one the coercion flattens away.
-        XCTAssertEqual(AppModel.dropDestination(order: ["@1", "@2"], dragged: "@1", onto: "@1"), String??.none)
-        XCTAssertEqual(AppModel.dropDestination(order: ["@1", "@2"], dragged: "@9", onto: "@1"), String??.none)
-    }
-
-    /// Adjacent tabs swap, in both directions — the ordinary case, and the one where an off-by-one
-    /// in either branch shows up as a drag that does nothing.
-    func testDraggingOntoAnAdjacentTabSwapsThem() {
-        let order = ["@1", "@2", "@3"]
-        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@1", onto: "@2"), .some("@3"))
-        XCTAssertEqual(AppModel.dropDestination(order: order, dragged: "@2", onto: "@1"), .some("@1"))
-    }
+    // Tab-drop arithmetic is `TabOrder`'s, tested in `tetmuxPolicyTests`.
 
     // MARK: - Pinned sessions
 
@@ -2406,106 +2374,7 @@ final class AppModelTests: XCTestCase {
 
     // MARK: - Activity notifications (F4.31)
 
-    private func activeWindow(_ id: String, name: String = "build", active: Bool) -> TmuxWindow {
-        var window = TmuxWindow(id: id, name: name)
-        window.hasActivity = active
-        return window
-    }
-
-    /// The event is the *transition*, and everything below is a way of getting that wrong.
-    func testAWatchedWindowThatStartsPrintingIsReported() {
-        let before = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
-            activeWindow("@1", active: false),
-        ])])]
-        let after = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
-            activeWindow("@1", active: true),
-        ])])]
-
-        let alerts = AppModel.newlyActive(
-            from: before, to: after, watching: [WatchedWindow(hostId: "local", windowId: "@1")]
-        )
-        XCTAssertEqual(alerts.map(\.windowId), ["@1"])
-    }
-
-    /// `hasActivity` stays true until somebody looks at the window, so reporting on the value rather
-    /// than the transition would re-fire on every topology snapshot — a job that printed once would
-    /// notify for the rest of the afternoon.
-    func testAWindowThatWasAlreadyActiveDoesNotFireAgain() {
-        let snapshot = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
-            activeWindow("@1", active: true),
-        ])])]
-
-        let alerts = AppModel.newlyActive(
-            from: snapshot, to: snapshot, watching: [WatchedWindow(hostId: "local", windowId: "@1")]
-        )
-        XCTAssertTrue(alerts.isEmpty)
-    }
-
-    func testAnUnwatchedWindowIsNeverReported() {
-        let before = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
-            activeWindow("@1", active: false),
-            activeWindow("@2", active: false),
-        ])])]
-        let after = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
-            activeWindow("@1", active: true),
-            activeWindow("@2", active: true),
-        ])])]
-
-        let alerts = AppModel.newlyActive(
-            from: before, to: after, watching: [WatchedWindow(hostId: "local", windowId: "@2")]
-        )
-        XCTAssertEqual(alerts.map(\.windowId), ["@2"])
-    }
-
-    /// tmux ids are per server, so a watch on `local`'s `@1` must say nothing about another host's.
-    func testTheWatchDoesNotCrossHosts() {
-        let before = [remoteHost(id: "build-box", sessions: [
-            TmuxSession(id: "$1", name: "one", windows: [activeWindow("@1", active: false)]),
-        ])]
-        let after = [remoteHost(id: "build-box", sessions: [
-            TmuxSession(id: "$1", name: "one", windows: [activeWindow("@1", active: true)]),
-        ])]
-
-        let alerts = AppModel.newlyActive(
-            from: before, to: after, watching: [WatchedWindow(hostId: "local", windowId: "@1")]
-        )
-        XCTAssertTrue(alerts.isEmpty)
-    }
-
-    /// A window that has only just appeared has no previous value. Attaching to a server whose
-    /// watched window is already active is not the same event as it becoming active, and treating it
-    /// as one means a banner on every reconnect.
-    func testAWindowSeenForTheFirstTimeIsNotReported() {
-        let after = [host(sessions: [TmuxSession(id: "$1", name: "one", windows: [
-            activeWindow("@1", active: true),
-        ])])]
-
-        let alerts = AppModel.newlyActive(
-            from: [], to: after, watching: [WatchedWindow(hostId: "local", windowId: "@1")]
-        )
-        XCTAssertTrue(alerts.isEmpty)
-    }
-
-    /// A window linked into several sessions is one window (F4.9's subject) and appears once in each.
-    /// Reporting per appearance would notify twice for one event.
-    func testALinkedWindowIsReportedOnce() {
-        let quiet = activeWindow("@5", active: false)
-        let loud = activeWindow("@5", active: true)
-        let before = [host(sessions: [
-            TmuxSession(id: "$1", name: "one", windows: [quiet]),
-            TmuxSession(id: "$2", name: "two", windows: [quiet]),
-        ])]
-        let after = [host(sessions: [
-            TmuxSession(id: "$1", name: "one", windows: [loud]),
-            TmuxSession(id: "$2", name: "two", windows: [loud]),
-        ])]
-
-        let alerts = AppModel.newlyActive(
-            from: before, to: after, watching: [WatchedWindow(hostId: "local", windowId: "@5")]
-        )
-        XCTAssertEqual(alerts.count, 1)
-        XCTAssertEqual(alerts.first?.label, "build")
-    }
+    // The quiet → active edge is `ActivityPolicy.newlyActive`, tested in `tetmuxPolicyTests`.
 
     /// Watching is a toggle and it persists. The round trip through the file is covered separately;
     /// this is the decision.

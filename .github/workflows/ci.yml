@@ -78,9 +78,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build the portable core
-        run: swift build --target tetmuxCore
+        run: swift build --target tetmuxCore --target tetmuxPolicy
+      # `tetmuxPolicyTests` rides along: the policy layer is shared with the relay, which runs on
+      # Linux, so its decisions have to hold there too.
       - name: Replay the fixtures on glibc
-        run: swift test --filter tetmuxCoreTests
+        run: swift test --filter "tetmuxCoreTests|tetmuxPolicyTests"
 
   # §8's other half: the integration suite against every tmux the SRD names, rather than against the
   # one version a runner happens to install. The fixtures pin what each version *says*; this pins

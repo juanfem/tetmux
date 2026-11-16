@@ -1066,7 +1066,7 @@ private struct WindowTab: View {
     }
 
     /// Which side of this tab a drop would insert on — the side the drag came from, which is where
-    /// the gap in the strip conceptually is. Matches `AppModel.dropDestination`'s rule, so the marker
+    /// the gap in the strip conceptually is. Matches `TabOrder.dropDestination`'s rule, so the marker
     /// and the command agree.
     private var dropIndicatorEdge: Alignment {
         guard let dragged = draggingWindowId,
