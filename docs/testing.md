@@ -212,10 +212,15 @@ while you are still looking at it.
 
 **And "no tests ran" is never a pass.** `swift test` writes its summary two ways — `Executed 60
 tests, with 0 failures`, and once anything skips, `Executed 60 tests, with 2 tests skipped and 0
-failures` — so the script takes the count on its own rather than matching the sentence. Matching
-the sentence is what it did first, and the day a test started skipping, it printed "no tests ran"
-with a tick beside it. A run that reports no count, or a count of zero, now fails: exit status zero
-having run nothing is the same green-check-that-means-nothing this whole area exists to prevent.
+failures`. Matching the sentence is what the script did first, and the day a test started skipping,
+it printed "no tests ran" with a tick beside it. Taking the count off the *last* summary line is
+what it did second, and that broke the other way once the package had more than one test target:
+each is its own xctest run with its own summary, a filter matches tests in one of them, and the
+last to report says `Executed 0 tests` — so every version failed as "no tests ran" while the suite passed,
+and nobody could tell a red matrix from a broken script. It now **counts the `Test Case` lines**
+(passed, failed, skipped), which depends on neither the sentence nor the order of targets. A count
+of zero still fails: exit status zero having run nothing is the same green-check-that-means-nothing
+this whole area exists to prevent.
 
 **The matrix is where the version branches live** — per-window sizing off below 2.9, tab
 reordering as `move-window -b` on 3.2 and a run of `swap-window`s below it, pane commands

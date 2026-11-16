@@ -113,20 +113,26 @@ for version in "${wanted[@]}"; do
     # ones where a test may decide it does not apply. Both numbers are printed, so a run that quietly
     # tested nothing cannot read as a run that tested everything.
     #
-    # The summary line has two shapes — `Executed 60 tests, with 0 failures` and, once anything
-    # skips, `Executed 60 tests, with 2 tests skipped and 0 failures` — so the count is taken on its
-    # own rather than by matching the whole sentence. Matching the sentence is what this did first,
-    # and the moment a test started skipping it printed "no tests ran" and a tick beside it.
+    # Counted from the `Test Case` lines, not read off a summary line. The summary has two shapes —
+    # `Executed 60 tests, with 0 failures` and, once anything skips, `…with 2 tests skipped and 0
+    # failures` — and matching the whole sentence is what this did first: the moment a test started
+    # skipping it printed "no tests ran" and a tick beside it. Taking the *last* summary line is what
+    # it did second, and that stopped being the right one when the package grew more test targets:
+    # each target is its own xctest run with its own summary, a filter matches tests in only one of
+    # them, and the last to report says `Executed 0 tests` — so every version failed as "no tests
+    # ran" while the suite was passing. A count of the cases themselves has neither problem.
+    passed="$(grep -cE "^Test Case .* passed \(" "$log" || true)"
+    failures="$(grep -cE "^Test Case .* failed \(" "$log" || true)"
     skipped="$(grep -cE "^Test Case .* skipped" "$log" || true)"
-    summary="$(grep -oE "Executed [0-9]+ tests?, with .*" "$log" | tail -1 || true)"
-    count="$(printf '%s' "$summary" | grep -oE "^Executed [0-9]+" | grep -oE "[0-9]+" || true)"
+    count=$((passed + failures + skipped))
+    summary="Executed $count tests, with $failures failures"
 
     if [ "$status" -ne 0 ]; then
-        echo "✗ ${summary:-the suite did not report a summary} — $skipped skipped"
+        echo "✗ $summary — $skipped skipped"
         grep -E "error: -\[|error: " "$log" | head -20 || true
         echo "  full log: $log"
         failed+=("$version")
-    elif [ -z "$count" ] || [ "$count" -eq 0 ]; then
+    elif [ "$count" -eq 0 ]; then
         # Exit status zero having run nothing is the failure this whole script exists to prevent one
         # version of: a green tick that means the tests did not happen. It is never a pass.
         echo "✗ no tests ran at all against $reported — that is not a pass"
