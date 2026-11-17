@@ -16,6 +16,7 @@
   :root {
     --bg: #1b1b1d;
     --bar: #26262a;
+    --tabs: #212124;
     --key: #3a3a40;
     --key-on: #0a84ff;
     --fg: #e8e8ea;
@@ -23,6 +24,7 @@
     --ok: #30d158;
     --wait: #ffd60a;
     --bad: #ff453a;
+    --activity: #ff9f0a;
   }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
     font: 14px -apple-system, system-ui, sans-serif; overscroll-behavior: none; }
@@ -30,13 +32,30 @@
      than behind it. 100% is only the first frame. */
   #app { position: fixed; inset: 0 0 auto 0; height: 100%; display: flex; flex-direction: column;
     padding-top: env(safe-area-inset-top); box-sizing: border-box; }
-  #top { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--bar);
+  #top { display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: var(--bar);
     font-size: 13px; }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--wait); flex: none; }
   #dot.ok { background: var(--ok); }
   #dot.bad { background: var(--bad); }
-  #label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #note { color: var(--dim); }
+  /* The host and session picker. A native select, so iOS gives it its own wheel. */
+  #where { flex: 0 1 auto; min-width: 0; max-width: 55%; font: inherit; color: var(--fg);
+    background: var(--key); border: 0; border-radius: 6px; padding: 4px 8px; -webkit-appearance: none;
+    appearance: none; text-overflow: ellipsis; }
+  #note { flex: 1; min-width: 0; color: var(--dim); overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  /* Two rows of tabs: the session's windows, then the panes of the window being shown. A phone has
+     room for one pane, so a split is a choice between panes rather than a layout. */
+  .tabs { display: flex; gap: 4px; padding: 4px 6px; background: var(--tabs); overflow-x: auto;
+    flex: none; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs:empty, .tabs[hidden] { display: none; }
+  .tabs button { padding: 5px 10px; min-width: 0; max-width: 45vw; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; background: transparent; color: var(--dim); }
+  .tabs button.on { background: var(--key); color: var(--fg); }
+  .tabs button.activity::before { content: ""; display: inline-block; width: 6px; height: 6px;
+    margin-right: 5px; border-radius: 50%; background: var(--activity); vertical-align: middle; }
+  #panes { padding-top: 0; }
+  #panes button { font-size: 12px; padding: 3px 9px; }
   /* tmux owns the grid (§3.3). When another client owns the window's size the grid can be larger
      than the screen, and then it pans rather than reflowing. */
   #term { flex: 1; min-height: 0; overflow: auto; padding: 4px; -webkit-overflow-scrolling: touch; }
@@ -52,11 +71,13 @@
 <div id="app">
   <div id="top">
     <span id="dot"></span>
-    <span id="label">connecting…</span>
-    <span id="note"></span>
+    <select id="where" aria-label="Host and session"></select>
+    <span id="note">connecting…</span>
     <button data-font="-1" aria-label="Smaller text">A−</button>
     <button data-font="1" aria-label="Larger text">A+</button>
   </div>
+  <div id="windows" class="tabs" role="tablist" aria-label="Windows"></div>
+  <div id="panes" class="tabs" role="tablist" aria-label="Panes" hidden></div>
   <div id="term"></div>
   <div id="keys">
     <button data-key="esc">esc</button>
@@ -102,6 +123,127 @@
     ta.spellcheck = false;
   }
 
+  // ---- what is being shown ------------------------------------------------------------------------
+
+  // `topology` is the relay's last snapshot; `shown` is the pane it last said it is streaming.
+  // `asked` is the last thing this page asked for, which differs from `shown` while a host it picked
+  // is still connecting — the picker shows the request, the terminal keeps the old pane meanwhile.
+  let topology = { hosts: [] };
+  let shown = null;
+  let asked = null;
+  try { asked = JSON.parse(storage.get('view', 'null')); } catch {}
+
+  function view(target) {
+    asked = target;
+    storage.set('view', JSON.stringify(target));
+    send({ t: 'view', ...target });
+    render();
+  }
+
+  const findHost = (id) => topology.hosts.find((h) => h.id === id);
+  const findSession = (host, id) => host && host.sessions.find((s) => s.id === id);
+  const findWindow = (session, id) => session && session.windows.find((w) => w.id === id);
+
+  function render() {
+    renderPicker();
+    const host = shown && findHost(shown.host);
+    const session = findSession(host, shown && shown.session);
+    const win = findWindow(session, shown && shown.window);
+    renderTabs($('windows'), session ? session.windows : [], shown && shown.window,
+      (w) => w.label, (w) => w.activity);
+    const panes = win ? win.panes : [];
+    $('panes').hidden = panes.length < 2;
+    renderTabs($('panes'), panes.length < 2 ? [] : panes, shown && shown.pane, (p) => p.label, () => false);
+
+    // The host the page cares about is the one it asked for, if that is not the one on screen yet.
+    const wanted = findHost((asked && asked.host) || (shown && shown.host)) || host;
+    const up = wanted && wanted.state === 'connected';
+    if (ws && ws.readyState === WebSocket.OPEN) setDot(up ? 'ok' : '');
+    let note = '';
+    if (wanted && !up) note = wanted.note || `${wanted.state}…`;
+    else if (wanted && wanted.note) note = wanted.note;
+    $('note').textContent = note;
+  }
+
+  // Each host is a group; each session an option. A host with nothing listed — never connected, or
+  // down — is one option that connects it.
+  function renderPicker() {
+    const select = $('where');
+    const current = asked && asked.host ? asked : shown;
+    select.textContent = '';
+    for (const host of topology.hosts) {
+      const group = document.createElement('optgroup');
+      group.label = host.state === 'connected' ? host.name : `${host.name} (${host.state})`;
+      if (host.sessions.length === 0 || host.state !== 'connected' && host.state !== 'connecting') {
+        group.appendChild(option(`${host.id}\n`, host.sessions.length ? `${host.name} — reconnect` : host.name));
+      }
+      if (host.state === 'connected' || host.state === 'connecting') {
+        for (const session of host.sessions) {
+          group.appendChild(option(`${host.id}\n${session.id}`, session.name));
+        }
+      }
+      select.appendChild(group);
+    }
+    if (!current) return;
+    const exact = `${current.host}\n${current.session || ''}`;
+    const fallback = `${current.host}\n`;
+    for (const o of select.options) {
+      if (o.value === exact) { select.value = exact; return; }
+    }
+    for (const o of select.options) {
+      if (o.value === fallback) { select.value = fallback; return; }
+    }
+  }
+
+  function option(value, text) {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = text;
+    return o;
+  }
+
+  $('where').addEventListener('change', (event) => {
+    const [host, session] = event.target.value.split('\n');
+    view(session ? { host, session } : { host });
+  });
+
+  // Rebuilt from scratch each time — a few dozen buttons at most — but only when something on them
+  // changed, so a tab row the thumb is scrolling does not jump back under it.
+  function renderTabs(row, items, selected, label, activity) {
+    const signature = JSON.stringify([items.map((i) => [i.id, label(i), activity(i)]), selected]);
+    if (row.dataset.signature === signature) return;
+    row.dataset.signature = signature;
+    row.textContent = '';
+    for (const item of items) {
+      const button = document.createElement('button');
+      button.dataset.id = item.id;
+      button.textContent = label(item);
+      button.setAttribute('role', 'tab');
+      button.setAttribute('aria-selected', String(item.id === selected));
+      if (item.id === selected) button.classList.add('on');
+      if (activity(item) && item.id !== selected) button.classList.add('activity');
+      row.appendChild(button);
+    }
+    const on = row.querySelector('.on');
+    if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  // A tab acts on click, not pointerdown, so starting a swipe along the row does not switch tabs.
+  // mousedown's default is what moves focus; preventing it keeps the iOS keyboard up across a tap.
+  for (const row of [$('windows'), $('panes')]) {
+    row.addEventListener('mousedown', (event) => event.preventDefault());
+  }
+  $('windows').addEventListener('click', (event) => {
+    const id = event.target.closest('button')?.dataset.id;
+    if (!id || !shown) return;
+    view({ host: shown.host, session: shown.session, window: id });
+  });
+  $('panes').addEventListener('click', (event) => {
+    const id = event.target.closest('button')?.dataset.id;
+    if (!id || !shown) return;
+    view({ host: shown.host, session: shown.session, window: shown.window, pane: id });
+  });
+
   // ---- the socket -------------------------------------------------------------------------------
 
   let ws = null;
@@ -119,7 +261,14 @@
     ws = new WebSocket(`${scheme}://${location.host}/ws?token=${encodeURIComponent(token)}`);
     ws.binaryType = 'arraybuffer';
     setDot('');
-    ws.onopen = () => { retry = 0; lastAsked = null; askForSize(); };
+    ws.onopen = () => {
+      retry = 0;
+      lastAsked = null;
+      // The relay shows nothing until it is told what to show: where this page was, or — the first
+      // time — nothing in particular, which it answers with the first host that is up.
+      send({ t: 'view', ...(asked || shown || {}) });
+      askForSize();
+    };
     ws.onmessage = (event) => {
       if (typeof event.data !== 'string') {
         term.write(new Uint8Array(event.data));
@@ -131,14 +280,19 @@
         // dropped. The repaint that follows starts from a clean screen.
         term.reset();
         adopt(message.cols, message.rows);
-        $('label').textContent = `${message.host} · ${message.session} · ${message.label}`;
+        shown = { host: message.host, session: message.session, window: message.window, pane: message.pane };
+        // What the relay settled on is what to come back to — unless the request was for a host that
+        // is still connecting, and this is the old one being re-shown meanwhile.
+        if (!asked || !asked.host || asked.host === message.host) asked = null;
+        storage.set('view', JSON.stringify(shown));
+        render();
         lastAsked = null;
         askForSize();
       } else if (message.t === 'size') {
         adopt(message.cols, message.rows);
-      } else if (message.t === 'status') {
-        setDot(message.state === 'connected' ? 'ok' : '');
-        $('note').textContent = message.text || (message.state === 'connected' ? '' : message.state);
+      } else if (message.t === 'topology') {
+        topology = message;
+        render();
       }
     };
     ws.onclose = () => {
@@ -191,6 +345,9 @@
     visualViewport.addEventListener('scroll', layout);
   }
   window.addEventListener('resize', layout);
+  // The pane row comes and goes with the window being shown, which changes the terminal's height
+  // without the viewport changing at all.
+  if (window.ResizeObserver) new ResizeObserver(() => askForSize()).observe($('term'));
 
   // ---- input --------------------------------------------------------------------------------------
 
@@ -234,7 +391,7 @@
 
   // pointerdown + preventDefault keeps focus in the terminal, so tapping a key does not dismiss the
   // iOS keyboard.
-  for (const button of document.querySelectorAll('button')) {
+  for (const button of document.querySelectorAll('#top button, #keys button')) {
     button.addEventListener('pointerdown', (event) => {
       event.preventDefault();
       if (button.dataset.font) {

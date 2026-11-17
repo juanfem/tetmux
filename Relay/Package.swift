@@ -31,5 +31,15 @@ let package = Package(
             ],
             path: "Sources/tetmux-relay"
         ),
+        // `@testable import` of the executable: the resolver and the wire format are small enough
+        // that a library target of their own would be ceremony.
+        .testTarget(
+            name: "tetmux-relayTests",
+            dependencies: [
+                "tetmux-relay",
+                .product(name: "tetmuxCore", package: "tetmux"),
+            ],
+            path: "Tests/tetmux-relayTests"
+        ),
     ]
 )

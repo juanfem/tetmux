@@ -12,7 +12,7 @@ thing it constrains, and where somebody will actually meet it. A second copy in 
 list nobody reads twice and one that drifts from the original the first time either is edited;
 `git log` holds the narrative. This paragraph replaced ninety lines of exactly that on 2026-08-07.
 
-**As of 2026-11-16: 2 open (a flaky test, the web client), 8 parked, and nothing here blocks a release.** On 2026-08-06 the last
+**As of 2026-11-17: 2 open (a flaky test, the web client), 8 parked, and nothing here blocks a release.** On 2026-08-06 the last
 two then-open entries left the list without being implemented, and both say so where it counts
 rather than here: P6.7's launch half was amended to name **warm** launch (SRD §6,
 `docs/measurements.md`), and signing moved from *blocked* to *parked* (SRD §2.5), because "blocked
@@ -26,16 +26,20 @@ References point into current `main`. Line numbers drift; the symbol names besid
 
 ## Open
 
-- [ ] **The web client (`Relay/`) is at step 2 of 4: one host, one pane.** Steps 1 and 2 landed on
-  2026-11-16: `tetmuxPolicy` exists, and `tetmux-relay` serves the attached session's active pane to
-  xterm.js over a WebSocket, with a key bar for the keys iOS has no keyboard for. Verified against a
-  throwaway tmux server (keys, paste, resize, repaint on reconnect, SIGTERM restoring `window-size`)
-  and in desktop Chrome — **not yet on an iPhone, which is the point of step 2**: Safari's handling
-  of xterm.js's hidden textarea (autocorrect, dictation, selection) is the risk to measure before
-  anything is built on top. What remains, in order:
-  - **Step 3, the relay protocol.** Topology diffs to the browser (hosts → sessions → windows →
-    panes), choosing which pane to show, and several hosts in one process — `SessionService` already
-    holds them; the relay currently `addHost`s one. Every host from `hosts.json`, connected on demand.
+- [ ] **The web client (`Relay/`) is at step 3 of 4: every host, every pane, one at a time.** Steps 1
+  and 2 landed on 2026-11-16 and step 2 was confirmed on an iPhone the same day: typing, autocorrect,
+  selection and the key bar all behave in Safari. Step 3 landed on 2026-11-17: the relay offers every
+  host from `hosts.json` and `~/.ssh/config` (connecting the `--host` ones at startup and the rest on
+  first pick), sends the topology as a whole snapshot whenever it changes, and the browser picks with
+  `view`. The page has a host/session picker, the session's windows as the first row of tabs and the
+  shown window's panes as a second row. The pane on screen is zoomed (`resize-pane -Z`) and unzoomed
+  when the view leaves the window, if the zoom was the relay's. Each viewed session gets its own
+  control client through `setDisplayedSessions`. Verified against a throwaway tmux server (two
+  sockets on two sessions at once, pane closed under the viewer, reload restoring the view, nothing
+  left zoomed and `window-size` restored on exit) and in desktop Chrome; not yet on the phone.
+  - **Zoom is shared.** It is a property of the tmux window, so a Mac showing the window the phone is
+    on sees it zoomed too — the same trade as the window size, below. A Safari backgrounded and
+    resumed unzooms and re-zooms, which a program in that pane sees as two resizes.
   - **Step 4, the phone UI.** One pane at a time with a switcher, tabs as a list or swipe, the host
     tree as a sheet. F4.9/F4.10's close goes through `ClosePolicy`, so the phone asks exactly when
     the Mac would.

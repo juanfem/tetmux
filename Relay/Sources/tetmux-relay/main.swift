@@ -3,18 +3,22 @@ import Hummingbird
 import HummingbirdWebSocket
 import tetmuxCore
 
-// tetmux-relay — step 2 of the web client: one host, one pane, over a WebSocket to xterm.js.
+// tetmux-relay — the web client's server: every configured host, over a WebSocket to xterm.js.
 //
-//   tetmux-relay [--host <id|name>] [--session <name>] [--bind 127.0.0.1] [--port 8080]
+//   tetmux-relay [--host <id|name>]... [--session <name>] [--bind 127.0.0.1] [--port 8080]
 //                [--token <secret>] [--web <dir>]
 //
-// The host resolves against `hosts.json` (and `~/.ssh/config`) exactly as the app and `--diagnose`
-// do, so the relay reaches a remote machine over the same ssh invocation the app would use. On
-// Linux, `hosts.json` lives in `$XDG_DATA_HOME/tetmux` (`~/.local/share/tetmux`) — where Foundation
-// puts Application Support there.
+// Hosts come from `hosts.json` and `~/.ssh/config` exactly as the app and `--diagnose` read them, so
+// the relay reaches a remote machine over the same ssh invocation the app would use. On Linux,
+// `hosts.json` lives in `$XDG_DATA_HOME/tetmux` (`~/.local/share/tetmux`) — where Foundation puts
+// Application Support there.
+//
+// Every host is offered to the browser; only the `--host` ones (the local host when none is given)
+// are connected at startup. The rest connect when a browser first picks them, so a long ssh config
+// does not mean a dozen ssh handshakes — and password prompts nobody can answer yet — at launch.
 
 struct Options {
-    var host: String?
+    var hosts: [String] = []
     var session: String?
     var bind = "127.0.0.1"
     var port = 8080
@@ -26,14 +30,14 @@ struct Options {
         var iterator = arguments.dropFirst().makeIterator()
         while let argument = iterator.next() {
             switch argument {
-            case "--host": options.host = iterator.next()
+            case "--host": if let host = iterator.next() { options.hosts.append(host) }
             case "--session": options.session = iterator.next()
             case "--bind": options.bind = iterator.next() ?? options.bind
             case "--port": options.port = iterator.next().flatMap(Int.init) ?? options.port
             case "--token": options.token = iterator.next()
             case "--web": options.web = iterator.next()
             case "-h", "--help":
-                print("usage: tetmux-relay [--host <id|name>] [--session <name>] [--bind <addr>] "
+                print("usage: tetmux-relay [--host <id|name>]... [--session <name>] [--bind <addr>] "
                     + "[--port <n>] [--token <secret>] [--web <dir>]")
                 exit(0)
             default:
@@ -75,18 +79,25 @@ let webRoot = URL(fileURLWithPath: options.web
     ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         .appendingPathComponent("../../Web").standardizedFileURL.path)
 
-// MARK: - The host
+// MARK: - The hosts
 
-let stored = await HostConfigStore().loadHosts()
-let config: HostConfig
-if let requested = options.host {
-    if let match = stored.first(where: { $0.id == requested || $0.name == requested }) {
-        config = match.asConfig
+var configs = await HostConfigStore().loadHosts().map(\.asConfig)
+if !configs.contains(where: \.isLocal) {
+    configs.insert(HostConfig(id: "local", name: "localhost", isLocal: true), at: 0)
+}
+var startup: [HostConfig] = []
+for requested in options.hosts {
+    if let match = configs.first(where: { $0.id == requested || $0.name == requested }) {
+        startup.append(match)
     } else {
-        config = HostConfig(id: requested, name: requested, isLocal: false)
+        // Not configured anywhere: taken as an ssh destination, as `ssh <it>` would.
+        let adHoc = HostConfig(id: requested, name: requested, isLocal: false)
+        configs.append(adHoc)
+        startup.append(adHoc)
     }
-} else {
-    config = stored.first { $0.isLocal }?.asConfig ?? HostConfig(id: "local", name: "localhost", isLocal: true)
+}
+if startup.isEmpty, let local = configs.first(where: \.isLocal) {
+    startup = [local]
 }
 
 let service = SessionService()
@@ -95,15 +106,23 @@ if ProcessInfo.processInfo.environment["TETMUX_RELAY_DEBUG"] != nil {
         FileHandle.standardError.write(Data((message + "\n").utf8))
     }
 }
-await service.addHost(config)
-
-say("→ connecting to \(config.name) [\(config.id)]…")
-do {
-    try await service.connectHost(hostId: config.id, targetSession: options.session, createIfEmpty: true)
-} catch {
-    say("✘ connect failed: \(error)")
-    exit(1)
+for config in configs {
+    await service.addHost(config)
 }
+let registry = ViewRegistry(service: service)
+
+for config in startup {
+    say("→ connecting to \(config.name) [\(config.id)]…")
+    do {
+        try await service.connectHost(hostId: config.id, targetSession: options.session, createIfEmpty: true)
+    } catch {
+        // One host down is not the relay down: the browser shows the failure on that host and
+        // can try it again from there.
+        say("✘ \(config.name): \(error)")
+    }
+}
+say("  \(configs.count) host\(configs.count == 1 ? "" : "s") offered: "
+    + configs.map(\.name).joined(separator: ", "))
 
 // MARK: - The server
 
@@ -121,7 +140,7 @@ router.ws("/ws") { request, _ in
           tokensMatch(offered, token) else { return .dontUpgrade }
     return .upgrade([:])
 } onUpgrade: { inbound, outbound, _ in
-    let bridge = PaneBridge(service: service, hostId: config.id, outbound: outbound)
+    let bridge = PaneBridge(service: service, registry: registry, outbound: outbound)
     await bridge.run(inbound: inbound)
 }
 
