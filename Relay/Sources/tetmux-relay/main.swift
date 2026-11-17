@@ -6,7 +6,7 @@ import tetmuxCore
 // tetmux-relay — the web client's server: every configured host, over a WebSocket to xterm.js.
 //
 //   tetmux-relay [--host <id|name>]... [--session <name>] [--bind 127.0.0.1] [--port 8080]
-//                [--token <secret>] [--web <dir>]
+//                [--token <secret>] [--web <dir>] [--config <dir>]
 //
 // Hosts come from `hosts.json` and `~/.ssh/config` exactly as the app and `--diagnose` read them, so
 // the relay reaches a remote machine over the same ssh invocation the app would use. On Linux,
@@ -24,6 +24,9 @@ struct Options {
     var port = 8080
     var token: String?
     var web: String?
+    /// Where `hosts.json` is read and written. The platform's Application Support by default — the
+    /// Mac app's own file on a Mac, which a relay under test must not be adding hosts to.
+    var config: String?
 
     static func parse(_ arguments: [String]) -> Options {
         var options = Options()
@@ -36,9 +39,10 @@ struct Options {
             case "--port": options.port = iterator.next().flatMap(Int.init) ?? options.port
             case "--token": options.token = iterator.next()
             case "--web": options.web = iterator.next()
+            case "--config": options.config = iterator.next()
             case "-h", "--help":
                 print("usage: tetmux-relay [--host <id|name>]... [--session <name>] [--bind <addr>] "
-                    + "[--port <n>] [--token <secret>] [--web <dir>]")
+                    + "[--port <n>] [--token <secret>] [--web <dir>] [--config <dir>]")
                 exit(0)
             default:
                 FileHandle.standardError.write(Data("unknown argument: \(argument)\n".utf8))
@@ -94,7 +98,7 @@ func machineName() -> String {
     return short.isEmpty ? "localhost" : short
 }
 
-let store = HostConfigStore()
+let store = HostConfigStore(directory: options.config.map { URL(fileURLWithPath: $0, isDirectory: true) })
 var stored = await store.loadHosts()
 if !stored.contains(where: \.isLocal) {
     stored.insert(HostConfigStore.localBaseline, at: 0)
@@ -140,11 +144,18 @@ for config in configs {
     await service.addHost(config)
 }
 let registry = ViewRegistry(service: service)
+let hostBook = HostBook(store: store, service: service)
 
 for config in startup {
     say("→ connecting to \(config.name) [\(config.id)]…")
     do {
-        try await service.connectHost(hostId: config.id, targetSession: options.session, createIfEmpty: true)
+        // With no session named, whatever the server already has — the mode `openHost` uses. Left to
+        // `connectHost`'s default, every start created a fresh `tetmux_N` beside the user's sessions,
+        // and a relay restarted by a service manager would leave one behind each time.
+        try await service.connectHost(
+            hostId: config.id, targetSession: options.session,
+            mode: options.session == nil ? .attachAny : nil, createIfEmpty: true
+        )
     } catch {
         // One host down is not the relay down: the browser shows the failure on that host and
         // can try it again from there.
@@ -170,7 +181,7 @@ router.ws("/ws") { request, _ in
           tokensMatch(offered, token) else { return .dontUpgrade }
     return .upgrade([:])
 } onUpgrade: { inbound, outbound, _ in
-    let bridge = PaneBridge(service: service, registry: registry, outbound: outbound)
+    let bridge = PaneBridge(service: service, registry: registry, hostBook: hostBook, outbound: outbound)
     await bridge.run(inbound: inbound)
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import tetmuxCore
+import tetmuxPolicy
 
 /// The relay's WebSocket protocol.
 ///
@@ -12,18 +13,42 @@ import tetmuxCore
 /// page restoring the pane it was on never flashes the relay's default first.
 enum Wire {
     /// Browser → relay.
+    ///
+    /// | `t` | fields | |
+    /// |---|---|---|
+    /// | `view` | `host`, `session`, `window`, `pane`, all optional | what to show |
+    /// | `in`, `paste` | `d` | to the pane being shown |
+    /// | `resize` | `cols`, `rows` | the size the browser would like (§3.3) |
+    /// | `newWindow` | | in the session being shown; the view follows it |
+    /// | `split` | `dir`: `right` or `down` | the pane being shown; the view follows the new one |
+    /// | `closePane` | | the pane being shown — a window's last pane closes the window, below |
+    /// | `closeWindow` | `window`, `confirm` | F4.9/F4.10, decided by `ClosePolicy` |
+    /// | `renameWindow` | `window`, `name` | |
+    /// | `newSession` | `host`, `name` | the view follows it |
+    /// | `answer`, `cancelPrompt` | `host`, `d` | what ssh is waiting on |
+    /// | `addHost` | `destination`, `port`, `name` | saved to `hosts.json` |
     struct Inbound: Decodable {
-        /// `view`, `in` (keystrokes, as xterm.js reports them), `paste`, or `resize`.
         let t: String
         let d: String?
         let cols: Int?
         let rows: Int?
-        /// `view`'s target. Any of them may be missing or stale; the relay fills in the rest
-        /// (`ViewResolver`).
         let host: String?
         let session: String?
         let window: String?
         let pane: String?
+        let name: String?
+        let dir: String?
+        /// The page showed `closeText` and the user said yes. Without it a window whose close
+        /// `kills` is refused, so a page that skipped the question cannot end a shell by accident.
+        let confirm: Bool?
+        let destination: String?
+        let port: Int?
+    }
+
+    /// Something the relay refused or could not do, for the page to show and forget.
+    struct Notice: Encodable {
+        var t = "notice"
+        let text: String
     }
 
     /// A new pane stream starts. The browser resets its emulator on this, so that the repaint which
@@ -66,7 +91,23 @@ enum Wire {
             /// Why the host is not usable, when it is not: ssh's own message (§7), or what ssh is
             /// waiting on that the relay cannot answer yet.
             let note: String?
+            /// What ssh is waiting on, when the page can answer it.
+            let prompt: Prompt?
+            /// tmux's refusal of the last command, verbatim (§7). The id lets the page show each
+            /// one once.
+            let failure: Failure?
             let sessions: [Session]
+        }
+
+        struct Prompt: Encodable, Equatable {
+            let text: String
+            /// Typed into a password field, and never echoed back by anyone.
+            let secret: Bool
+        }
+
+        struct Failure: Encodable, Equatable {
+            let id: String
+            let text: String
         }
 
         struct Session: Encodable, Equatable {
@@ -79,6 +120,10 @@ enum Wire {
             let id: String
             let label: String
             let activity: Bool
+            /// `unlink` or `kill` (F4.9): whether closing it here ends what is running in it.
+            let close: String
+            /// The sentence a confirmation shows, from `ClosePolicy` so it reads as the Mac's does.
+            let closeText: String
             let panes: [Pane]
         }
 
@@ -94,10 +139,19 @@ enum Wire {
                     name: host.config.name,
                     state: Self.state(host.connectionState),
                     note: Self.note(host),
+                    prompt: host.authenticationPrompt.map { Prompt(text: $0.text, secret: $0.answerIsSecret) },
+                    failure: host.lastCommandFailure.map {
+                        Failure(id: $0.id.uuidString, text: "\($0.action): \($0.message)")
+                    },
                     sessions: host.browsableSessions.map { session in
                         Session(id: session.id, name: session.name, windows: session.windows.map { window in
-                            Window(
+                            let outcome = ClosePolicy.outcome(
+                                in: hosts, hostId: host.id, windowId: window.id, closingIn: session.id
+                            )
+                            return Window(
                                 id: window.id, label: window.displayLabel, activity: window.hasActivity,
+                                close: outcome == .kills ? "kill" : "unlink",
+                                closeText: ClosePolicy.description(of: outcome, windowName: window.displayLabel),
                                 panes: window.panes.map { Pane(id: $0.id, label: Self.label(of: $0)) }
                             )
                         })

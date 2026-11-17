@@ -24,9 +24,21 @@ Every host from `hosts.json` and `~/.ssh/config` is offered in the page's picker
 decides which are connected at startup (the local host when none is given). The others connect the
 first time someone picks them.
 
-The page shows one pane at a time. The top row of tabs lists the session's windows. A split window
-gets a second row listing its panes, and the pane on screen is zoomed in tmux so it fills the phone.
-The relay unzooms the window when the view moves away, but only if it did the zooming.
+The page shows one pane at a time. The top row of tabs lists the session's windows, with `+` for a
+new one. A split window gets a second row listing its panes, and the pane on screen is zoomed in
+tmux so it fills the phone. The relay unzooms the window when the view moves away, but only if it
+did the zooming.
+
+- **The host button** (top left) opens the list of hosts and their sessions. From there you can
+  start a session, connect a host, answer what ssh is asking (a password, a host key), or add a
+  host as `user@host` plus an optional port. Added hosts are saved to the server's `hosts.json`.
+- **`⋯`** acts on what is on screen: split right or down, a new window, rename, close the pane,
+  close the window, and the text size. Closing a window asks first when it would end what is
+  running in it, with the same sentence the Mac app uses. A window that is also in another session
+  is only removed from this one, without asking.
+
+`--config <dir>` reads and writes `hosts.json` there instead of the default location. Use it when
+testing on a Mac, where the default is the app's own file.
 
 It prints the URL to open, with an access token in it. Pass `--token`, or set
 `TETMUX_RELAY_TOKEN`, to keep the same token across restarts, so a home-screen bookmark keeps
@@ -39,7 +51,8 @@ Requirements:
   `swift:6.2`).
 - **Hosts** come from `hosts.json` plus `~/.ssh/config`. On Linux, `hosts.json` lives in
   `~/.local/share/tetmux/`. ssh runs as the relay's user, with that user's keys and `known_hosts`.
-  The relay cannot answer a password prompt. It shows the prompt beside the picker and waits.
+  A password or host-key prompt is answered from the hosts sheet. Nothing is stored: there is no
+  Keychain on Linux, so a password host asks again on every connect, and key auth is the easier path.
 - **Exposure.** The relay speaks plain HTTP and hands out shells on every host it can reach. Bind
   it to loopback, or to a Tailscale/WireGuard address, and nothing wider. The token is a second
   lock, not the first.

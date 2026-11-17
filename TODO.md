@@ -26,23 +26,33 @@ References point into current `main`. Line numbers drift; the symbol names besid
 
 ## Open
 
-- [ ] **The web client (`Relay/`) is at step 3 of 4: every host, every pane, one at a time.** Steps 1
-  and 2 landed on 2026-11-16 and step 2 was confirmed on an iPhone the same day: typing, autocorrect,
-  selection and the key bar all behave in Safari. Step 3 landed on 2026-11-17: the relay offers every
-  host from `hosts.json` and `~/.ssh/config` (connecting the `--host` ones at startup and the rest on
-  first pick), sends the topology as a whole snapshot whenever it changes, and the browser picks with
-  `view`. The page has a host/session picker, the session's windows as the first row of tabs and the
-  shown window's panes as a second row. The pane on screen is zoomed (`resize-pane -Z`) and unzoomed
-  when the view leaves the window, if the zoom was the relay's. Each viewed session gets its own
-  control client through `setDisplayedSessions`. Verified against a throwaway tmux server (two
-  sockets on two sessions at once, pane closed under the viewer, reload restoring the view, nothing
-  left zoomed and `window-size` restored on exit) and in desktop Chrome; not yet on the phone.
+- [ ] **The web client (`Relay/`): steps 1–4 have landed; what is left is polish and the items
+  below.** Steps 1 and 2 landed on 2026-11-16, and step 2 was confirmed on an iPhone the same day:
+  typing, autocorrect, selection and the key bar all behave in Safari. Steps 3 and 4 landed on
+  2026-11-17.
+  - The relay offers every host from `hosts.json` and `~/.ssh/config`. It connects the `--host` ones
+    at startup, attaching to whatever session exists, and the rest on first pick.
+  - It sends the topology as a whole snapshot whenever it changes, and the browser picks with `view`.
+  - The page:
+    - a hosts sheet: sessions, a new session, answering ssh's prompt, and adding a host, saved to
+      the server's `hosts.json` after a strict destination check
+    - the session's windows as the first row of tabs, with `+` for a new window
+    - the shown window's panes as a second row
+    - an actions sheet: split, rename, close pane, close window
+  - Closing a window follows `ClosePolicy`: unlinked without asking, killed only after the page has
+    shown the Mac's sentence and been told yes. The relay refuses an unconfirmed kill itself.
+  - The pane on screen is zoomed (`resize-pane -Z`), and unzoomed when the view leaves the window,
+    if the zoom was the relay's.
+  - Each viewed session gets its own control client through `setDisplayedSessions`.
+  - Verified against a throwaway tmux server (every action, two sockets on two sessions, a pane
+    closed under the viewer, reload restoring the view, nothing left zoomed and `window-size`
+    restored on exit) and in desktop Chrome. Not yet on the phone. Answering an ssh prompt is
+    untested end to end: no password host was at hand.
   - **Zoom is shared.** It is a property of the tmux window, so a Mac showing the window the phone is
     on sees it zoomed too — the same trade as the window size, below. A Safari backgrounded and
     resumed unzooms and re-zooms, which a program in that pane sees as two resizes.
-  - **Step 4, the phone UI.** One pane at a time with a switcher, tabs as a list or swipe, the host
-    tree as a sheet. F4.9/F4.10's close goes through `ClosePolicy`, so the phone asks exactly when
-    the Mac would.
+  - **Not done:** removing or editing a host from the phone, renaming or killing a session, swiping
+    between panes (it would compete with xterm.js's touch selection and scrolling).
   - **Geometry against the Mac.** Each socket claims its window's size (`claimWindowSize`), so a
     phone that connects resizes the tmux window under a Mac showing the same one, and the Mac takes
     it back when it next asks. A follower mode — the phone renders tmux's size, scaled or panned, and

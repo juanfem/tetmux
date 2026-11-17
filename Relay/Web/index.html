@@ -17,6 +17,8 @@
     --bg: #1b1b1d;
     --bar: #26262a;
     --tabs: #212124;
+    --sheet: #2c2c31;
+    --row: #36363c;
     --key: #3a3a40;
     --key-on: #0a84ff;
     --fg: #e8e8ea;
@@ -32,49 +34,86 @@
      than behind it. 100% is only the first frame. */
   #app { position: fixed; inset: 0 0 auto 0; height: 100%; display: flex; flex-direction: column;
     padding-top: env(safe-area-inset-top); box-sizing: border-box; }
+  button, input { font: inherit; color: var(--fg); border: 0; border-radius: 6px; }
+  button { background: var(--key); padding: 8px 11px; min-width: 40px; flex: none;
+    touch-action: manipulation; }
+  button.on { background: var(--key-on); }
+
   #top { display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: var(--bar);
     font-size: 13px; }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--wait); flex: none; }
+  .ok { --state: var(--ok); }
+  .bad { --state: var(--bad); }
   #dot.ok { background: var(--ok); }
   #dot.bad { background: var(--bad); }
-  /* The host and session picker. A native select, so iOS gives it its own wheel. */
-  #where { flex: 0 1 auto; min-width: 0; max-width: 55%; font: inherit; color: var(--fg);
-    background: var(--key); border: 0; border-radius: 6px; padding: 4px 8px; -webkit-appearance: none;
-    appearance: none; text-overflow: ellipsis; }
+  #where { flex: 0 1 auto; min-width: 0; max-width: 60%; padding: 4px 10px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
   #note { flex: 1; min-width: 0; color: var(--dim); overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; }
+  #more { padding: 3px 10px; min-width: 0; font-weight: 600; }
+
   /* Two rows of tabs: the session's windows, then the panes of the window being shown. A phone has
      room for one pane, so a split is a choice between panes rather than a layout. */
   .tabs { display: flex; gap: 4px; padding: 4px 6px; background: var(--tabs); overflow-x: auto;
     flex: none; scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }
-  .tabs:empty, .tabs[hidden] { display: none; }
+  .tabs[hidden] { display: none; }
   .tabs button { padding: 5px 10px; min-width: 0; max-width: 45vw; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; background: transparent; color: var(--dim); }
   .tabs button.on { background: var(--key); color: var(--fg); }
   .tabs button.activity::before { content: ""; display: inline-block; width: 6px; height: 6px;
     margin-right: 5px; border-radius: 50%; background: var(--activity); vertical-align: middle; }
+  .tabs button.add { color: var(--fg); font-weight: 600; }
   #panes { padding-top: 0; }
   #panes button { font-size: 12px; padding: 3px 9px; }
+
   /* tmux owns the grid (§3.3). When another client owns the window's size the grid can be larger
      than the screen, and then it pans rather than reflowing. */
   #term { flex: 1; min-height: 0; overflow: auto; padding: 4px; -webkit-overflow-scrolling: touch; }
   #keys { display: flex; gap: 6px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
     background: var(--bar); overflow-x: auto; flex: none; }
-  button { font: inherit; color: var(--fg); background: var(--key); border: 0; border-radius: 6px;
-    padding: 8px 11px; min-width: 40px; flex: none; touch-action: manipulation; }
-  button.on { background: var(--key-on); }
-  #top button { padding: 3px 9px; min-width: 0; }
+
+  /* Sheets: the host list and the actions on what is shown. Drawn inside #app so they follow the
+     keyboard the same way the key bar does. */
+  #veil { position: absolute; inset: 0; background: rgba(0, 0, 0, .45); display: flex;
+    flex-direction: column; justify-content: flex-end; z-index: 10; }
+  #veil[hidden] { display: none; }
+  #sheet { background: var(--sheet); border-radius: 14px 14px 0 0; max-height: 85%; overflow-y: auto;
+    padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; }
+  #sheet h2 { font-size: 13px; font-weight: 600; color: var(--dim); text-transform: uppercase;
+    letter-spacing: .04em; margin: 14px 4px 6px; display: flex; align-items: center; gap: 8px; }
+  #sheet h2:first-child { margin-top: 4px; }
+  #sheet h2 .state { width: 8px; height: 8px; border-radius: 50%; background: var(--state, var(--wait)); }
+  #sheet h2 .why { text-transform: none; letter-spacing: 0; font-weight: 400; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row { display: block; width: 100%; text-align: left; background: var(--row); margin: 0 0 4px;
+    padding: 11px 12px; border-radius: 8px; }
+  .row.on { background: var(--key-on); }
+  .row.danger { color: var(--bad); }
+  .row.danger.on { background: var(--bad); color: #fff; }
+  .row .sub { color: var(--dim); font-size: 12px; margin-left: 6px; }
+  .pair { display: flex; gap: 4px; }
+  .pair .row { flex: 1; text-align: center; }
+  .form { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
+  .form input { flex: 1 1 140px; min-width: 0; background: var(--bg); padding: 10px; }
+  .form input.short { flex: 0 1 80px; }
+  .form button { background: var(--key-on); }
+  .hint { color: var(--dim); font-size: 12px; margin: 2px 4px 8px; }
+  .warn { margin: 4px 4px 10px; line-height: 1.4; }
+
+  #toast { position: absolute; left: 12px; right: 12px; top: calc(env(safe-area-inset-top) + 44px);
+    background: #4a2b2b; color: var(--fg); padding: 10px 12px; border-radius: 8px; z-index: 20;
+    font-size: 13px; line-height: 1.35; }
+  #toast[hidden] { display: none; }
 </style>
 </head>
 <body>
 <div id="app">
   <div id="top">
     <span id="dot"></span>
-    <select id="where" aria-label="Host and session"></select>
-    <span id="note">connecting…</span>
-    <button data-font="-1" aria-label="Smaller text">A−</button>
-    <button data-font="1" aria-label="Larger text">A+</button>
+    <button id="where" aria-label="Hosts and sessions">connecting…</button>
+    <span id="note"></span>
+    <button id="more" aria-label="Actions">⋯</button>
   </div>
   <div id="windows" class="tabs" role="tablist" aria-label="Windows"></div>
   <div id="panes" class="tabs" role="tablist" aria-label="Panes" hidden></div>
@@ -92,6 +131,8 @@
     <button data-text="/">/</button>
     <button data-text="-">-</button>
   </div>
+  <div id="veil" hidden><div id="sheet" role="dialog"></div></div>
+  <div id="toast" role="status" hidden></div>
 </div>
 <script>
 (() => {
@@ -115,19 +156,20 @@
   term.open($('term'));
 
   // iOS would otherwise capitalise the first letter of every command and "correct" flags.
-  const ta = term.textarea;
-  if (ta) {
-    ta.setAttribute('autocapitalize', 'off');
-    ta.setAttribute('autocorrect', 'off');
-    ta.setAttribute('autocomplete', 'off');
-    ta.spellcheck = false;
+  function plain(input) {
+    input.setAttribute('autocapitalize', 'off');
+    input.setAttribute('autocorrect', 'off');
+    input.setAttribute('autocomplete', 'off');
+    input.spellcheck = false;
+    return input;
   }
+  if (term.textarea) plain(term.textarea);
 
   // ---- what is being shown ------------------------------------------------------------------------
 
   // `topology` is the relay's last snapshot; `shown` is the pane it last said it is streaming.
   // `asked` is the last thing this page asked for, which differs from `shown` while a host it picked
-  // is still connecting — the picker shows the request, the terminal keeps the old pane meanwhile.
+  // is still connecting — the sheet shows the request, the terminal keeps the old pane meanwhile.
   let topology = { hosts: [] };
   let shown = null;
   let asked = null;
@@ -144,73 +186,50 @@
   const findSession = (host, id) => host && host.sessions.find((s) => s.id === id);
   const findWindow = (session, id) => session && session.windows.find((w) => w.id === id);
 
-  function render() {
-    renderPicker();
+  function current() {
     const host = shown && findHost(shown.host);
     const session = findSession(host, shown && shown.session);
     const win = findWindow(session, shown && shown.window);
+    return { host, session, win };
+  }
+
+  function render() {
+    const { host, session, win } = current();
+    const wanted = findHost((asked && asked.host) || (shown && shown.host)) || host;
+    $('where').textContent = wanted
+      ? (wanted === host && session ? `${host.name} · ${session.name}` : wanted.name)
+      : 'hosts';
+
     renderTabs($('windows'), session ? session.windows : [], shown && shown.window,
-      (w) => w.label, (w) => w.activity);
+      (w) => w.label, (w) => w.activity, session ? '+' : null);
     const panes = win ? win.panes : [];
     $('panes').hidden = panes.length < 2;
-    renderTabs($('panes'), panes.length < 2 ? [] : panes, shown && shown.pane, (p) => p.label, () => false);
+    renderTabs($('panes'), panes.length < 2 ? [] : panes, shown && shown.pane,
+      (p) => p.label, () => false, null);
 
-    // The host the page cares about is the one it asked for, if that is not the one on screen yet.
-    const wanted = findHost((asked && asked.host) || (shown && shown.host)) || host;
     const up = wanted && wanted.state === 'connected';
     if (ws && ws.readyState === WebSocket.OPEN) setDot(up ? 'ok' : '');
     let note = '';
-    if (wanted && !up) note = wanted.note || `${wanted.state}…`;
+    if (wanted && wanted.prompt) note = 'ssh is waiting — tap the host';
+    else if (wanted && !up) note = wanted.note || `${wanted.state}…`;
     else if (wanted && wanted.note) note = wanted.note;
     $('note').textContent = note;
-  }
 
-  // Each host is a group; each session an option. A host with nothing listed — never connected, or
-  // down — is one option that connects it.
-  function renderPicker() {
-    const select = $('where');
-    const current = asked && asked.host ? asked : shown;
-    select.textContent = '';
-    for (const host of topology.hosts) {
-      const group = document.createElement('optgroup');
-      group.label = host.state === 'connected' ? host.name : `${host.name} (${host.state})`;
-      if (host.sessions.length === 0 || host.state !== 'connected' && host.state !== 'connecting') {
-        group.appendChild(option(`${host.id}\n`, host.sessions.length ? `${host.name} — reconnect` : host.name));
+    // Each failure tmux reported is shown once.
+    for (const h of topology.hosts) {
+      if (h.failure && !seenFailures.has(h.failure.id)) {
+        seenFailures.add(h.failure.id);
+        toast(h.failure.text);
       }
-      if (host.state === 'connected' || host.state === 'connecting') {
-        for (const session of host.sessions) {
-          group.appendChild(option(`${host.id}\n${session.id}`, session.name));
-        }
-      }
-      select.appendChild(group);
     }
-    if (!current) return;
-    const exact = `${current.host}\n${current.session || ''}`;
-    const fallback = `${current.host}\n`;
-    for (const o of select.options) {
-      if (o.value === exact) { select.value = exact; return; }
-    }
-    for (const o of select.options) {
-      if (o.value === fallback) { select.value = fallback; return; }
-    }
+    if (sheet) sheet.draw();
   }
-
-  function option(value, text) {
-    const o = document.createElement('option');
-    o.value = value;
-    o.textContent = text;
-    return o;
-  }
-
-  $('where').addEventListener('change', (event) => {
-    const [host, session] = event.target.value.split('\n');
-    view(session ? { host, session } : { host });
-  });
+  const seenFailures = new Set();
 
   // Rebuilt from scratch each time — a few dozen buttons at most — but only when something on them
   // changed, so a tab row the thumb is scrolling does not jump back under it.
-  function renderTabs(row, items, selected, label, activity) {
-    const signature = JSON.stringify([items.map((i) => [i.id, label(i), activity(i)]), selected]);
+  function renderTabs(row, items, selected, label, activity, add) {
+    const signature = JSON.stringify([items.map((i) => [i.id, label(i), activity(i)]), selected, add]);
     if (row.dataset.signature === signature) return;
     row.dataset.signature = signature;
     row.textContent = '';
@@ -224,6 +243,14 @@
       if (activity(item) && item.id !== selected) button.classList.add('activity');
       row.appendChild(button);
     }
+    if (add) {
+      const button = document.createElement('button');
+      button.className = 'add';
+      button.dataset.action = 'newWindow';
+      button.textContent = add;
+      button.setAttribute('aria-label', 'New window');
+      row.appendChild(button);
+    }
     const on = row.querySelector('.on');
     if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
@@ -234,15 +261,171 @@
     row.addEventListener('mousedown', (event) => event.preventDefault());
   }
   $('windows').addEventListener('click', (event) => {
-    const id = event.target.closest('button')?.dataset.id;
-    if (!id || !shown) return;
-    view({ host: shown.host, session: shown.session, window: id });
+    const button = event.target.closest('button');
+    if (!button || !shown) return;
+    if (button.dataset.action === 'newWindow') { send({ t: 'newWindow' }); return; }
+    view({ host: shown.host, session: shown.session, window: button.dataset.id });
   });
   $('panes').addEventListener('click', (event) => {
     const id = event.target.closest('button')?.dataset.id;
     if (!id || !shown) return;
     view({ host: shown.host, session: shown.session, window: shown.window, pane: id });
   });
+
+  // ---- sheets -------------------------------------------------------------------------------------
+
+  // One sheet at a time. `draw` is called again on every topology change, so a host that connects
+  // while its sheet is open shows its sessions without being reopened. Inputs survive a redraw only
+  // because a sheet holding one stops redrawing (`typing`).
+  let sheet = null;
+
+  function openSheet(draw) {
+    sheet = { draw: () => { if (!sheet.typing) { $('sheet').textContent = ''; draw($('sheet')); } } };
+    $('veil').hidden = false;
+    sheet.draw();
+  }
+  function closeSheet() {
+    sheet = null;
+    $('veil').hidden = true;
+    $('sheet').textContent = '';
+    term.focus();
+  }
+  $('veil').addEventListener('click', (event) => { if (event.target === $('veil')) closeSheet(); });
+  $('sheet').addEventListener('focusin', () => { if (sheet) sheet.typing = true; });
+
+  function el(tag, props = {}, ...children) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(props)) {
+      if (key === 'on') node.addEventListener('click', value);
+      else if (key === 'class') node.className = value;
+      else node[key] = value;
+    }
+    for (const child of children) if (child != null) node.append(child);
+    return node;
+  }
+  const row = (text, on, cls = '', sub = null) =>
+    el('button', { class: `row ${cls}`, on }, text, sub ? el('span', { class: 'sub' }, sub) : null);
+
+  function form(fields, label, submit) {
+    const inputs = fields.map((f) => plain(el('input', { placeholder: f.placeholder, type: f.type || 'text',
+      class: f.short ? 'short' : '', inputMode: f.mode || 'text', value: f.value || '' })));
+    const go = () => submit(...inputs.map((i) => i.value.trim()));
+    for (const input of inputs) {
+      input.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); go(); } });
+    }
+    return { node: el('div', { class: 'form' }, ...inputs, el('button', { on: go }, label)), inputs };
+  }
+
+  // Hosts, each with its sessions; what ssh is waiting on; adding a host.
+  $('where').addEventListener('click', () => openSheet((root) => {
+    const at = asked && asked.host ? asked : shown;
+    for (const host of topology.hosts) {
+      const up = host.state === 'connected';
+      root.append(el('h2', { class: up ? 'ok' : host.state === 'failed' ? 'bad' : '' },
+        el('span', { class: 'state' }), host.name,
+        el('span', { class: 'why' }, up ? (host.note || '') : (host.note || host.state))));
+
+      if (host.prompt) {
+        root.append(el('div', { class: 'warn' }, host.prompt.text));
+        const answer = form([{ placeholder: host.prompt.secret ? 'answer (hidden)' : 'answer',
+          type: host.prompt.secret ? 'password' : 'text' }], 'Send', (value) => {
+          send({ t: 'answer', host: host.id, d: value });
+          sheet.typing = false;
+          sheet.draw();
+        });
+        root.append(answer.node, row('Give up on this connection', () => send({ t: 'cancelPrompt', host: host.id }), 'danger'));
+        continue;
+      }
+      if (!up) {
+        root.append(row(host.state === 'connecting' ? 'Connecting…' : 'Connect',
+          () => { view({ host: host.id }); closeSheet(); }));
+        continue;
+      }
+      for (const session of host.sessions) {
+        const on = at && at.host === host.id && at.session === session.id;
+        root.append(row(session.name, () => { view({ host: host.id, session: session.id }); closeSheet(); },
+          on ? 'on' : '', `${session.windows.length} window${session.windows.length === 1 ? '' : 's'}`));
+      }
+      root.append(row('New session…', (event) => {
+        const create = form([{ placeholder: 'name (optional)' }], 'Create', (name) => {
+          send({ t: 'newSession', host: host.id, name });
+          closeSheet();
+        });
+        event.currentTarget.replaceWith(create.node);
+        sheet.typing = true;
+        create.inputs[0].focus();
+      }));
+    }
+
+    root.append(el('h2', {}, 'Add a host'));
+    const add = form([
+      { placeholder: 'user@host' },
+      { placeholder: 'port', short: true, mode: 'numeric' },
+      { placeholder: 'name (optional)' },
+    ], 'Add', (destination, port, name) => {
+      if (!destination) return;
+      send({ t: 'addHost', destination, port: port ? Number(port) : undefined, name: name || undefined });
+      closeSheet();
+    });
+    root.append(add.node, el('div', { class: 'hint' },
+      'Connects over ssh from the server, with the server\'s keys. Saved to its hosts.json.'));
+  }));
+
+  // What can be done to the pane and window on screen.
+  $('more').addEventListener('click', () => openSheet((root) => {
+    const { host, session, win } = current();
+    if (win && session) {
+      const multi = win.panes.length > 1;
+      root.append(el('h2', {}, win.label));
+      root.append(el('div', { class: 'pair' },
+        row('Split →', () => { send({ t: 'split', dir: 'right' }); closeSheet(); }),
+        row('Split ↓', () => { send({ t: 'split', dir: 'down' }); closeSheet(); })));
+      root.append(row('New window', () => { send({ t: 'newWindow' }); closeSheet(); }));
+      root.append(row('Rename window…', (event) => {
+        const rename = form([{ placeholder: 'name', value: win.label }], 'Rename', (name) => {
+          if (name) send({ t: 'renameWindow', host: host.id, window: win.id, name });
+          closeSheet();
+        });
+        event.currentTarget.replaceWith(rename.node);
+        sheet.typing = true;
+        rename.inputs[0].focus();
+        rename.inputs[0].select();
+      }));
+      if (multi) root.append(row('Close pane', () => { send({ t: 'closePane' }); closeSheet(); }, 'danger'));
+      // F4.9/F4.10: the relay's ClosePolicy said whether this only removes the window from this
+      // session (no question) or ends what runs in it (asked, with the Mac's sentence).
+      root.append(row('Close window', (event) => {
+        if (win.close !== 'kill') {
+          send({ t: 'closeWindow', host: host.id, session: session.id, window: win.id });
+          closeSheet();
+          return;
+        }
+        const ask = el('div', {},
+          el('div', { class: 'warn' }, win.closeText),
+          el('div', { class: 'pair' },
+            row('Cancel', closeSheet),
+            row('Close', () => {
+              send({ t: 'closeWindow', host: host.id, session: session.id, window: win.id, confirm: true });
+              closeSheet();
+            }, 'danger on')));
+        event.currentTarget.replaceWith(ask);
+        sheet.typing = true;
+      }, 'danger'));
+    }
+    root.append(el('h2', {}, `Text size ${fontSize}`));
+    root.append(el('div', { class: 'pair' },
+      row('A−', () => { setFont(fontSize - 1); sheet.draw(); }),
+      row('A+', () => { setFont(fontSize + 1); sheet.draw(); })));
+  }));
+
+  let toastTimer = null;
+  function toast(text) {
+    $('toast').textContent = text;
+    $('toast').hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { $('toast').hidden = true; }, 5000);
+  }
+  $('toast').addEventListener('click', () => { $('toast').hidden = true; });
 
   // ---- the socket -------------------------------------------------------------------------------
 
@@ -293,6 +476,8 @@
       } else if (message.t === 'topology') {
         topology = message;
         render();
+      } else if (message.t === 'notice') {
+        toast(message.text);
       }
     };
     ws.onclose = () => {
@@ -331,6 +516,13 @@
       lastAsked = key;
       send({ t: 'resize', cols: d.cols, rows: d.rows });
     }, 120);
+  }
+
+  function setFont(size) {
+    fontSize = Math.max(8, Math.min(24, size));
+    storage.set('fontSize', String(fontSize));
+    term.options.fontSize = fontSize;
+    askForSize();
   }
 
   function layout() {
@@ -391,16 +583,9 @@
 
   // pointerdown + preventDefault keeps focus in the terminal, so tapping a key does not dismiss the
   // iOS keyboard.
-  for (const button of document.querySelectorAll('#top button, #keys button')) {
+  for (const button of document.querySelectorAll('#keys button')) {
     button.addEventListener('pointerdown', (event) => {
       event.preventDefault();
-      if (button.dataset.font) {
-        fontSize = Math.max(8, Math.min(24, fontSize + Number(button.dataset.font)));
-        storage.set('fontSize', String(fontSize));
-        term.options.fontSize = fontSize;
-        askForSize();
-        return;
-      }
       if (button.dataset.key === 'ctrl') { setCtrl(!ctrl); term.focus(); return; }
       let data = button.dataset.text ?? keys[button.dataset.key]();
       if (ctrl) { data = withCtrl(data); setCtrl(false); }

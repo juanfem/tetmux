@@ -2,6 +2,7 @@ import Foundation
 import HummingbirdWebSocket
 import NIOCore
 import tetmuxCore
+import tetmuxPolicy
 
 /// Serialises everything one socket sends, so a pane's header always precedes its bytes and a write
 /// is only reported done once NIO has taken it.
@@ -61,6 +62,7 @@ actor FrameWriter {
 actor PaneBridge {
     private let service: SessionService
     private let registry: ViewRegistry
+    private let hostBook: HostBook
     private let writer: FrameWriter
     /// This socket in the registry.
     private let socket = UUID()
@@ -94,9 +96,22 @@ actor PaneBridge {
         let window: String
     }
 
-    init(service: SessionService, registry: ViewRegistry, outbound: WebSocketOutboundWriter) {
+    /// Something this browser just asked tmux to create, which the view moves to once a snapshot has
+    /// it. tmux answers a `new-window` with a window id the relay could not have predicted, so the
+    /// way to find it is as the one that was not there before.
+    private enum Arrival {
+        case window(host: String, session: String, known: Set<String>)
+        case pane(host: String, session: String, window: String, known: Set<String>)
+        case session(host: String, name: String)
+    }
+    /// Given up on after a while: a `new-window` that tmux refused never arrives, and a window that
+    /// someone else opens a minute later is not the one this browser asked for.
+    private var awaiting: (arrival: Arrival, until: ContinuousClock.Instant)?
+
+    init(service: SessionService, registry: ViewRegistry, hostBook: HostBook, outbound: WebSocketOutboundWriter) {
         self.service = service
         self.registry = registry
+        self.hostBook = hostBook
         self.writer = FrameWriter(outbound: outbound)
     }
 
@@ -147,9 +162,131 @@ actor PaneBridge {
             guard let cols = message.cols, let rows = message.rows, cols > 1, rows > 1 else { return }
             desired = (cols, rows)
             await requestSize()
+        case "newWindow":
+            guard let showing, let session = session(showing.host, showing.session) else { return }
+            expect(.window(host: showing.host, session: showing.session, known: Set(session.windows.map(\.id))))
+            // From the pane being shown, so the new window opens in its directory, as ⌘T does.
+            await service.newWindow(hostId: showing.host, sessionId: showing.session, fromPaneId: showing.pane)
+        case "split":
+            guard let showing, let window = window(showing.host, showing.window) else { return }
+            expect(.pane(host: showing.host, session: showing.session, window: showing.window,
+                         known: Set(window.panes.map(\.id))))
+            await service.splitPane(hostId: showing.host, paneId: showing.pane, leftRight: message.dir != "down")
+        case "closePane":
+            guard let showing, let window = window(showing.host, showing.window) else { return }
+            // A window's last pane is the window: closing it is a window close, and goes through
+            // the same question.
+            if window.paneCount > 1 {
+                await service.killPane(hostId: showing.host, paneId: showing.pane)
+            } else {
+                await closeWindow(host: showing.host, session: showing.session, window: showing.window,
+                                  confirmed: message.confirm == true)
+            }
+        case "closeWindow":
+            guard let host = message.host ?? showing?.host,
+                  let session = message.session ?? showing?.session,
+                  let window = message.window ?? showing?.window else { return }
+            await closeWindow(host: host, session: session, window: window, confirmed: message.confirm == true)
+        case "renameWindow":
+            guard let host = message.host ?? showing?.host, let window = message.window ?? showing?.window,
+                  let name = message.name else { return }
+            await service.renameWindow(hostId: host, windowId: window, newName: name)
+        case "newSession":
+            await newSession(host: message.host ?? showing?.host, name: message.name)
+        case "answer":
+            // The one message carrying a secret. Handed straight to the service, which writes it to
+            // ssh's tty and logs only that it did; nothing here keeps or prints it.
+            guard let host = message.host, let answer = message.d else { return }
+            await service.answerAuthenticationPrompt(hostId: host, secret: answer)
+        case "cancelPrompt":
+            guard let host = message.host else { return }
+            await service.cancelAuthenticationPrompt(hostId: host)
+        case "addHost":
+            guard let destination = message.destination else { return }
+            do {
+                let id = try await hostBook.add(destination: destination, port: message.port, name: message.name)
+                await view(ViewRequest(host: id))
+            } catch {
+                await notice("\(error)")
+            }
         default:
             break
         }
+    }
+
+    /// F4.9 and F4.10, the Mac's rule: a window that lives on in another session is unlinked without
+    /// asking; one that does not is killed only once the page has shown `closeText` and been told yes.
+    private func closeWindow(host: String, session: String, window: String, confirmed: Bool) async {
+        switch ClosePolicy.outcome(in: hosts, hostId: host, windowId: window, closingIn: session) {
+        case .unlinks:
+            await service.unlinkWindow(hostId: host, windowId: window)
+        case .kills:
+            guard confirmed else {
+                await notice("Not closed: closing it ends what is running in it, and that was not confirmed.")
+                return
+            }
+            await service.killWindow(hostId: host, windowId: window)
+        }
+    }
+
+    private func newSession(host hostId: String?, name: String?) async {
+        guard let hostId, let host = hosts.first(where: { $0.id == hostId }),
+              host.connectionState.isActive else {
+            await notice("That host is not connected.")
+            return
+        }
+        let typed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let name = typed.isEmpty ? SessionNaming.nextName(taken: Set(host.sessions.map(\.name))) : typed
+        guard !host.sessions.contains(where: { $0.name == name }) else {
+            await notice("There is already a session called \(name).")
+            return
+        }
+        expect(.session(host: hostId, name: name))
+        await service.newSession(
+            hostId: hostId, name: name,
+            startDirectory: host.config.startDirectory, initialCommand: host.config.initialCommand
+        )
+    }
+
+    private func expect(_ arrival: Arrival) {
+        awaiting = (arrival, .now + .seconds(10))
+    }
+
+    /// Moves the view to what `awaiting` was waiting for, if this snapshot has it. Whether it did.
+    private func takeArrival() -> Bool {
+        guard let (arrival, until) = awaiting else { return false }
+        guard ContinuousClock.now < until else {
+            awaiting = nil
+            return false
+        }
+        let found: ViewRequest?
+        switch arrival {
+        case .window(let host, let sessionId, let known):
+            found = session(host, sessionId)?.windows.first { !known.contains($0.id) }
+                .map { ViewRequest(host: host, session: sessionId, window: $0.id) }
+        case .pane(let host, let session, let windowId, let known):
+            found = window(host, windowId)?.panes.first { !known.contains($0.id) }
+                .map { ViewRequest(host: host, session: session, window: windowId, pane: $0.id) }
+        case .session(let host, let name):
+            found = hosts.first { $0.id == host }?.sessions.first { $0.name == name }
+                .map { ViewRequest(host: host, session: $0.id) }
+        }
+        guard let found else { return false }
+        awaiting = nil
+        wanted = found
+        return true
+    }
+
+    private func session(_ host: String, _ id: String) -> TmuxSession? {
+        hosts.first { $0.id == host }?.sessions.first { $0.id == id }
+    }
+
+    private func window(_ host: String, _ id: String) -> TmuxWindow? {
+        hosts.first { $0.id == host }?.window(id)
+    }
+
+    private func notice(_ text: String) async {
+        await writer.text(Wire.encode(Wire.Notice(text: text)))
     }
 
     private func view(_ request: ViewRequest) async {
@@ -189,7 +326,8 @@ actor PaneBridge {
             lastTopology = topology
             await writer.text(Wire.encode(topology))
         }
-        await refresh(explicit: false)
+        // Something this browser created counts as a tap on it: zoomed, if it is a pane.
+        await refresh(explicit: takeArrival())
     }
 
     /// Brings what is shown in line with what was asked for and what exists.
