@@ -175,6 +175,18 @@ router.get("/") { _, _ -> Response in
 router.get("/manifest.webmanifest") { _, _ -> Response in
     try page("manifest.webmanifest", type: "application/manifest+json")
 }
+// The icons `Scripts/make-icon.swift` cuts from the app's: the tab's, the one iOS puts on the home
+// screen, and the manifest's two. Named one by one, like the pages — nothing here serves a path
+// the browser chose. `/favicon.ico` is asked for whatever the page links, so it gets the same PNG.
+for (path, file) in [
+    ("/favicon.png", "favicon.png"), ("/favicon.ico", "favicon.png"),
+    ("/apple-touch-icon.png", "apple-touch-icon.png"),
+    ("/icon-192.png", "icon-192.png"), ("/icon-512.png", "icon-512.png"),
+] {
+    router.get(RouterPath(path)) { _, _ -> Response in
+        try page(file, type: "image/png")
+    }
+}
 
 router.ws("/ws") { request, _ in
     guard let offered = request.uri.queryParameters["token"].map(String.init),

@@ -11,7 +11,10 @@
 // stray sparkle in the corner. So this finds the squircle, cuts it out, throws the page away, and
 // re-lays it out on the 1024 canvas at the 824 pt Apple uses, leaving the surround transparent.
 //
-// Usage: swift Scripts/make-icon.swift [source.png] [output.icns]
+// The relay's page (`Relay/Web`) takes its icons from the same cut-out, written at the end: the
+// favicon, the home-screen icon iOS asks for, and the two the web manifest names.
+//
+// Usage: swift Scripts/make-icon.swift [source.png] [output.icns] [web-dir]
 
 import AppKit
 
@@ -19,6 +22,7 @@ let arguments = CommandLine.arguments
 let repoRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
 let sourceURL = URL(fileURLWithPath: arguments.count > 1 ? arguments[1] : repoRoot.appendingPathComponent("Design/tetmux.png").path)
 let outputURL = URL(fileURLWithPath: arguments.count > 2 ? arguments[2] : repoRoot.appendingPathComponent("Sources/tetmuxUI/Resources/tetmux.icns").path)
+let webURL = URL(fileURLWithPath: arguments.count > 3 ? arguments[3] : repoRoot.appendingPathComponent("Relay/Web").path)
 
 // MARK: - Load
 
@@ -202,3 +206,59 @@ iconutil.waitUntilExit()
 guard iconutil.terminationStatus == 0 else { exit(iconutil.terminationStatus) }
 
 print("wrote \(outputURL.path)")
+
+// MARK: - The relay's web icons
+//
+// Not the .icns shrunk: that carries the Dock's 824/1024 margin, which at 16 pt in a browser tab
+// leaves a dozen pixels of icon. These run the shape to the edge of the canvas instead.
+//
+// The home-screen icon is the exception to the transparent surround. iOS rounds the corners itself
+// and paints anything transparent black, so it gets a square filled with the body's own colour
+// under the cut-out — the page background of the render would show as a grey rim at the corners.
+
+/// The cut-out filling a `pixels`-square canvas, over `background` if there is one.
+func webIcon(pixels: Int, background: CGColor? = nil) -> CGImage? {
+    guard let context = CGContext(
+        data: nil, width: pixels, height: pixels, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    context.interpolationQuality = .high
+    let full = CGRect(x: 0, y: 0, width: pixels, height: pixels)
+    if let background {
+        context.setFillColor(background)
+        context.fill(full)
+    }
+    // The same fringe allowance as the .icns, scaled to this canvas.
+    let fringe = max(0.5, inset * Double(pixels) / bodySide)
+    context.addPath(superellipse(in: full.insetBy(dx: fringe, dy: fringe)))
+    context.clip()
+    context.draw(cropped, in: full)
+    return context.makeImage()
+}
+
+// The body's colour, read just inside its top edge, where nothing is drawn on it.
+let sample = ((height - 1 - (top + side / 16)) * width + left + side / 2) * 4
+let bodyColour = CGColor(
+    red: Double(pixels[sample]) / 255, green: Double(pixels[sample + 1]) / 255,
+    blue: Double(pixels[sample + 2]) / 255, alpha: 1
+)
+
+let webIcons: [(name: String, pixels: Int, background: CGColor?)] = [
+    ("favicon.png", 64, nil),
+    ("apple-touch-icon.png", 180, bodyColour),
+    ("icon-192.png", 192, nil),
+    ("icon-512.png", 512, nil),
+]
+
+for icon in webIcons {
+    let url = webURL.appendingPathComponent(icon.name)
+    guard let rendered = webIcon(pixels: icon.pixels, background: icon.background),
+          let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { exit(1) }
+    CGImageDestinationAddImage(dest, rendered, nil)
+    guard CGImageDestinationFinalize(dest) else {
+        FileHandle.standardError.write(Data("cannot write \(url.path)\n".utf8))
+        exit(1)
+    }
+    print("wrote \(url.path)")
+}

@@ -58,7 +58,8 @@ Requirements:
   lock, not the first.
 - **On the phone:** open the URL in Safari, then use Share → Add to Home Screen to get a
   full-screen app. The bar above the keyboard has the keys iOS lacks: Esc, a sticky Ctrl, Tab and
-  the arrows.
+  the arrows. The icon it lands under, and the tab's, are cut from the app's by
+  `Scripts/make-icon.swift` and committed in `Relay/Web`; rerun it when the artwork changes.
 
 `--web <dir>` serves the page from somewhere other than `Relay/Web`. Pass it when the binary has
 been moved away from the source tree.
