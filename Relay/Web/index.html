@@ -527,10 +527,33 @@
     askForSize();
   }
 
+  // Installed on the Home Screen, with the status bar translucent, iOS reports a viewport that is
+  // short by the status bar: `visualViewport.height` and `innerHeight` both stop that far above the
+  // bottom of a screen the page is in fact drawn to the edge of, and the key bar floated over a
+  // strip of nothing. `100vh` is the one length that is right there, so a probe that tall says how
+  // much is missing. Only standalone: in a Safari tab `100vh` includes the space under the toolbars.
+  // The shortfall is taken with the keyboard down (the tallest viewport seen at this width) and
+  // never more than the top inset, so a keyboard that is up is not mistaken for missing screen.
+  const standalone = navigator.standalone === true
+    || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:100vh;box-sizing:border-box;'
+    + 'padding-top:env(safe-area-inset-top);visibility:hidden;pointer-events:none';
+  document.body.appendChild(probe);
+  let tallest = { width: 0, height: 0 };
+
+  function shortfall(vv) {
+    if (!standalone) return 0;
+    if (vv.width !== tallest.width) tallest = { width: vv.width, height: 0 };
+    tallest.height = Math.max(tallest.height, vv.height);
+    const inset = parseFloat(getComputedStyle(probe).paddingTop) || 0;
+    return Math.max(0, Math.min(probe.offsetHeight - tallest.height, inset));
+  }
+
   function layout() {
     const vv = window.visualViewport;
     const app = $('app');
-    app.style.height = `${vv ? vv.height : window.innerHeight}px`;
+    app.style.height = `${vv ? vv.height + shortfall(vv) : window.innerHeight}px`;
     app.style.transform = vv ? `translateY(${vv.offsetTop}px)` : '';
     askForSize();
   }
