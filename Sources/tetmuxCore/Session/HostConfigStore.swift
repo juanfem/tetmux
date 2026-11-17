@@ -114,10 +114,12 @@ extension HostConfig {
 /// `hosts.json` in Application Support (§2.3). Plain JSON on purpose: the stored data is a host
 /// list, and human-readability is worth more here than a database.
 public actor HostConfigStore {
-    private let storeURL: URL
+    /// Public so a front end can say where it looked when it finds fewer hosts than expected — the
+    /// relay on Linux, where this is `~/.local/share/tetmux/hosts.json` and easy to never have created.
+    public nonisolated let storeURL: URL
     /// Injectable so the discovery and override rules can be tested against a known file rather than
     /// against whatever `~/.ssh/config` happens to hold on the machine running the tests.
-    private let sshConfigURL: URL
+    public nonisolated let sshConfigURL: URL
 
     /// `~/Library/Application Support/tetmux`, created if it is not there.
     ///

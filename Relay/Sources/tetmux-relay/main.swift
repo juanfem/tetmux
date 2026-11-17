@@ -81,13 +81,43 @@ let webRoot = URL(fileURLWithPath: options.web
 
 // MARK: - The hosts
 
-var configs = await HostConfigStore().loadHosts().map(\.asConfig)
-if !configs.contains(where: \.isLocal) {
-    configs.insert(HostConfig(id: "local", name: "localhost", isLocal: true), at: 0)
+/// This machine's name, short form: `jymtp`, not `jymtp.example.org`.
+///
+/// The core calls the local host "localhost", which is right in the Mac app — the machine in front of
+/// you — and wrong here, where the local host is a server and the person reading the picker is on a
+/// phone somewhere else.
+func machineName() -> String {
+    var buffer = [CChar](repeating: 0, count: 256)
+    guard gethostname(&buffer, buffer.count) == 0 else { return "localhost" }
+    let name = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    let short = name.split(separator: ".").first.map(String.init) ?? ""
+    return short.isEmpty ? "localhost" : short
+}
+
+let store = HostConfigStore()
+var stored = await store.loadHosts()
+if !stored.contains(where: \.isLocal) {
+    stored.insert(HostConfigStore.localBaseline, at: 0)
+}
+for index in stored.indices where stored[index].isLocal {
+    stored[index].name = machineName()
+}
+var configs = stored.map(\.asConfig)
+
+// Said at startup, because "only one host in the picker" otherwise has no visible cause: on a server
+// neither file usually exists until someone creates it.
+for (label, url) in [("hosts.json", store.storeURL), ("ssh config", store.sshConfigURL)] {
+    let found = FileManager.default.fileExists(atPath: url.path)
+    say("  \(label): \(url.path)\(found ? "" : " (not found)")")
+}
+if let failure = await store.loadFailure {
+    say("✘ \(failure)")
 }
 var startup: [HostConfig] = []
 for requested in options.hosts {
-    if let match = configs.first(where: { $0.id == requested || $0.name == requested }) {
+    if let match = configs.first(where: {
+        $0.id == requested || $0.name == requested || ($0.isLocal && requested == "localhost")
+    }) {
         startup.append(match)
     } else {
         // Not configured anywhere: taken as an ssh destination, as `ssh <it>` would.
