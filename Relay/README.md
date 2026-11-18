@@ -35,7 +35,13 @@ did the zooming.
 - **`⋯`** acts on what is on screen: split right or down, a new window, rename, close the pane,
   close the window, and the text size. Closing a window asks first when it would end what is
   running in it, with the same sentence the Mac app uses. A window that is also in another session
-  is only removed from this one, without asking.
+  is only removed from this one, without asking. It also holds the appearance: System (the
+  default, which follows the browser's light/dark setting), Light or Dark.
+- **On a wide screen** (760 px and up) a sidebar shows the same tree as the Mac's: hosts, their
+  sessions, and each session's windows. Click a session or a window to show it. Use the `+` on a
+  host row to start a session, and click a disconnected host to connect it. The button at the top
+  left, or ⌃⌘S, collapses the sidebar, and the page remembers that. With a mouse, the key bar is
+  hidden.
 
 `--config <dir>` reads and writes `hosts.json` there instead of the default location. Use it when
 testing on a Mac, where the default is the app's own file.

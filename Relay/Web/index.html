@@ -15,27 +15,98 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
 <style>
+  /* Light by default, dark when the system says so — unless the page was told otherwise (`⋯` →
+     Appearance), which sets data-theme on the root. The dark block is written twice because a
+     media query cannot be combined with an attribute selector into one rule. */
   :root {
-    --bg: #1b1b1d;
-    --bar: #26262a;
-    --tabs: #212124;
-    --sheet: #2c2c31;
-    --row: #36363c;
-    --key: #3a3a40;
-    --key-on: #0a84ff;
-    --fg: #e8e8ea;
-    --dim: #9a9aa2;
-    --ok: #30d158;
-    --wait: #ffd60a;
-    --bad: #ff453a;
-    --activity: #ff9f0a;
+    color-scheme: light;
+    --bg: #ffffff;
+    --bar: #f2f2f4;
+    --tabs: #f7f7f8;
+    --side: #ececef;
+    --line: #d8d8dc;
+    --sheet: #f2f2f7;
+    --row: #ffffff;
+    --key: #e2e2e6;
+    --key-on: #007aff;
+    --fg: #1c1c1e;
+    --dim: #6e6e73;
+    --ok: #28b14c;
+    --wait: #e0b000;
+    --bad: #ff3b30;
+    --activity: #ff9500;
+    --toast: #fde2df;
+    --veil: rgba(0, 0, 0, .25);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #1b1b1d; --bar: #26262a; --tabs: #212124; --side: #222226; --line: #333338;
+      --sheet: #2c2c31; --row: #36363c; --key: #3a3a40; --key-on: #0a84ff; --fg: #e8e8ea;
+      --dim: #9a9aa2; --ok: #30d158; --wait: #ffd60a; --bad: #ff453a; --activity: #ff9f0a;
+      --toast: #4a2b2b; --veil: rgba(0, 0, 0, .45);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #1b1b1d; --bar: #26262a; --tabs: #212124; --side: #222226; --line: #333338;
+    --sheet: #2c2c31; --row: #36363c; --key: #3a3a40; --key-on: #0a84ff; --fg: #e8e8ea;
+    --dim: #9a9aa2; --ok: #30d158; --wait: #ffd60a; --bad: #ff453a; --activity: #ff9f0a;
+    --toast: #4a2b2b; --veil: rgba(0, 0, 0, .45);
   }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
     font: 14px -apple-system, system-ui, sans-serif; overscroll-behavior: none; }
   /* Sized from visualViewport by script, so the key bar sits on top of the iOS keyboard rather
      than behind it. 100% is only the first frame. */
-  #app { position: fixed; inset: 0 0 auto 0; height: 100%; display: flex; flex-direction: column;
+  #app { position: fixed; inset: 0 0 auto 0; height: 100%; display: flex;
     padding-top: env(safe-area-inset-top); box-sizing: border-box; }
+  #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+  /* The sidebar: hosts, their sessions, each session's windows — the Mac's tree. Only where there is
+     room for it beside a terminal; a phone keeps the host button and its sheet. */
+  #side { display: none; width: 240px; flex: none; flex-direction: column; background: var(--side);
+    border-right: 1px solid var(--line); font-size: 13px; user-select: none; }
+  #toggle { display: none; padding: 3px 7px; min-width: 0; background: transparent; color: var(--dim); }
+  #toggle svg { display: block; }
+  @media (min-width: 760px) {
+    #side { display: flex; }
+    #toggle { display: block; }
+    #app.collapsed #side { display: none; }
+  }
+  #tree { flex: 1; overflow-y: auto; padding: 8px 6px; }
+  .node { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px;
+    cursor: default; white-space: nowrap; }
+  .node:hover { background: var(--key); }
+  .node.on { background: var(--key-on); color: #fff; }
+  .node.on .count { color: rgba(255, 255, 255, .75); }
+  .node .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .node .disc { width: 12px; flex: none; color: var(--dim); text-align: center; font-size: 10px;
+    transition: transform .12s; }
+  .node .disc.open { transform: rotate(90deg); }
+  .node.on .disc { color: inherit; }
+  .node .state { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--wait); }
+  .node.ok .state { background: var(--ok); }
+  .node.bad .state { background: var(--bad); }
+  .node.host { font-weight: 600; margin-top: 6px; }
+  .node.host:first-child { margin-top: 0; }
+  .node.session { padding-left: 20px; }
+  .node.window { padding-left: 52px; }
+  .node .count { color: var(--dim); font-size: 11px; }
+  .node .plus { padding: 0 6px; min-width: 0; background: transparent; color: var(--dim);
+    visibility: hidden; font-weight: 600; }
+  .node:hover .plus { visibility: visible; }
+  .node.window.activity .name::before { content: ""; display: inline-block; width: 6px; height: 6px;
+    margin-right: 5px; border-radius: 50%; background: var(--activity); vertical-align: middle; }
+  .why { color: var(--dim); font-size: 11px; padding: 0 6px 4px 38px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  #side-add { margin: 6px; text-align: left; background: transparent; color: var(--dim);
+    padding: 6px 8px; }
+  #side-add:hover { background: var(--key); color: var(--fg); }
+
+  /* A mouse and a real keyboard need none of the keys iOS lacks. */
+  @media (hover: hover) and (pointer: fine) {
+    #keys { display: none !important; }
+  }
   button, input { font: inherit; color: var(--fg); border: 0; border-radius: 6px; }
   button { background: var(--key); padding: 8px 11px; min-width: 40px; flex: none;
     touch-action: manipulation; }
@@ -77,7 +148,7 @@
 
   /* Sheets: the host list and the actions on what is shown. Drawn inside #app so they follow the
      keyboard the same way the key bar does. */
-  #veil { position: absolute; inset: 0; background: rgba(0, 0, 0, .45); display: flex;
+  #veil { position: absolute; inset: 0; background: var(--veil); display: flex;
     flex-direction: column; justify-content: flex-end; z-index: 10; }
   #veil[hidden] { display: none; }
   #sheet { background: var(--sheet); border-radius: 14px 14px 0 0; max-height: 85%; overflow-y: auto;
@@ -102,16 +173,31 @@
   .form button { background: var(--key-on); }
   .hint { color: var(--dim); font-size: 12px; margin: 2px 4px 8px; }
   .warn { margin: 4px 4px 10px; line-height: 1.4; }
+  /* On a wide screen a sheet across the whole width reads as a mistake: centred, as a dialog. */
+  @media (min-width: 760px) {
+    #veil { justify-content: center; align-items: center; }
+    #sheet { width: 460px; max-height: 80%; border-radius: 14px; padding-bottom: 12px; }
+  }
 
   #toast { position: absolute; left: 12px; right: 12px; top: calc(env(safe-area-inset-top) + 44px);
-    background: #4a2b2b; color: var(--fg); padding: 10px 12px; border-radius: 8px; z-index: 20;
+    background: var(--toast); color: var(--fg); padding: 10px 12px; border-radius: 8px; z-index: 20;
     font-size: 13px; line-height: 1.35; }
   #toast[hidden] { display: none; }
 </style>
 </head>
 <body>
 <div id="app">
+  <nav id="side" aria-label="Hosts and sessions">
+    <div id="tree" role="tree"></div>
+    <button id="side-add">Add a host…</button>
+  </nav>
+  <div id="main">
   <div id="top">
+    <button id="toggle" aria-label="Toggle sidebar" title="Toggle sidebar (⌃⌘S)">
+      <svg width="18" height="14" viewBox="0 0 18 14" fill="none" stroke="currentColor" stroke-width="1.4">
+        <rect x="0.7" y="0.7" width="16.6" height="12.6" rx="2.5"/><line x1="6.2" y1="0.7" x2="6.2" y2="13.3"/>
+      </svg>
+    </button>
     <span id="dot"></span>
     <button id="where" aria-label="Hosts and sessions">connecting…</button>
     <span id="note"></span>
@@ -133,6 +219,7 @@
     <button data-text="/">/</button>
     <button data-text="-">-</button>
   </div>
+  </div>
   <div id="veil" hidden><div id="sheet" role="dialog"></div></div>
   <div id="toast" role="status" hidden></div>
 </div>
@@ -145,13 +232,44 @@
     set(key, value) { try { localStorage.setItem(key, value); } catch {} },
   };
 
+  // ---- appearance ---------------------------------------------------------------------------------
+
+  // `system`, `light` or `dark`. The chrome follows through CSS; the emulator draws on a canvas
+  // that CSS cannot reach, so it is told separately, and again whenever the system flips.
+  let appearance = storage.get('appearance', 'system');
+  const darkQuery = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)') : null;
+  const isDark = () => appearance === 'dark' || (appearance === 'system' && !!(darkQuery && darkQuery.matches));
+  // Light is the Mac's System scheme in light mode: black on white. Dark keeps xterm's own colours
+  // on the page's background. The ANSI slots are xterm.js's defaults in both.
+  const terminalTheme = () => isDark()
+    ? { background: '#1b1b1d' }
+    : { background: '#ffffff', foreground: '#000000', cursor: '#000000', cursorAccent: '#ffffff',
+        selectionBackground: 'rgba(0, 122, 255, .25)' };
+
+  function applyChrome() {
+    if (appearance === 'system') delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = appearance;
+    document.querySelector('meta[name="theme-color"]').content = isDark() ? '#1b1b1d' : '#f2f2f4';
+  }
+  function applyAppearance() {
+    applyChrome();
+    term.options.theme = terminalTheme();
+  }
+  function setAppearance(value) {
+    appearance = value;
+    storage.set('appearance', value);
+    applyAppearance();
+  }
+  if (darkQuery) darkQuery.addEventListener('change', () => { if (appearance === 'system') applyAppearance(); });
+  applyChrome();
+
   let fontSize = Number(storage.get('fontSize', '12')) || 12;
   const term = new Terminal({
     fontSize,
     fontFamily: 'Menlo, "SF Mono", ui-monospace, monospace',
     scrollback: 5000,
     cursorBlink: true,
-    theme: { background: '#1b1b1d' },
+    theme: terminalTheme(),
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
@@ -224,9 +342,135 @@
         toast(h.failure.text);
       }
     }
+    renderTree();
     if (sheet) sheet.draw();
   }
   const seenFailures = new Set();
+
+  // ---- the sidebar --------------------------------------------------------------------------------
+
+  // Which rows are open, by `h:<host>` and `s:<host>:<session>` — session ids collide across hosts.
+  // A host is open unless closed; a session is closed unless opened, except the one on screen.
+  let expanded = {};
+  try { expanded = JSON.parse(storage.get('tree', '{}')) || {}; } catch {}
+  const hostOpen = (h) => expanded[`h:${h.id}`] !== false;
+  const sessionOpen = (h, s) => expanded[`s:${h.id}:${s.id}`]
+    ?? (!!shown && shown.host === h.id && shown.session === s.id);
+  function setOpen(key, open) {
+    expanded[key] = open;
+    storage.set('tree', JSON.stringify(expanded));
+    renderTree();
+  }
+
+  let collapsed = storage.get('sidebar', 'shown') === 'hidden';
+  function setCollapsed(value) {
+    collapsed = value;
+    storage.set('sidebar', value ? 'hidden' : 'shown');
+    $('app').classList.toggle('collapsed', value);
+    askForSize();
+  }
+  $('app').classList.toggle('collapsed', collapsed);
+  $('toggle').addEventListener('click', () => { setCollapsed(!collapsed); term.focus(); });
+  // ⌃⌘S, the Mac's own Toggle Sidebar — taken before the emulator turns it into a keystroke.
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type === 'keydown' && event.metaKey && event.ctrlKey && event.code === 'KeyS') {
+      event.preventDefault();
+      setCollapsed(!collapsed);
+      return false;
+    }
+    return true;
+  });
+
+  // Rebuilt whole, like the tabs, and only when something it draws changed. The row marked is what
+  // the page is showing, at whichever depth is on screen: the window, or its session when that is
+  // closed — as in the Mac's sidebar.
+  function renderTree() {
+    const tree = $('tree');
+    const hosts = topology.hosts.map(({ failure, ...h }) => h);
+    const signature = JSON.stringify([hosts, shown, expanded]);
+    if (tree.dataset.signature === signature) return;
+    tree.dataset.signature = signature;
+    tree.textContent = '';
+
+    for (const host of topology.hosts) {
+      const up = host.state === 'connected';
+      const open = up && hostOpen(host);
+      tree.append(el('div', {
+        class: `node host ${up ? 'ok' : host.state === 'failed' ? 'bad' : ''}`,
+        role: 'treeitem', title: host.note || host.state,
+      }, el('span', { class: `disc ${open ? 'open' : ''}` }, up ? '▶' : ''),
+        el('span', { class: 'state' }),
+        el('span', { class: 'name' }, host.name),
+        up ? el('button', { class: 'plus', title: 'New session', 'aria-label': 'New session' }, '+') : null));
+      Object.assign(tree.lastChild.dataset, { act: 'host', host: host.id });
+      tree.lastChild.setAttribute('aria-expanded', String(open));
+      if (tree.lastChild.querySelector('.plus')) tree.lastChild.querySelector('.plus').dataset.act = 'newSession';
+
+      const why = host.prompt ? 'ssh is waiting — click to answer'
+        : !up ? (host.note || (host.state === 'disconnected' ? 'click to connect' : `${host.state}…`))
+        : host.note;
+      if (why) tree.append(el('div', { class: 'why', title: why }, why));
+      if (!open) continue;
+
+      for (const session of host.sessions) {
+        const sOpen = sessionOpen(host, session);
+        const here = shown && shown.host === host.id && shown.session === session.id;
+        const node = el('div', { class: `node session ${here && !sOpen ? 'on' : ''}`, role: 'treeitem' },
+          el('span', { class: `disc ${sOpen ? 'open' : ''}` }, '▶'),
+          el('span', { class: 'name' }, session.name),
+          el('span', { class: 'count' }, String(session.windows.length)));
+        Object.assign(node.dataset, { act: 'session', host: host.id, session: session.id });
+        node.querySelector('.disc').dataset.act = 'toggleSession';
+        node.setAttribute('aria-expanded', String(sOpen));
+        tree.append(node);
+        if (!sOpen) continue;
+
+        for (const win of session.windows) {
+          const on = here && shown.window === win.id;
+          const row = el('div', {
+            class: `node window ${on ? 'on' : ''} ${win.activity && !on ? 'activity' : ''}`,
+            role: 'treeitem', title: win.label,
+          }, el('span', { class: 'name' }, win.label));
+          Object.assign(row.dataset, { act: 'window', host: host.id, session: session.id, window: win.id });
+          tree.append(row);
+        }
+      }
+    }
+  }
+
+  // Clicking the tree must not take focus from the terminal, or typing after a switch goes nowhere.
+  $('side').addEventListener('mousedown', (event) => event.preventDefault());
+  $('tree').addEventListener('click', (event) => {
+    const target = event.target.closest('[data-act]');
+    if (!target) return;
+    const node = target.closest('.node');
+    const { host: hostId, session, window } = node.dataset;
+    const host = findHost(hostId);
+    if (!host) return;
+    switch (target.dataset.act) {
+      case 'newSession':
+        send({ t: 'newSession', host: hostId, name: '' });
+        break;
+      case 'host':
+        if (host.prompt) { openHosts(); return; }
+        if (host.state !== 'connected') view({ host: hostId });
+        else setOpen(`h:${hostId}`, !hostOpen(host));
+        break;
+      case 'toggleSession': {
+        const s = findSession(host, session);
+        if (s) setOpen(`s:${hostId}:${session}`, !sessionOpen(host, s));
+        break;
+      }
+      case 'session':
+        view({ host: hostId, session });
+        break;
+      case 'window':
+        view({ host: hostId, session, window });
+        break;
+    }
+    term.focus();
+  });
+  $('side-add').addEventListener('click', () => openHosts());
 
   // Rebuilt from scratch each time — a few dozen buttons at most — but only when something on them
   // changed, so a tab row the thumb is scrolling does not jump back under it.
@@ -300,6 +544,7 @@
     for (const [key, value] of Object.entries(props)) {
       if (key === 'on') node.addEventListener('click', value);
       else if (key === 'class') node.className = value;
+      else if (key === 'role' || key.includes('-')) node.setAttribute(key, value);
       else node[key] = value;
     }
     for (const child of children) if (child != null) node.append(child);
@@ -319,7 +564,8 @@
   }
 
   // Hosts, each with its sessions; what ssh is waiting on; adding a host.
-  $('where').addEventListener('click', () => openSheet((root) => {
+  $('where').addEventListener('click', () => openHosts());
+  const openHosts = () => openSheet((root) => {
     const at = asked && asked.host ? asked : shown;
     for (const host of topology.hosts) {
       const up = host.state === 'connected';
@@ -371,7 +617,7 @@
     });
     root.append(add.node, el('div', { class: 'hint' },
       'Connects over ssh from the server, with the server\'s keys. Saved to its hosts.json.'));
-  }));
+  });
 
   // What can be done to the pane and window on screen.
   $('more').addEventListener('click', () => openSheet((root) => {
@@ -418,6 +664,10 @@
     root.append(el('div', { class: 'pair' },
       row('A−', () => { setFont(fontSize - 1); sheet.draw(); }),
       row('A+', () => { setFont(fontSize + 1); sheet.draw(); })));
+    root.append(el('h2', {}, 'Appearance'));
+    root.append(el('div', { class: 'pair' }, ...[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']]
+      .map(([value, label]) => row(label, () => { setAppearance(value); sheet.draw(); },
+        appearance === value ? 'on' : ''))));
   }));
 
   let toastTimer = null;
