@@ -682,7 +682,10 @@ this click" on every control that has one — skip the confirmation here, the ss
 copy, a window of its own for the host row's `+` and its context menu's New Session (through
 `preferNewWindow`, the path File ▸ New Session and the menu bar take; the menu item is a native
 alternate, "New Session in New Window", for the reason F4.36's copy is). That `+` is deliberately not `isArmed`: red says "will not ask",
-and a new window loses nothing. It does not sample ⌘, and there is no `CommandKey`:
+and a new window loses nothing. It is `isAlternate` instead — the accent tint, and under
+`differentiateWithoutColor` the same filled chip the armed buttons use — because for a while its
+tooltip was the only thing that changed, and a tooltip already on screen keeps its string, so
+nothing told the user the key had registered. It does not sample ⌘, and there is no `CommandKey`:
 the one thing that briefly read ⌘ was F4.36, and the same surfaces that made a ⌘ title impossible to
 display also made it the wrong key to ask for (see the F4.36 entry above).
 

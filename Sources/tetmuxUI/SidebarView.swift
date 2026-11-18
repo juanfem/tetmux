@@ -452,13 +452,16 @@ struct SidebarView: View {
             rowActions {
                 // ⌥ is "the other reading of this click", as on every modified control in the tree:
                 // the new session gets a macOS window of its own instead of taking over this one.
-                // Not armed — nothing is lost either way, and red here means "will not ask".
+                // Not armed — nothing is lost either way, and red here means "will not ask". Accented
+                // instead: the tooltip alone could not say ⌥ had registered, because one already on
+                // screen keeps the string it appeared with.
                 RowButton(
                     glyph: .plus,
                     help: modifiers.isOptionHeld
                         ? "New session on \(host.config.name) in a new window"
                         : "New session on \(host.config.name)",
-                    isVisible: showsActions
+                    isVisible: showsActions,
+                    isAlternate: modifiers.isOptionHeld
                 ) {
                     model.createSessionWithDefaultName(
                         hostId: host.id, revealIn: state, preferNewWindow: OptionKey.isHeld
@@ -1108,6 +1111,13 @@ private struct RowButton: View {
     /// between them would have to be matched all over again for a state that lasts as long as a key
     /// is held. Red is also the one thing here that reads at a glance as *this does not come back*.
     var isArmed: Bool = false
+    /// ⌥ is down and this button will take its other, non-destructive reading — the host row's `+`
+    /// opening the new session in a window of its own.
+    ///
+    /// The accent rather than red, because nothing is lost: red is reserved for "will not ask". The
+    /// tooltip cannot carry this — one already on screen keeps the string it appeared with — so
+    /// without a change to the glyph itself the user has no evidence the key registered.
+    var isAlternate: Bool = false
     let action: () -> Void
 
     /// §7 — Reduce Motion. The reveal is the only animation in the tree, and its whole job is to keep
@@ -1144,12 +1154,16 @@ private struct RowButton: View {
 
     private var tint: AnyShapeStyle {
         if isArmed { return AnyShapeStyle(Color.red) }
+        if isAlternate { return AnyShapeStyle(Color.accentColor) }
         return AnyShapeStyle(isHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
     }
 
     /// §7 — `differentiateWithoutColor`, and only then: red alone says this click will not stop to
     /// ask, and that is the whole content of the state.
-    private var saysArmedWithoutColour: Bool { isArmed && differentiateWithoutColor }
+    ///
+    /// The alternate state rides the same channel: with colour gone, the accent says nothing either,
+    /// and the chip still says "this click is not the ordinary one" — the tooltip says which.
+    private var saysArmedWithoutColour: Bool { (isArmed || isAlternate) && differentiateWithoutColor }
 
     /// The chip behind the glyph, which is the part that actually carries "armed" without hue.
     ///
