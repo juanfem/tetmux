@@ -52,14 +52,20 @@ else
     BUNDLE_VERSION="$VERSION"
 fi
 
-BUILD_DIR="$REPO_ROOT/.build/release"
+# The native build system, not Xcode 27's default Swift Build: that one stamps `LC_BUILD_VERSION sdk`
+# with the deployment target (14.0) instead of the SDK, which is the field the OS keys
+# linked-on-or-after behaviour on — and it compiles SwiftTerm's Metal shader, which native never
+# does. `--show-bin-path` because native puts its products under `.build/<triple>/release`, and
+# `.build/release` is Swift Build's symlink whenever that ran last. See docs/build-and-release.md.
+BUILD_FLAGS=(-c release --build-system native --package-path "$REPO_ROOT")
+BUILD_DIR="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path 2>/dev/null)"
 STAGING="$(mktemp -d)"
 APP="$STAGING/$APP_NAME.app"
 trap 'rm -rf "$STAGING"' EXIT
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
     echo "==> building $APP_NAME $VERSION (release)"
-    swift build -c release --package-path "$REPO_ROOT"
+    swift build "${BUILD_FLAGS[@]}"
 fi
 
 if [[ ! -x "$BUILD_DIR/$APP_NAME" ]]; then

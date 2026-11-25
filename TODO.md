@@ -70,8 +70,10 @@ References point into current `main`. Line numbers drift; the symbol names besid
   Run on `37bdd8f`, 2026-09-29, macos-15-arm64 runner with Homebrew tmux 3.7c. The pane still read
   `bash` after the 15 s wait, where the test expects `cat`
   (`SessionIntegrationTests.swift:632` and `:638`). Its sibling `testANewSessionRunsTheHostsInitialCommand`
-  passed in the same run. It could not be reproduced locally: 6/6 passes on 3.7b under zsh and bash,
-  3/3 on a 3.7c built from the release tarball, and the whole integration suite green on 3.7c.
+  passed in the same run. Alone it does not reproduce locally: 6/6 passes on 3.7b under zsh and bash,
+  3/3 on a 3.7c built from the release tarball, 4/4 on 3.3a and 3.5. **Under load it does**: on
+  2026-11-25 `Scripts/test-matrix.sh` failed it on 3.3a and 3.5 (zsh, the pane read `zsh`) while a
+  release build ran beside it, and passed on 3.0, 3.2a and 3.4 in the same sweep.
   *Suspected, not verified:* a race in how an **unattached** session's pane learns its command. The
   `%*` pane-command subscription (`TmuxCommand.subscribePaneCommand`) is believed to cover only the
   attached session's panes, so a session made by `newSession` reports its command through a
@@ -148,29 +150,6 @@ References point into current `main`. Line numbers drift; the symbol names besid
   un-notarised build hands the same Gatekeeper step to someone who did not read the README. The DMG
   stays arm64-only by decision — do not revisit universal as part of this.
   `Scripts/package-dmg.sh:136`, `.github/workflows/ci.yml`
-
-- [~] **The .dmg links the macOS 26 SDK while macOS 27 is current.** The packaging job is on
-  `macos-26` and asserts `sdk >= 26`; a local build on Xcode 27.1 links 27.0, so the app on the
-  developer's machine is not the one that ships. That is the shape of 0.3.2's Liquid Glass
-  regression (`docs/build-and-release.md`), and whether 27 gates anything visible on the SDK is
-  not known: Apple's notes promise "refreshed materials… updated tab and navigation bars" without
-  saying, and only a side-by-side build would. Parked 2026-10-19 by decision, until GitHub's
-  Xcode 27 runner image ships the Metal Toolchain: Xcode 27's SwiftPM builds with Swift Build by
-  default, which compiles SwiftTerm's `Shaders.metal` and fails outright without that component,
-  and the image is still in public preview. Downloading it in the job
-  (`xcodebuild -downloadComponent MetalToolchain`, gigabytes) is possible but Apple's forums report
-  it hanging on 27.0, which would make every tag build a coin toss.
-  *When the image has it* — check with `xcrun --find metal` *and* a build, since the stub resolves
-  without the component — move `package` to `runs-on: xcode-27` (images are now named by Xcode;
-  there is no `macos-27` label), raise the SDK assertion's floor to 27, and compare the two .dmgs'
-  windows by eye before tagging. **That move also needs `package-dmg.sh` to build with
-  `--build-system native`** (or whatever fixes Swift Build's SDK stamp by then): the default on
-  Xcode 27 writes `sdk 14.0` into the binary, which the assertion refuses. Do not loosen the
-  assertion to admit it: the stamp made no visible difference on 27.0.1, but it is still the field
-  the OS keys linked-on-or-after behaviour on, and 0.3.2 is what trusting it to not matter cost. Native also
-  never compiles the shader, so if it is still on offer the Metal Toolchain stops mattering to this
-  job at all. `test` and `matrix` stay where they are, for the reasons recorded beside them.
-  `.github/workflows/ci.yml` (the `package` job)
 
 - [~] **SwiftTerm is held on 1.15.x; 1.16 through 1.20 tighten the text.** 1.16 changed
   `computeFontDimensions` to snap the cell width to the *nearest* pixel instead of up

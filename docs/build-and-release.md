@@ -53,16 +53,20 @@ marked deprecated. Measured on 2026-10-19, Xcode 27.1, macOS 27.0.1:
   with the current controls. So it was not 0.3.2 again, and "the window looks old" on 27 is not
   evidence of it either — 27's sidebar *is* an opaque grey, in Finder and in a 26.5-linked 0.14.0
   alike, which was taken for a regression before it was compared. What the stamp does break is
-  the `package` job's SDK assertion, which reads exactly this field and would refuse a Swift
-  Build binary; see the runner entry in `TODO.md` before moving that job to Xcode 27.
+  the `package` job's SDK assertion, which reads exactly this field and refuses a Swift Build
+  binary — so `package-dmg.sh` builds with `--build-system native`, which also never compiles the
+  shader. Do not loosen the assertion to admit the stamp: it made no visible difference on 27.0.1,
+  but it is the field the OS keys linked-on-or-after behaviour on, and 0.3.2 is what trusting it
+  not to matter cost. When native is finally removed, the stamp has to be fixed before the move.
 - **Products move to `.build/out/Products/{Debug,Release}`**, with `.build/debug` and
   `.build/release` left as symlinks, so every script path still resolves.
 - **The release products include the test bundles**; `package-dmg.sh` already skips them by name.
   The resource bundles gain a full `Contents/` layout, and `PackageResources` still finds them:
   the image built this way passed the `package` job's checks locally, `.build` moved aside.
 
-**The SDK the release links against is what the window looks like, so `package` runs on `macos-26`
-while everything else stays on `macos-15`.** macOS 26 grants an application the Liquid Glass
+**The SDK the release links against is what the window looks like, so `package` runs on `xcode-27`
+— the macOS 27 SDK, the one a development machine links — while everything else stays on
+`macos-15`.** GitHub names that image by Xcode; there is no `macos-27` label. macOS 26 grants an application the Liquid Glass
 appearance — rounded window corners, the translucent sidebar material — only to a binary linked
 against the macOS 26 SDK; one linked against 15.x gets the compatibility look, square-cornered with
 an opaque grey sidebar. Nothing in the source selects this and nothing in the build reports it.
@@ -70,7 +74,8 @@ an opaque grey sidebar. Nothing in the source selects this and nothing in the bu
 different application than the one the same commit builds locally — through a green run of a suite
 that mounts the image, verifies the signature and opens a control-mode channel, none of which can
 see a design language. So the packaging job asserts the SDK out of the Mach-O rather than trusting
-the runner label, which an older Xcode on the image would satisfy while being wrong.
+the runner label, which an older Xcode on the image would satisfy while being wrong. Its floor is
+27, the SDK the job links.
 `Package.swift` pins `.macOS(.v14)`, so this is the SDK and not the deployment target: `minos`
 stays 14.0 and `LSMinimumSystemVersion` stays honest. The test jobs stay a version behind
 deliberately — they assert behaviour, which is the half that does not vary with the SDK.

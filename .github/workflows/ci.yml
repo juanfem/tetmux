@@ -182,7 +182,11 @@ jobs:
     # `test` and `matrix` stay on `macos-15` deliberately — they assert behaviour, which is the half
     # that does not vary with the SDK, and running them a version behind is free coverage of the
     # older OS. This is the one job whose output somebody installs.
-    runs-on: macos-26
+    #
+    # Xcode 27's image, named by Xcode rather than by OS: there is no `macos-27` label. It links the
+    # macOS 27 SDK, which is what the developer's own build links, so the app that ships is the one
+    # that was looked at. `package-dmg.sh` builds with `--build-system native` — see there for why.
+    runs-on: xcode-27
     permissions:
       # Only the tagged path uses this, to create the release the .dmg is attached to.
       contents: write
@@ -212,15 +216,20 @@ jobs:
       # launches, connects, signs and verifies identically whichever SDK it was linked against, and
       # the only symptom is that the window is drawn in the previous design language. So the SDK is
       # asserted directly, out of the Mach-O, rather than trusted to the runner label — a runner
-      # image that ships an older Xcode, or a `Select Xcode` step that picks one, would put 15.x back
-      # with `runs-on` still reading `macos-26` and nothing to say so.
+      # image that ships an older Xcode, or a `Select Xcode` step that picks one, would put an older SDK
+      # back with `runs-on` still reading `xcode-27` and nothing to say so.
+      #
+      # The floor is 27, not 26: Swift Build — Xcode 27's default — stamps the deployment target
+      # (14.0) into this field, so a `package-dmg.sh` that lost its `--build-system native` fails
+      # here rather than shipping a binary the OS reads as linked against 14.
       - name: Assert the binary linked against the current SDK
         run: |
-          SDK="$(otool -l .build/release/tetmux | awk '/LC_BUILD_VERSION/,/ntools/ { if ($1 == "sdk") print $2 }' | head -1)"
+          BIN="$(swift build -c release --build-system native --show-bin-path 2>/dev/null)/tetmux"
+          SDK="$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/,/ntools/ { if ($1 == "sdk") print $2 }' | head -1)"
           echo "linked against macOS SDK $SDK"
           MAJOR="${SDK%%.*}"
-          if [[ -z "$MAJOR" || "$MAJOR" -lt 26 ]]; then
-            echo "::error::built against macOS SDK ${SDK:-unknown}; macOS 26 grants Liquid Glass only to a binary linked against the 26 SDK, so this .dmg would ship with the compatibility appearance"
+          if [[ -z "$MAJOR" || "$MAJOR" -lt 27 ]]; then
+            echo "::error::built against macOS SDK ${SDK:-unknown}; the release links the macOS 27 SDK, and a lower stamp means an older Xcode on the image or Swift Build's deployment-target stamp"
             exit 1
           fi
 
