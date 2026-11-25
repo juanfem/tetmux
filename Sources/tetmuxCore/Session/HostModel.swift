@@ -929,6 +929,13 @@ public struct TmuxVersion: Comparable, Sendable {
     /// Control-mode flow control — `refresh-client -f pause-after=`, `refresh-client -A`, and the
     /// `%pause`/`%continue` notifications that go with them — landed in 3.2 (P6.5).
     public var supportsFlowControl: Bool { self >= TmuxVersion("3.2")! }
+    /// tmux answers a pane's OSC 10/11 colour queries itself from 3.4 — and also hands the query on
+    /// to us in `%output`, so the emulator must not answer it a second time. See
+    /// `SessionService.answerQuery` for what two answers do to a program that asks.
+    public var answersColourQueries: Bool { self >= TmuxVersion("3.4")! }
+    /// `refresh-client -r`, which tells tmux the colours to answer with. 3.4 answers but has no
+    /// way to be told, so it says black for both; 3.3a and older answer nothing and leave it to us.
+    public var acceptsColourReports: Bool { self >= TmuxVersion("3.5")! }
     /// Below this, control mode is too different to drive; §4.6 passthrough applies.
     public var supportsControlMode: Bool { self >= TmuxVersion("2.4")! }
     /// `move-window -a`/`-b`, which places a window next to another one instead of at a numbered

@@ -1912,6 +1912,43 @@ final class SessionIntegrationTests: XCTestCase {
     /// Checked by pasting into `cat > file` and comparing the bytes that actually landed — the only way
     /// to see what tmux's lexer made of the encoding. Lines are kept short because the pane's pty is in
     /// canonical mode, where a line over ~1 KB is dropped by the tty rather than by us.
+    /// A program asking its pane for the background gets the pane's colour from tmux, not black.
+    ///
+    /// From 3.4 tmux answers OSC 11 itself, and with nothing told to it the answer is black — so a
+    /// light pane told opencode it was dark while the emulator said light, and opencode flipped
+    /// between its themes. The colour asserted on is only ever in the report, never in the command
+    /// the pane is sent, so it can arrive by one route alone.
+    func testAPaneAskingForItsBackgroundGetsTheReportedColour() async throws {
+        let service = SessionService()
+        await service.addHost(HostConfig(id: "local", name: "localhost", isLocal: true))
+        try await service.connectHost(hostId: "local", targetSession: sessionName)
+
+        let host = try await waitForHost(service) {
+            $0.tmuxVersion != nil && $0.activeSession?.activeWindow?.layoutTree != nil
+        }
+        let version = try XCTUnwrap(TmuxVersion(host.tmuxVersion ?? ""))
+        try XCTSkipUnless(version.acceptsColourReports, "refresh-client -r needs tmux 3.5; this is \(version.raw)")
+        let paneId = try XCTUnwrap(host.activeSession?.activeWindow?.preferredPaneId)
+
+        let colours = PaneColours(
+            foreground: .init(red: 0x1111, green: 0x2222, blue: 0x3333),
+            background: .init(red: 0xfafa, green: 0xeeee, blue: 0xdddd)
+        )
+        await service.reportPaneColours(hostId: "local", paneId: paneId, colours: colours)
+
+        let stream = await service.subscribeToPane(hostId: "local", paneId: paneId).stream
+        let collected = collect(stream, until: "11;rgb:fafa/eeee/dddd")
+        try await Task.sleep(for: .milliseconds(500))
+        // Raw and unechoed so the reply is read rather than typed at the shell; ESC shown as E.
+        let query = #"sh -c 'stty raw -echo min 0 time 10; printf "\033]11;?\033\\\\"; r=$(dd bs=100 count=1 2>/dev/null); stty sane; printf "%s\n" "$r" | tr "\033" E'"#
+        await service.sendKeys(hostId: "local", paneId: paneId, text: query + "\r")
+
+        let output = await collected.value
+        XCTAssertTrue(output.contains("E]11;rgb:fafa/eeee/dddd"), "tmux did not answer with the reported colour; got:\n\(output)")
+
+        await service.disconnectHost(hostId: "local")
+    }
+
     func testAMultiLinePasteArrivesIntact() async throws {
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("tetmux-paste-\(UUID().uuidString.prefix(8)).txt")

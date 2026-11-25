@@ -906,7 +906,8 @@ terminal. Four things are load-bearing:
 - **The System scheme carries no palette.** It calls `configureNativeColors`, which reads
   `NSColor.textColor`/`.textBackgroundColor` and therefore follows light and dark *while the app
   runs*; copying today's values into fixed ones would look right until the user switched
-  appearance.
+  appearance. The emulator's *own* copy of them — what it answers OSC 10/11 with — is a snapshot,
+  so `PaneTerminalView.viewDidChangeEffectiveAppearance` sets them again and re-tells tmux.
 - **`installColors` goes first**, because it resets the view's 256-entry colour cache, and setting
   the foreground and background before it would have them thrown away. It is guarded on an actual
   change (`Coordinator.appliedSchemeId`), since a repaint of every pane on every `%layout-change`

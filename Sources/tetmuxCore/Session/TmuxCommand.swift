@@ -349,6 +349,16 @@ public enum TmuxCommand {
         "refresh-client -A \(quote("\(paneId):\(paused ? "pause" : "continue")"))"
     }
 
+    /// Tells tmux what one pane's default foreground or background is, so its own answer to the
+    /// pane's OSC 10/11 query is the truth instead of black (tmux ≥ 3.5).
+    ///
+    /// Double-quoted, because tmux interprets `\033` and `\\` only there: single-quoted, the report
+    /// is the literal text `\033]11;…`, which tmux accepts without complaint and then ignores. Nothing
+    /// user-supplied goes in — a pane id and a colour this type formatted.
+    public static func colourReport(paneId: String, osc: Int, colour: PaneColours.RGB) -> String {
+        "refresh-client -r \"\(paneId):\\033]\(osc);\(colour.xcolor)\\033\\\\\""
+    }
+
     // MARK: - Where things start (F4.11)
 
     /// The server's own `$HOME`, in the only form that survives the trip.
@@ -821,5 +831,33 @@ public enum TmuxCommand {
         }
         if started { arguments.append(current) }
         return arguments
+    }
+}
+
+/// One pane's default foreground and background, as tmux is told them (`TmuxCommand.colourReport`).
+public struct PaneColours: Equatable, Sendable {
+    /// 16 bits a channel, which is what X11's `rgb:` notation and OSC 10/11 replies carry.
+    public struct RGB: Equatable, Sendable {
+        public var red: UInt16
+        public var green: UInt16
+        public var blue: UInt16
+
+        public init(red: UInt16, green: UInt16, blue: UInt16) {
+            self.red = red
+            self.green = green
+            self.blue = blue
+        }
+
+        public var xcolor: String {
+            String(format: "rgb:%04x/%04x/%04x", red, green, blue)
+        }
+    }
+
+    public var foreground: RGB
+    public var background: RGB
+
+    public init(foreground: RGB, background: RGB) {
+        self.foreground = foreground
+        self.background = background
     }
 }

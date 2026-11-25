@@ -484,6 +484,10 @@ public actor SessionService {
     /// re-applies the window-size policy and has to be able to invalidate it — a follower attaching
     /// to a session is itself a client whose arrival can resize that session's windows.
     private var lastSentWindowSizes: [String: [String: (cols: Int, rows: Int)]] = [:]
+    /// Each pane's default colours as its view last reported them, per host, so a channel that
+    /// learns its tmux version late — or a reconnect, which is a new channel to the same panes —
+    /// can tell tmux without the views having to notice. See `reportPaneColours`.
+    private var paneColours: [String: [String: PaneColours]] = [:]
     /// Which view owns each tmux window's size, per host.
     ///
     /// One tmux window can be on screen in two macOS windows of different sizes. Letting both drive
@@ -2129,6 +2133,9 @@ public actor SessionService {
             applySubscriptionPolicy(hostId: hostId, connection: connection)
             warnIfServerIsOld(hostId: hostId, version: version)
             flushResize(hostId: hostId)
+            for (paneId, colours) in paneColours[hostId] ?? [:] {
+                sendColourReports(paneId: paneId, colours: colours, hostId: hostId, connection: connection)
+            }
 
         case .listSessions:
             applySessions(text(), hostId: hostId)
@@ -3166,6 +3173,52 @@ public actor SessionService {
             try? await Task.sleep(for: remaining)
             await self?.flushKeys(hostId: hostId)
         }
+    }
+
+    /// The emulator's own answer to something a program in the pane asked its terminal — and
+    /// dropped when tmux has answered it already.
+    ///
+    /// From 3.4 tmux answers OSC 10 and 11 itself *and* passes the query through in `%output`, so
+    /// the emulator sees it and answers too. A program asking for the background then gets two
+    /// replies that disagree — tmux's black, which it has no way to know better than below 3.5,
+    /// and the scheme's real colour — and acts on both: opencode flipped between its dark and light
+    /// themes, and the reply it was not expecting any more arrived as typed input, so
+    /// `]11;rgb:ffff/ffff/ffff` appeared at its prompt. Telling tmux the right colours is
+    /// `reportPaneColours`'s half; this is the other, and 3.4 has only this one.
+    ///
+    /// Recognising the reply by its first bytes is not the guessing `isAnsweringQuery` exists to
+    /// avoid: these bytes are already known to be the emulator's, and SwiftTerm writes each colour
+    /// report as one response of its own.
+    public func answerQuery(hostId: String, paneId: String, bytes: [UInt8]) {
+        if connections[hostId]?.version?.answersColourQueries == true, Self.isColourQueryReply(bytes) {
+            return
+        }
+        sendKeys(hostId: hostId, paneId: paneId, bytes: bytes)
+    }
+
+    /// `ESC ] 10 ;` or `ESC ] 11 ;` — the default foreground or background, the two tmux answers.
+    /// OSC 12 (cursor) and OSC 4 (a palette entry) it leaves to the terminal, and so do we.
+    public static func isColourQueryReply(_ bytes: [UInt8]) -> Bool {
+        bytes.count > 5 && bytes[0] == 0x1b && bytes[1] == 0x5d && bytes[2] == 0x31
+            && (bytes[3] == 0x30 || bytes[3] == 0x31) && bytes[4] == 0x3b
+    }
+
+    /// Tells tmux one pane's default colours, so the answer it gives a program asking for them is
+    /// the pane's and not black. Remembered per host and sent again whenever a channel learns its
+    /// version, since the report lives in the server and a new channel cannot assume it is there.
+    public func reportPaneColours(hostId: String, paneId: String, colours: PaneColours) {
+        guard paneColours[hostId]?[paneId] != colours else { return }
+        paneColours[hostId, default: [:]][paneId] = colours
+        guard let connection = connections[hostId], connection.version != nil else { return }
+        sendColourReports(paneId: paneId, colours: colours, hostId: hostId, connection: connection)
+    }
+
+    private func sendColourReports(paneId: String, colours: PaneColours, hostId: String, connection: Connection) {
+        guard connection.version?.acceptsColourReports == true else { return }
+        send(TmuxCommand.colourReport(paneId: paneId, osc: 10, colour: colours.foreground),
+             kind: .ignore, hostId: hostId, connection: connection)
+        send(TmuxCommand.colourReport(paneId: paneId, osc: 11, colour: colours.background),
+             kind: .ignore, hostId: hostId, connection: connection)
     }
 
     public func sendKeys(hostId: String, paneId: String, text: String) {

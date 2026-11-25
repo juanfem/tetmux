@@ -244,6 +244,22 @@ struct TerminalPaneView: NSViewRepresentable {
     ///
     /// `installColors` before the foreground and background, because it resets the view's colour
     /// cache — setting them first would have them thrown away.
+    /// The pane's default foreground and background as tmux should report them, resolved under
+    /// the view's own appearance — the System scheme's are dynamic colours with no single value.
+    static func paneColours(of view: TerminalView) -> PaneColours {
+        func rgb(_ colour: NSColor) -> PaneColours.RGB {
+            guard let srgb = colour.usingColorSpace(.sRGB) else { return .init(red: 0, green: 0, blue: 0) }
+            func channel(_ value: CGFloat) -> UInt16 { UInt16((min(max(value, 0), 1) * 65535).rounded()) }
+            return .init(red: channel(srgb.redComponent), green: channel(srgb.greenComponent),
+                         blue: channel(srgb.blueComponent))
+        }
+        var colours = PaneColours(foreground: .init(red: 0, green: 0, blue: 0), background: .init(red: 0, green: 0, blue: 0))
+        view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            colours = PaneColours(foreground: rgb(view.nativeForegroundColor), background: rgb(view.nativeBackgroundColor))
+        }
+        return colours
+    }
+
     static func applyColors(_ scheme: TerminalColorScheme, to view: TerminalView) {
         guard !scheme.followsSystemAppearance else {
             view.installColors(TerminalColorScheme.defaultAnsi.map(\.terminalColor))
@@ -280,6 +296,7 @@ struct TerminalPaneView: NSViewRepresentable {
         if context.coordinator.appliedSchemeId != theme.colorSchemeId {
             context.coordinator.appliedSchemeId = theme.colorSchemeId
             Self.applyColors(theme.colorScheme, to: view)
+            context.coordinator.reportColours()
         }
 
         // Snap the emulator to the size tmux reported. If the view's own pixel-derived size drifts
@@ -377,6 +394,29 @@ struct TerminalPaneView: NSViewRepresentable {
                     self.hand(bytes, to: view)
                 }
             }
+            reportColours()
+        }
+
+        /// Tells tmux this pane's default colours, which it answers OSC 10/11 with from 3.4 on —
+        /// black, until it is told otherwise. See `SessionService.answerQuery`.
+        func reportColours() {
+            guard let view else { return }
+            let colours = TerminalPaneView.paneColours(of: view)
+            let (hostId, paneId, service) = (parent.hostId, parent.paneId, parent.service)
+            Task { await service.reportPaneColours(hostId: hostId, paneId: paneId, colours: colours) }
+        }
+
+        /// Light became dark or back. Only the System scheme changes with it, and the emulator's
+        /// own copy of its colours — what it answers a query with when tmux does not — was taken
+        /// when they were set, so it is set again under the new appearance before tmux is told.
+        func appearanceChanged() {
+            guard let view else { return }
+            if parent.theme.colorScheme.followsSystemAppearance {
+                view.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    view.configureNativeColors()
+                }
+            }
+            reportColours()
         }
 
         /// P6.4 — one handoff per display frame, and the first one after a quiet moment immediately.
@@ -530,12 +570,15 @@ struct TerminalPaneView: NSViewRepresentable {
             let hostId = parent.hostId
             let paneId = parent.paneId
             let service = parent.service
-            if (source as? ComposingTerminalView)?.isAnsweringQuery != true {
-                // Typed while a new tab is opening: it is the new tab's, and this pane is the one
-                // being left, so it neither receives the bytes nor takes the focus.
-                if parent.newTabInput?.hold(.keys(bytes)) == true { return }
-                parent.onFocusRequest()
+            guard (source as? ComposingTerminalView)?.isAnsweringQuery != true else {
+                // tmux may have answered this one already; the service knows which version it is.
+                Task { await service.answerQuery(hostId: hostId, paneId: paneId, bytes: bytes) }
+                return
             }
+            // Typed while a new tab is opening: it is the new tab's, and this pane is the one
+            // being left, so it neither receives the bytes nor takes the focus.
+            if parent.newTabInput?.hold(.keys(bytes)) == true { return }
+            parent.onFocusRequest()
             Task { await service.sendKeys(hostId: hostId, paneId: paneId, bytes: bytes) }
         }
 
@@ -870,6 +913,11 @@ class ComposingTerminalView: TerminalView {
 /// event whatever the z-order says.
 final class PaneTerminalView: ComposingTerminalView, NSMenuItemValidation {
     weak var coordinator: TerminalPaneView.Coordinator?
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        coordinator?.appearanceChanged()
+    }
 
     /// tmux owns a pane's grid (§3.3), so the frame-derived one `resetFont` leaves behind on a
     /// density change is put straight back.

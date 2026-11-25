@@ -429,6 +429,22 @@ that same `send`, so gating focus there would have taken the click with it.
 that reports no mouse — and it leaves *motion* over a background pane meaning nothing about where
 the keyboard is.
 
+**A query tmux answers is not answered again, and tmux is told what to answer with.** From 3.4
+tmux replies to a pane's OSC 10/11 (default foreground/background) itself *and* still passes the
+query through in `%output`, so SwiftTerm answered it a second time. Two replies that disagree — tmux
+knows no colours for a control client and says `rgb:0000/0000/0000` for both, the emulator says the
+scheme's — made opencode flip between its dark and light themes, and the reply it no longer
+expected arrived as typed input, `]11;rgb:…` at its prompt. Two halves, both needed:
+`SessionService.answerQuery` drops the emulator's OSC 10/11 reply when the host's tmux answers
+(≥ 3.4), and `reportPaneColours` sends `refresh-client -r "%N:\033]11;rgb:…\033\\"` per pane
+(≥ 3.5) so tmux's answer is the truth — and on 3.6+ its mode-2031 / `CSI ?996n` theme answer
+follows the background with it. The report must be **double**-quoted: single-quoted, tmux accepts it
+silently and keeps answering black. 3.3a and older answer nothing, so the emulator's reply is the
+only one there; 3.4 has no `-r` and stays black (see `TODO.md`). OSC 12 and OSC 4 tmux leaves to the
+terminal. The pane's colours are resolved under the view's own appearance and re-sent on a light/dark
+switch, since the System scheme's are dynamic. Covered by `ColourQueryTests` and
+`testAPaneAskingForItsBackgroundGetsTheReportedColour`.
+
 **A new tab takes the keyboard when it is asked for, not when it arrives.** Control mode answers
 `new-window` with no id, so the tab is selected only when the topology refresh brings it back — and
 the command itself waits on a `display-message` for its start directory first. Through both round

@@ -87,6 +87,13 @@ References point into current `main`. Line numbers drift; the symbol names besid
 
 ## Parked by decision
 
+- [~] **tmux 3.4 tells every pane its background is black.** 3.4 answers OSC 10/11 itself with
+  `rgb:0000/0000/0000` and has no `refresh-client -r` (3.5 added it), so a light pane reads as dark to
+  a program that asks — opencode picks its dark theme. It is at least *one* answer now: the
+  emulator's duplicate is dropped from 3.4 up (`docs/invariants.md`, the query entry). The only lever
+  3.4 offers is `set -p window-style bg=…` on each pane, which changes the user's tmux options for
+  every client attached to it; not worth it for one release. Verified against `.tmux-matrix/bin/3.4`.
+
 - [~] **P6.7's cold launch: ~898 ms, amended out of the requirement rather than fixed.** The
   requirement now names **warm** launch, which passes at 268–288 ms (SRD §6, and the reasoning is
   there rather than here). This entry survives because it holds what was measured and what was ruled

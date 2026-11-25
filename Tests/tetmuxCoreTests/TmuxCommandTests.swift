@@ -1054,3 +1054,39 @@ final class EmptyServerTests: XCTestCase {
         XCTAssertFalse(host(state: .connecting, ended: "work").serverIsEmpty)
     }
 }
+
+/// A pane's colours told to tmux, which answers OSC 10/11 itself from 3.4 — see
+/// `SessionService.answerQuery` for what two answers did to opencode.
+final class ColourQueryTests: XCTestCase {
+
+    /// Double quotes are the point: tmux turns `\033` into ESC only inside them. Single-quoted, the
+    /// report is accepted, silently ignored, and tmux goes on answering black.
+    func testAColourReportIsDoubleQuotedSoTmuxReadsTheEscapes() {
+        let white = PaneColours.RGB(red: 0xffff, green: 0xfefe, blue: 0x0a0b)
+        XCTAssertEqual(
+            TmuxCommand.colourReport(paneId: "%3", osc: 11, colour: white),
+            #"refresh-client -r "%3:\033]11;rgb:ffff/fefe/0a0b\033\\""#
+        )
+    }
+
+    /// 3.4 answers and cannot be told; 3.5 can. Measured against the version matrix.
+    func testOnlyTmuxThatAnswersHasItsAnswerSuppressed() {
+        XCTAssertFalse(TmuxVersion("3.3a")!.answersColourQueries)
+        XCTAssertTrue(TmuxVersion("3.4")!.answersColourQueries)
+        XCTAssertFalse(TmuxVersion("3.4")!.acceptsColourReports)
+        XCTAssertTrue(TmuxVersion("3.5")!.acceptsColourReports)
+        XCTAssertTrue(TmuxVersion("3.7b")!.acceptsColourReports)
+    }
+
+    /// Foreground and background are the two tmux answers; the cursor and the palette it leaves to
+    /// the terminal, so the emulator's answer to those must still go out.
+    func testOnlyForegroundAndBackgroundRepliesAreRecognised() {
+        func reply(_ text: String) -> [UInt8] { Array(text.utf8) }
+        XCTAssertTrue(SessionService.isColourQueryReply(reply("\u{1b}]10;rgb:0000/0000/0000\u{1b}\\")))
+        XCTAssertTrue(SessionService.isColourQueryReply(reply("\u{1b}]11;rgb:ffff/ffff/ffff\u{1b}\\")))
+        XCTAssertFalse(SessionService.isColourQueryReply(reply("\u{1b}]12;rgb:ffff/ffff/ffff\u{1b}\\")))
+        XCTAssertFalse(SessionService.isColourQueryReply(reply("\u{1b}]4;1;rgb:ffff/0000/0000\u{1b}\\")))
+        XCTAssertFalse(SessionService.isColourQueryReply(reply("\u{1b}[?997;1n")))
+        XCTAssertFalse(SessionService.isColourQueryReply(reply("]11;rgb:ffff/ffff/ffff")))
+    }
+}
