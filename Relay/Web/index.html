@@ -154,14 +154,14 @@
 
   /* tmux owns the grid (§3.3). When another client owns the window's size the grid can be larger
      than the screen, and then it pans rather than reflowing. */
-  #term { flex: 1; min-height: 0; overflow: auto; padding: 4px; -webkit-overflow-scrolling: touch;
-    -webkit-touch-callout: none; }
+  #term { flex: 1; min-height: 0; overflow: auto; padding: 4px; -webkit-overflow-scrolling: touch; }
   /* Selecting text on a phone. xterm.js has no touch selection, and its input is a hidden textarea
      iOS cannot be long-pressed onto, so a long press puts the buffer here as plain text, where the
      system's own selection, Copy and handles work. Laid over the terminal rather than replacing it:
-     a hidden terminal would measure as zero rows and ask tmux to shrink the window (§3.3). */
-  #main { position: relative; }
-  #pick { position: absolute; left: 0; right: 0; display: flex; flex-direction: column;
+     a hidden terminal would measure as zero rows and ask tmux to shrink the window (§3.3). Placed
+     against #app, measured from the terminal when it opens, so that nothing around the terminal
+     changes its CSS for it — the terminal's touch scrolling is xterm.js's own, and easily upset. */
+  #pick { position: absolute; display: flex; flex-direction: column;
     background: var(--bg); z-index: 5; }
   #pick[hidden] { display: none; }
   #pick .bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: var(--bar);
@@ -237,11 +237,6 @@
   <div id="windows" class="tabs" role="tablist" aria-label="Windows"></div>
   <div id="panes" class="tabs" role="tablist" aria-label="Panes" hidden></div>
   <div id="term"></div>
-  <div id="pick" hidden>
-    <div class="bar"><span>Long-press to select, then Copy</span>
-      <button id="pick-paste">Paste…</button><button id="pick-done" class="on">Done</button></div>
-    <pre id="pick-text"></pre>
-  </div>
   <div id="keys">
     <button data-key="esc">esc</button>
     <button data-key="ctrl" id="ctrl">ctrl</button>
@@ -255,6 +250,11 @@
     <button data-text="/">/</button>
     <button data-text="-">-</button>
   </div>
+  </div>
+  <div id="pick" hidden>
+    <div class="bar"><span>Long-press to select, then Copy</span>
+      <button id="pick-paste">Paste…</button><button id="pick-done" class="on">Done</button></div>
+    <pre id="pick-text"></pre>
   </div>
   <div id="veil" hidden><div id="sheet" role="dialog"></div></div>
   <div id="toast" role="status" hidden></div>
@@ -1066,8 +1066,10 @@
     const box = $('term');
     const pick = $('pick');
     const text = $('pick-text');
-    pick.style.top = `${box.offsetTop}px`;
-    pick.style.height = `${box.offsetHeight}px`;
+    const at = box.getBoundingClientRect();
+    const app = $('app').getBoundingClientRect();
+    Object.assign(pick.style, { top: `${at.top - app.top}px`, left: `${at.left - app.left}px`,
+      width: `${at.width}px`, height: `${at.height}px` });
     text.style.fontSize = `${fontSize}px`;
     text.textContent = bufferText();
     pick.hidden = false;
@@ -1088,9 +1090,12 @@
   $('pick-done').addEventListener('click', closePick);
   $('pick-paste').addEventListener('click', () => { $('pick').hidden = true; openPaste(); });
 
-  // A long press, with the finger held still: a moving one is scrolling, and two are a pinch.
+  // A long press, with the finger held still: a moving one is scrolling, and two are a pinch. Any
+  // scroll at all also calls it off — iOS can stop delivering touchmove once it has taken a gesture
+  // as a scroll, and a select view opening under a scrolling finger takes the scroll away from it.
   let press = null;
   const cancelPress = () => { if (press) clearTimeout(press.timer); press = null; };
+  $('term').addEventListener('scroll', cancelPress, { capture: true, passive: true });
   $('term').addEventListener('touchstart', (event) => {
     cancelPress();
     if (event.touches.length !== 1) return;
@@ -1100,7 +1105,7 @@
   $('term').addEventListener('touchmove', (event) => {
     if (!press) return;
     const touch = event.touches[0];
-    if (event.touches.length !== 1 || Math.hypot(touch.clientX - press.x, touch.clientY - press.y) > 10) cancelPress();
+    if (event.touches.length !== 1 || Math.hypot(touch.clientX - press.x, touch.clientY - press.y) > 6) cancelPress();
   }, { passive: true });
   $('term').addEventListener('touchend', cancelPress);
   $('term').addEventListener('touchcancel', cancelPress);
