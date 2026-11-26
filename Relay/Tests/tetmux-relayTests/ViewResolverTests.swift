@@ -94,4 +94,19 @@ final class ViewResolverTests: XCTestCase {
         resized.windows[0].panes[0].cols = 40
         XCTAssertEqual(Wire.Topology([host(sessions: [work])]), Wire.Topology([host(sessions: [resized])]))
     }
+
+    /// F4.38 — the page is sent the colour by name, resolved by the policy the Mac uses, and nothing
+    /// for the local host.
+    func testTheTopologyCarriesEachHostsColourByName() {
+        let local = host(sessions: [work])
+        let prod = HostState(
+            config: HostConfig(id: "custom-prod", name: "prod", color: .fixed(.red)), connectionState: .connected
+        )
+        let quiet = HostState(
+            config: HostConfig(id: "custom-quiet", name: "quiet", color: .none), connectionState: .connected
+        )
+        let auto = HostState(config: HostConfig(id: "ssh-devbox", name: "devbox"), connectionState: .connected)
+        let colors = Wire.Topology([local, prod, quiet, auto]).hosts.map(\.color)
+        XCTAssertEqual(colors, [nil, "red", nil, "orange"])
+    }
 }

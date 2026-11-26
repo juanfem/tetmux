@@ -60,7 +60,19 @@
      than behind it. 100% is only the first frame. */
   #app { position: fixed; inset: 0 0 auto 0; height: 100%; display: flex;
     padding-top: env(safe-area-inset-top); box-sizing: border-box; }
-  #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
+  /* F4.38 — a remote host's colour, as on the Mac: the host's name as a chip, and a band under the
+     top bar. The band is a shadow, not a border, so it takes no height from the terminal and a
+     colour coming or going is not a resize. On an installed page the status bar is translucent over
+     #app's top padding, so that strip takes the colour too: the Mac's band, where a phone has
+     room for one. */
+  #app.remote { background: var(--host); }
+  #app.remote #top { box-shadow: inset 0 -3px 0 var(--host); }
+  .chip { display: inline-block; padding: 0 7px; border-radius: 999px; color: #fff; font-weight: 600;
+    font-size: 12px; line-height: 18px; vertical-align: 1px; }
+  .hostdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .node.host .name { flex: 0 1 auto; }
+  .node.host .plus { margin-left: auto; }
 
   /* The sidebar: hosts, their sessions, each session's windows — the Mac's tree. Only where there is
      room for it beside a terminal; a phone keeps the host button and its sheet. */
@@ -246,10 +258,32 @@
     : { background: '#ffffff', foreground: '#000000', cursor: '#000000', cursorAccent: '#ffffff',
         selectionBackground: 'rgba(0, 122, 255, .25)' };
 
+  // F4.38 — the Mac's swatches (`HostColorStyle.swift`), by the name the relay sends. White text
+  // reads on every one in both appearances, which is why they do not change with it.
+  const hostColors = {
+    blue: '#2563c9', teal: '#0d7a6f', green: '#2f7d32', ochre: '#8a6a00', orange: '#b4530a',
+    purple: '#7c3aed', pink: '#be185d', graphite: '#52525b', red: '#c0262d',
+  };
+  const hostColor = (host) => (host && hostColors[host.color]) || null;
+  const hostDot = (host) => hostColor(host)
+    ? el('span', { class: 'hostdot', style: `background: ${hostColor(host)}` }) : null;
+  // The colour of the host whose pane is on screen: what the band and the browser's chrome speak
+  // for. The chip follows the name beside it, which can be a host still connecting.
+  let shownColor = null;
+  function applyHostColor(color) {
+    if (color === shownColor) return;
+    shownColor = color;
+    $('app').classList.toggle('remote', !!color);
+    if (color) $('app').style.setProperty('--host', color);
+    else $('app').style.removeProperty('--host');
+    applyChrome();
+  }
+
   function applyChrome() {
     if (appearance === 'system') delete document.documentElement.dataset.theme;
     else document.documentElement.dataset.theme = appearance;
-    document.querySelector('meta[name="theme-color"]').content = isDark() ? '#1b1b1d' : '#f2f2f4';
+    document.querySelector('meta[name="theme-color"]').content =
+      shownColor || (isDark() ? '#1b1b1d' : '#f2f2f4');
   }
   function applyAppearance() {
     applyChrome();
@@ -316,9 +350,16 @@
   function render() {
     const { host, session, win } = current();
     const wanted = findHost((asked && asked.host) || (shown && shown.host)) || host;
-    $('where').textContent = wanted
-      ? (wanted === host && session ? `${host.name} · ${session.name}` : wanted.name)
-      : 'hosts';
+    const where = $('where');
+    where.textContent = '';
+    if (wanted) {
+      const color = hostColor(wanted);
+      where.append(color ? el('span', { class: 'chip', style: `background: ${color}` }, wanted.name) : wanted.name);
+      if (wanted === host && session) where.append(` · ${session.name}`);
+    } else {
+      where.textContent = 'hosts';
+    }
+    applyHostColor(hostColor(host));
 
     renderTabs($('windows'), session ? session.windows : [], shown && shown.window,
       (w) => w.label, (w) => w.activity, session ? '+' : null);
@@ -401,6 +442,7 @@
       }, el('span', { class: `disc ${open ? 'open' : ''}` }, up ? '▶' : ''),
         el('span', { class: 'state' }),
         el('span', { class: 'name' }, host.name),
+        hostDot(host),
         up ? el('button', { class: 'plus', title: 'New session', 'aria-label': 'New session' }, '+') : null));
       Object.assign(tree.lastChild.dataset, { act: 'host', host: host.id });
       tree.lastChild.setAttribute('aria-expanded', String(open));
@@ -570,7 +612,7 @@
     for (const host of topology.hosts) {
       const up = host.state === 'connected';
       root.append(el('h2', { class: up ? 'ok' : host.state === 'failed' ? 'bad' : '' },
-        el('span', { class: 'state' }), host.name,
+        el('span', { class: 'state' }), host.name, hostDot(host),
         el('span', { class: 'why' }, up ? (host.note || '') : (host.note || host.state))));
 
       if (host.prompt) {

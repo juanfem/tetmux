@@ -424,6 +424,15 @@ colour cannot be read by everyone:
   says whether the host is live;
 - the status bar's `server.rack`.
 
+The relay's page shows the same four marks: a chip in the top bar's host button, a band under the
+top bar, a dot by the host in the sidebar and in the hosts sheet. On a phone it also colours the
+strip under the translucent status bar of the installed page, which is the browser's `theme-color`
+in a tab. The relay sends a colour *name* (`Wire.Topology.Host.color`), resolved by the same
+`HostColorPolicy` over the relay's own host list, and the page holds the same swatches as
+`HostColorStyle.swift`. A chosen colour therefore matches the Mac's; an automatic one matches only
+while the two machines know the same hosts. The page's band is an inset shadow, not a border: there
+it is not worth a resize.
+
 Automatic has to mean *distinct*, which is why it is a decision over the whole host list and lives
 in `tetmuxPolicy`, not on `HostConfig`. Hashed per host, two of three hosts share one of eight
 colours about a third of the time. Chosen colours are claimed first; automatic hosts then take the

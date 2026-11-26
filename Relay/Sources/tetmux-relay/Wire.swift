@@ -96,6 +96,11 @@ enum Wire {
             /// tmux's refusal of the last command, verbatim (§7). The id lets the page show each
             /// one once.
             let failure: Failure?
+            /// F4.38 — the host's colour by name (`teal`, `red`…), or nil for the local host and for
+            /// one set to none. A name, not a value: what a name looks like is the page's business, as
+            /// it is the Mac's. Resolved from the relay's own host list, so an automatic colour can
+            /// differ from the Mac's when the two lists differ; a chosen one cannot.
+            let color: String?
             let sessions: [Session]
         }
 
@@ -133,6 +138,7 @@ enum Wire {
         }
 
         init(_ hosts: [HostState]) {
+            let colors = HostColorPolicy.resolve(hosts.map(\.config))
             self.hosts = hosts.map { host in
                 Host(
                     id: host.id,
@@ -143,6 +149,7 @@ enum Wire {
                     failure: host.lastCommandFailure.map {
                         Failure(id: $0.id.uuidString, text: "\($0.action): \($0.message)")
                     },
+                    color: colors[host.id]?.rawValue,
                     sessions: host.browsableSessions.map { session in
                         Session(id: session.id, name: session.name, windows: session.windows.map { window in
                             let outcome = ClosePolicy.outcome(
