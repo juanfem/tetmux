@@ -188,6 +188,51 @@ final class HostConfigStoreTests: XCTestCase {
         XCTAssertFalse(decoded[0].asConfig.allowRemoteClipboardWrite)
     }
 
+    /// F4.38 — a chosen colour, and a choice of none, come back from disk; a file from before the
+    /// field existed means automatic.
+    func testHostColourRoundTripsAndDefaultsToAutomatic() async throws {
+        let store = HostConfigStore(directory: directory)
+        try await store.saveHosts([
+            StoredHost(id: "custom-prod", name: "prod", color: .fixed(.red)),
+            StoredHost(id: "custom-plain", name: "plain", color: .none),
+            StoredHost(id: "custom-auto", name: "auto"),
+        ])
+        let written = try String(contentsOf: storeURL, encoding: .utf8)
+        XCTAssertTrue(written.contains(#""color" : "red""#), "one readable word per host: \(written)")
+
+        let reloaded = await HostConfigStore(directory: directory).loadHosts()
+        XCTAssertEqual(reloaded.first { $0.id == "custom-prod" }?.color, .fixed(.red))
+        XCTAssertEqual(reloaded.first { $0.id == "custom-plain" }?.color, HostColorChoice.none)
+        XCTAssertEqual(reloaded.first { $0.id == "custom-auto" }?.color, .automatic)
+        XCTAssertEqual(reloaded.first { $0.id == "custom-prod" }?.asConfig.color, .fixed(.red))
+
+        let old = try JSONDecoder().decode(
+            [StoredHost].self, from: Data(#"[{"id": "custom-a", "name": "a", "isLocal": false}]"#.utf8)
+        )
+        XCTAssertEqual(old[0].color, .automatic)
+    }
+
+    /// A colour is not worth the host list. An unknown name, or a value of the wrong JSON type, has to
+    /// decode as automatic — a decoding failure is not per host, and would move the whole file aside.
+    func testAMangledHostColourDoesNotCostTheHostList() throws {
+        let json = Data(#"""
+        [{"id": "custom-a", "name": "a", "color": "chartreuse"},
+         {"id": "custom-b", "name": "b", "color": 7},
+         {"id": "custom-c", "name": "c", "color": null}]
+        """#.utf8)
+        let decoded = try JSONDecoder().decode([StoredHost].self, from: json)
+        XCTAssertEqual(decoded.map(\.color), [.automatic, .automatic, .automatic])
+    }
+
+    /// The local host is never coloured — no colour is what says "local" — so a colour written against
+    /// it by hand is not taken from the file.
+    func testTheLocalHostTakesNoColourFromTheFile() async throws {
+        try Data(#"[{"id": "local", "name": "localhost", "isLocal": true, "color": "red"}]"#.utf8)
+            .write(to: storeURL)
+        let reloaded = await HostConfigStore(directory: directory).loadHosts()
+        XCTAssertEqual(reloaded.first { $0.id == "local" }?.color, .automatic)
+    }
+
     /// Writes an `~/.ssh/config` for the store to discover, so the rules below are asserted against a
     /// known file rather than whatever the machine running the tests happens to have.
     private func writeSSHConfig(_ contents: String) throws -> URL {

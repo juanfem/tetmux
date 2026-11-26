@@ -412,6 +412,15 @@ re-read `list-clients` as the fallback).
   session in front, ⌃⌘1…⌃⌘5 reach the pins by position (⌘1…⌘9 stay free for tabs), and ⌃⌘L
   toggles to the session this window showed before — tmux's `switch-client -l`, per window.
 
+- **F4.38** *(New.)* Every **remote** host is marked with a colour, so a window says that it is
+  remote before anything is read, and then which host: the host's name as a filled chip in that
+  colour under the session name in the title bar, a band of it under the toolbar, a dot by the host
+  in the sidebar, and the status bar's host glyph. The local host is never coloured — the absence is
+  the signal. The colour accompanies the name everywhere and never replaces it. A host's colour is
+  chosen in its editor, set to none, or left automatic: automatic colours are distinct while the
+  palette lasts, stable across launches and edits, and never red, which is left for the user to
+  mean "careful".
+
 ### 4.2 Tabs, splits, and the workspace
 
 - **F4.6** One application tab = one tmux window. Opening a session opens tabs for its windows;

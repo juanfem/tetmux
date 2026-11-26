@@ -22,7 +22,13 @@ struct StatusBarView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            item(icon: host.config.isLocal ? "laptopcomputer" : "server.rack", text: host.config.name)
+            item(
+                icon: host.config.isLocal ? "laptopcomputer" : "server.rack",
+                text: host.config.name,
+                // F4.38 — the footer's echo of the title's chip, so the colour means one thing
+                // everywhere it appears.
+                iconTint: model.hostColor(host.id)?.swatch
+            )
             separator
             item(icon: "macwindow", text: session.name)
 
@@ -87,9 +93,9 @@ struct StatusBarView: View {
         Divider().frame(height: 11)
     }
 
-    private func item(icon: String, text: String, tint: Color = .primary) -> some View {
+    private func item(icon: String, text: String, tint: Color = .primary, iconTint: Color? = nil) -> some View {
         HStack(spacing: 4) {
-            Image(systemName: icon).font(.caption2)
+            Image(systemName: icon).font(.caption2).foregroundStyle(iconTint ?? .primary)
             Text(text).font(.caption).foregroundStyle(tint).lineLimit(1)
         }
     }

@@ -23,6 +23,8 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
     public var initialCommand: String?
     /// T5.6 — whether this host may write the local clipboard with OSC 52.
     public var allowRemoteClipboardWrite: Bool
+    /// F4.38 — see `HostConfig.color`.
+    public var color: HostColorChoice
 
     public init(
         id: String = UUID().uuidString,
@@ -39,9 +41,11 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         forwardsX11: Bool = false,
         startDirectory: String? = nil,
         initialCommand: String? = nil,
-        allowRemoteClipboardWrite: Bool = false
+        allowRemoteClipboardWrite: Bool = false,
+        color: HostColorChoice = .automatic
     ) {
         self.allowRemoteClipboardWrite = allowRemoteClipboardWrite
+        self.color = color
         self.initialCommand = initialCommand
         self.id = id
         self.name = name
@@ -82,6 +86,9 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
         // survives the field being deleted by hand — the safe answer is the one a missing key gives.
         allowRemoteClipboardWrite =
             try container.decodeIfPresent(Bool.self, forKey: .allowRemoteClipboardWrite) ?? false
+        // `try?` as well as the fallback: a value of the wrong JSON type throws from `decodeIfPresent`
+        // before `HostColorChoice` sees it, and that would take every other host with it.
+        color = (try? container.decodeIfPresent(HostColorChoice.self, forKey: .color)) ?? .automatic
     }
 
     public var asConfig: HostConfig {
@@ -91,7 +98,7 @@ public struct StoredHost: Codable, Identifiable, Equatable, Sendable {
             usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
             forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11,
             startDirectory: startDirectory, initialCommand: initialCommand,
-            allowRemoteClipboardWrite: allowRemoteClipboardWrite
+            allowRemoteClipboardWrite: allowRemoteClipboardWrite, color: color
         )
     }
 }
@@ -106,7 +113,7 @@ extension HostConfig {
             usesPassword: usesPassword, storesPasswordInKeychain: storesPasswordInKeychain,
             forwards: forwards, extraSshArguments: extraSshArguments, forwardsX11: forwardsX11,
             startDirectory: startDirectory, initialCommand: initialCommand,
-            allowRemoteClipboardWrite: allowRemoteClipboardWrite
+            allowRemoteClipboardWrite: allowRemoteClipboardWrite, color: color
         )
     }
 }

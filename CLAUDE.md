@@ -103,7 +103,8 @@ Five layers. Everything below the UI is plain Swift with no AppKit dependency.
 ```
 tetmux        app entry point + --diagnose CLI
 tetmuxUI      SwiftUI/AppKit chrome; SwiftTerm pane surfaces; KeychainStore   (@MainActor)
-tetmuxPolicy  decisions needing no channel and no AppKit: ClosePolicy · ActivityPolicy · TabOrder
+tetmuxPolicy  decisions needing no channel and no AppKit: ClosePolicy · ActivityPolicy · TabOrder ·
+              HostColorPolicy
 tetmuxCore    SessionService (actor) · ControlCodec · LayoutParser · PtyTransport · SshPromptDetector
 CUtil         systemLibrary shim, Linux only — `forkpty` lives in libutil on glibc
 ```
@@ -144,6 +145,7 @@ Where things are, since the docs name symbols without saying which file holds th
 | `WorkspaceStore.swift` · `SettingsStore.swift` | `workspace.json` and `settings.json`. |
 | `ContrastPolicy.swift` | Increase Contrast, resolved once for every site that honours it. |
 | `ColorScheme.swift` | Pane colour schemes: the 16 ANSI slots and the three named colours. |
+| `HostColorStyle.swift` | F4.38's host colours on the Mac: the swatches, `HostChip`, `HostLine`. |
 | `LiveResizeGate.swift` | R3.7 — one macOS window's panes stop asking tmux while its edge is dragged. |
 | `NewTabInputHold.swift` | What is typed between ⌘T and the new tab existing, held for the new tab. |
 | `PackageResources.swift` | The resource bundle, probed rather than asserted. `Bundle.module` is banned. |
@@ -151,7 +153,7 @@ Where things are, since the docs name symbols without saying which file holds th
 | `DestructiveActionModal.swift` | The F4.10 confirmation, which says *why* the close is a kill. |
 | `CopyModeSearchSheet.swift` | Searches tmux's history, which is not what ⌘F searches. |
 | `BellNotifier.swift` · `KeychainStore.swift` | F4.31 background bells; per-host passwords. |
-| `HostEditorView.swift` | The per-host form: destination, password, tunnels, ssh options, clipboard. |
+| `HostEditorView.swift` | The per-host form: destination, colour, password, tunnels, ssh options, clipboard. |
 | `AuthenticationSheet.swift` · `RenameSheet.swift` | The four ssh prompt kinds; session/window renames. |
 | `LatencyProbe.swift` · `LaunchProbe.swift` | P6.1 and P6.7, off unless their env var asks. |
 

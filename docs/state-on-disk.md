@@ -9,7 +9,8 @@ Split out of `CLAUDE.md`. What is persisted where, and what each file's failure 
 - Hosts discovered from `~/.ssh/config` keep their `ssh-` ids and are re-derived each launch, so an
   unedited one is deliberately **not** persisted — a stale entry would outlive the stanza. An *edited*
   one is persisted as the difference from what discovery produces, and only while its `Host` block
-  still exists. Before that, a forward or ssh option added to a discovered host worked all session and
+  still exists. A host's F4.38 colour is one string per host under `color`: `"automatic"`,
+  `"none"`, or a colour name; anything unreadable there means automatic rather than a corrupt file. Before that, a forward or ssh option added to a discovered host worked all session and
   vanished on relaunch, while the Keychain flag it wrote survived and the two then disagreed.
 - `~/Library/Application Support/tetmux/workspace.json` — `windows`, one entry per macOS window: host,
   session (id *and* name), tmux window, whether the tree was showing, the frame, and F4.37's

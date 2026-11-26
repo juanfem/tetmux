@@ -9,6 +9,8 @@ import tetmuxCore
 /// empty field on an existing host means "leave the stored one alone" rather than "clear it".
 struct HostEditorView: View {
     let draft: AppModel.HostDraft
+    /// F4.38 — what "Automatic" resolves to for the host as currently edited, given every other host.
+    let automaticColor: (StoredHost) -> HostColor?
     let onSave: (AppModel.HostDraft, String?, Bool) -> Void
     let onCancel: () -> Void
 
@@ -22,10 +24,12 @@ struct HostEditorView: View {
 
     init(
         draft: AppModel.HostDraft,
+        automaticColor: @escaping (StoredHost) -> HostColor?,
         onSave: @escaping (AppModel.HostDraft, String?, Bool) -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.draft = draft
+        self.automaticColor = automaticColor
         self.onSave = onSave
         self.onCancel = onCancel
         self._host = State(initialValue: draft.host)
@@ -52,6 +56,8 @@ struct HostEditorView: View {
                         clipboardSection
                     } else {
                         destinationSection
+                        Divider()
+                        colorSection
                         Divider()
                         authenticationSection
                         Divider()
@@ -145,6 +151,53 @@ struct HostEditorView: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    // MARK: - Colour
+
+    /// F4.38. Remote hosts only: the local host is never coloured, because no colour is what says
+    /// "local" — so it has nothing to choose.
+    private var colorSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Colour").font(.subheadline).fontWeight(.semibold)
+
+            HStack(spacing: 12) {
+                Picker("Colour", selection: $host.color) {
+                    Text(automaticColor(host).map { "Automatic (\($0.displayName))" } ?? "Automatic")
+                        .tag(HostColorChoice.automatic)
+                    Divider()
+                    ForEach(HostColor.allCases, id: \.self) { color in
+                        Text(color.displayName).tag(HostColorChoice.fixed(color))
+                    }
+                    Divider()
+                    Text("None").tag(HostColorChoice.none)
+                }
+                .labelsHidden()
+                .frame(width: 180)
+
+                if let shown = shownColor {
+                    HostChip(name: previewName, color: shown)
+                }
+            }
+
+            Text("Marks this host's windows: its name as a chip under the session name, and a band in this colour under the toolbar. Automatic picks a colour no other host has while there is one, and never red — red is for you to choose.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var shownColor: HostColor? {
+        switch host.color {
+        case .automatic: return automaticColor(host)
+        case .none: return nil
+        case .fixed(let color): return color
+        }
+    }
+
+    private var previewName: String {
+        let name = host.name.trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? "host" : name
     }
 
     // MARK: - Destination

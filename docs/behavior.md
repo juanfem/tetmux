@@ -409,6 +409,36 @@ trusting a shared box you ssh into, and an application-wide flag makes both at o
 down to the pane from the host rather than read from the theme, and a missing key in `hosts.json`
 means denied — so a file written before the field existed gets the safe answer.
 
+**A remote host is marked with a colour; the local one never is (F4.38).** No colour is the
+signal for "local", and it has to be legible without reading: so `HostColorPolicy.resolve` returns
+nothing for `isLocal` whatever the file says, `loadHosts` does not copy a `color` onto the local
+host, and the editor offers no colour section for it. A coloured host shows in four places, and in
+all four the colour sits *beside* the name, never instead of it — eight colours collide, and a
+colour cannot be read by everyone:
+- the title bar, where `SessionTitle` draws the host's name as a filled chip (`HostChip`) in place of
+  the grey subtitle;
+- a 3 pt band (`HostLine`) across the top of the detail column, over panes, passthrough and the
+  placeholder alike. It is in the layout, not an overlay, so turning a colour on or off is a resize
+  that goes to tmux by the ordinary path (§3.3), like a banner appearing;
+- a dot after the host's name in the sidebar. Not a tint on the glyph: that glyph's accent already
+  says whether the host is live;
+- the status bar's `server.rack`.
+
+Automatic has to mean *distinct*, which is why it is a decision over the whole host list and lives
+in `tetmuxPolicy`, not on `HostConfig`. Hashed per host, two of three hosts share one of eight
+colours about a third of the time. Chosen colours are claimed first; automatic hosts then take the
+colour their id hashes to (FNV-1a — `Hasher` is seeded per process and would recolour every
+launch), else the next free one. They are visited in **id** order: `persist` moves a saved host to
+the end of `hosts.json`, and a host that changed colour because it was edited would make the colour
+useless as a memory aid. Adding a host can still move a host that shared its first choice; picking a
+colour pins it. Red is never assigned, so a red host is always one somebody marked.
+
+The values in `HostColorStyle.swift` are fixed and do not follow the appearance — a deliberate
+exception to §7. The chip is white text on the colour in both modes, so each value keeps white at
+4.5:1 in both, and the system's teal, green and yellow brighten in dark mode past that. The file
+stores a name (`"teal"`, `"none"`, `"automatic"`); an unknown name or a wrong JSON type decodes as
+automatic, because a decode failure is not per host and would move the whole file aside.
+
 **A start directory and an initial command are properties of the host, not questions at creation
 time.** `new-session` takes `-c` and a trailing `shell-command`, and both are fed from `HostConfig`
 rather than from a dialog: New Session deliberately puts nothing between wanting a shell and having

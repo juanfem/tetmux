@@ -469,6 +469,55 @@ public struct PortForward: Identifiable, Equatable, Sendable, Codable {
     }
 }
 
+/// F4.38 — the colours a remote host can be marked with, by name.
+///
+/// Names rather than RGB values, because the value is the front end's business: the macOS app and the
+/// relay's page each decide what "teal" looks like on their own ground, and `hosts.json` stays
+/// something a person can read and edit. Red is in the list but never handed out automatically —
+/// see `HostColorPolicy` — so that a red host is always one somebody chose to mark.
+public enum HostColor: String, CaseIterable, Codable, Sendable {
+    case blue, teal, green, ochre, orange, purple, pink, graphite, red
+
+    /// The name shown in the host editor.
+    public var displayName: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+}
+
+/// What a host asks for: a colour picked for it, no colour at all, or whatever the policy assigns.
+///
+/// Stored in `hosts.json` as one string — `"automatic"`, `"none"`, or a `HostColor` name — so a hand
+/// edit is one word. Anything else decodes as `.automatic` rather than failing: a decoding failure is
+/// not per host, and a colour is not worth losing the host list over.
+public enum HostColorChoice: Equatable, Hashable, Sendable, Codable {
+    case automatic
+    case none
+    case fixed(HostColor)
+
+    public init(storedValue: String) {
+        switch storedValue {
+        case "none": self = .none
+        default: self = HostColor(rawValue: storedValue).map(Self.fixed) ?? .automatic
+        }
+    }
+
+    public var storedValue: String {
+        switch self {
+        case .automatic: return "automatic"
+        case .none: return "none"
+        case .fixed(let color): return color.rawValue
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self.init(storedValue: (try? container.decode(String.self)) ?? "automatic")
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(storedValue)
+    }
+}
+
 public struct HostConfig: Identifiable, Equatable, Sendable {
     public let id: String
     public let name: String
@@ -534,6 +583,11 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
     /// Clipboard *reads* are never permitted at any setting and have no field here to turn on.
     public let allowRemoteClipboardWrite: Bool
 
+    /// F4.38 — the colour this host is marked with in the window chrome. Ignored for the local host,
+    /// which is never coloured: no colour is what says "local". `HostColorPolicy` turns this into the
+    /// colour actually shown, because `.automatic` depends on every other host's choice.
+    public let color: HostColorChoice
+
     /// What `ssh` should be given as the destination.
     public var sshDestination: String {
         let target = hostname ?? name
@@ -556,9 +610,11 @@ public struct HostConfig: Identifiable, Equatable, Sendable {
         forwardsX11: Bool = false,
         startDirectory: String? = nil,
         initialCommand: String? = nil,
-        allowRemoteClipboardWrite: Bool = false
+        allowRemoteClipboardWrite: Bool = false,
+        color: HostColorChoice = .automatic
     ) {
         self.allowRemoteClipboardWrite = allowRemoteClipboardWrite
+        self.color = color
         self.initialCommand = initialCommand
         self.id = id
         self.name = name

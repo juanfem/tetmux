@@ -526,6 +526,7 @@ struct RootView: View {
         .sheet(item: $state.hostDraft) { draft in
             HostEditorView(
                 draft: draft,
+                automaticColor: { model.automaticHostColor(for: $0) },
                 onSave: { model.saveHost($0, password: $1, savePassword: $2, in: state) },
                 onCancel: { state.hostDraft = nil }
             )
@@ -613,7 +614,7 @@ struct RootView: View {
     }
 
     private var sessionTitle: some View {
-        SessionTitle(host: host, session: session) {
+        SessionTitle(host: host, hostColor: host.flatMap { model.hostColor($0.id) }, session: session) {
             guard let host, let session else { return }
             // This window's own ids rather than `activeScope`'s: the click happened here, and the
             // menus may last have heard from another window.
@@ -637,8 +638,24 @@ struct RootView: View {
         }
     }
 
-    @ViewBuilder
+    /// F4.38 — the band under the toolbar for a coloured host, over whatever the detail is showing:
+    /// the panes, §4.6's passthrough, or the placeholder. It says which machine this window is on,
+    /// which is as true before a session is open as after.
+    ///
+    /// In the layout, not overlaid, so it takes three points from the panes rather than covering the
+    /// tab strip. The panes then ask tmux for a grid that fits, by the same path a banner appearing
+    /// takes (§3.3); a colour changing to or from none is a resize like any other.
     private var detail: some View {
+        VStack(spacing: 0) {
+            if let host, let color = model.hostColor(host.id) {
+                HostLine(color: color)
+            }
+            detailContent
+        }
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
         // §4.6 first, because a passthrough host deliberately has no sessions and would otherwise
         // fall through to the placeholder — which would offer to connect a host that is connected.
         if let host, host.passthrough != nil {
@@ -771,17 +788,23 @@ struct RootView: View {
 /// on double-click like a tab. See `RootView.sessionTitleItem`.
 private struct SessionTitle: View {
     let host: HostState?
+    /// F4.38 — set for a remote host, which then shows its name as a chip in this colour.
+    let hostColor: HostColor?
     let session: TmuxSession?
     let rename: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: hostColor == nil ? 0 : 2) {
             Text(session?.name ?? "tetmux")
                 .font(.headline)
             if let host {
-                Text(host.config.name)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                if let hostColor {
+                    HostChip(name: host.config.name, color: hostColor)
+                } else {
+                    Text(host.config.name)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .lineLimit(1)

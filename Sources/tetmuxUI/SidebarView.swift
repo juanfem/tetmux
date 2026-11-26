@@ -433,6 +433,14 @@ struct SidebarView: View {
                         // greys saying the same thing, and the one carrying the identity is the one
                         // that had to stay legible. The rail and the status label carry the state.
                         .foregroundStyle(.primary)
+                    // F4.38 — after the name rather than replacing the glyph, which already says
+                    // whether the host is live. The local host has none, as everywhere.
+                    if let color = model.hostColor(host.id) {
+                        Circle()
+                            .fill(color.swatch)
+                            .frame(width: 7, height: 7)
+                            .accessibilityHidden(true)
+                    }
                     Spacer(minLength: 4)
                     hostStatusLabel(host)
                     // Only while closed, exactly as a collapsed session shows its window count: with

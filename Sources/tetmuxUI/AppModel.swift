@@ -998,6 +998,27 @@ public final class AppModel {
     /// `password` is non-nil only when the user typed one just now. An empty password with
     /// `savePassword` still set means "keep what is already in the Keychain", which is what an edit of
     /// some *other* field looks like.
+    /// F4.38 — the colour a host is shown in, or nil for the local host and for one set to none.
+    ///
+    /// Resolved over the whole list on every call, because an automatic colour depends on what every
+    /// other host has. A handful of hosts, a handful of readers: not worth a cache to invalidate.
+    func hostColor(_ hostId: String) -> HostColor? {
+        HostColorPolicy.resolve(hosts.map(\.config))[hostId]
+    }
+
+    /// What "Automatic" would give the host being edited, with the editor's own fields in place of
+    /// the saved ones — so a new host previews the colour it will get, under the id `saveHost` will
+    /// give it.
+    func automaticHostColor(for draft: StoredHost) -> HostColor? {
+        var candidate = draft
+        candidate.color = .automatic
+        if candidate.id.isEmpty {
+            candidate.id = "custom-\(candidate.name.trimmingCharacters(in: .whitespaces))"
+        }
+        let others = hosts.map(\.config).filter { $0.id != candidate.id }
+        return HostColorPolicy.resolve(others + [candidate.asConfig])[candidate.id]
+    }
+
     public func saveHost(_ draft: HostDraft, password: String?, savePassword: Bool, in state: WindowState) {
         var host = draft.host
         host.name = host.name.trimmingCharacters(in: .whitespaces)

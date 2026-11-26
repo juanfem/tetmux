@@ -175,4 +175,55 @@ final class PolicyTests: XCTestCase {
         XCTAssertEqual(alerts.count, 1)
         XCTAssertEqual(alerts.first?.label, "build")
     }
+
+    // MARK: - Host colours (F4.38)
+
+    private func remote(_ id: String, _ color: HostColorChoice = .automatic) -> HostConfig {
+        HostConfig(id: id, name: id, color: color)
+    }
+
+    func testTheLocalHostAndANoneHostHaveNoColour() {
+        let colors = HostColorPolicy.resolve([
+            HostConfig(id: "local", name: "localhost", isLocal: true, color: .fixed(.blue)),
+            remote("custom-quiet", .none),
+        ])
+        XCTAssertNil(colors["local"])
+        XCTAssertNil(colors["custom-quiet"])
+    }
+
+    func testAChosenColourIsKeptEvenIfAnotherHostChoseItToo() {
+        let colors = HostColorPolicy.resolve([remote("a", .fixed(.red)), remote("b", .fixed(.red))])
+        XCTAssertEqual(colors["a"], .red)
+        XCTAssertEqual(colors["b"], .red)
+    }
+
+    /// Automatic means distinct while there are colours to go round, and avoids the chosen ones.
+    func testAutomaticColoursAreDistinctAndAvoidChosenOnes() {
+        let ids = (1...7).map { "custom-host\($0)" }
+        let hosts = ids.map { remote($0) } + [remote("custom-pinned", .fixed(.teal))]
+        let colors = HostColorPolicy.resolve(hosts)
+        let automatic = ids.compactMap { colors[$0] }
+        XCTAssertEqual(automatic.count, 7)
+        XCTAssertEqual(Set(automatic).count, 7, "\(colors)")
+        XCTAssertFalse(automatic.contains(.teal))
+    }
+
+    /// Red is what someone picks to mean "careful"; it only works if it is never an accident.
+    func testRedIsNeverAssignedAutomatically() {
+        let hosts = (0..<40).map { remote("ssh-box\($0)") }
+        XCTAssertFalse(HostColorPolicy.resolve(hosts).values.contains(.red))
+    }
+
+    /// `hosts.json`'s order changes whenever a host is saved, and a host must not change colour for
+    /// having been edited.
+    func testAutomaticColoursDoNotDependOnListOrder() {
+        let hosts = ["custom-alpha", "ssh-beta", "custom-gamma", "ssh-delta"].map { remote($0) }
+        XCTAssertEqual(HostColorPolicy.resolve(hosts), HostColorPolicy.resolve(hosts.reversed()))
+    }
+
+    /// Not `Hasher`, which is seeded per process — a host would change colour on every launch. Pinned
+    /// to a value so a change of hash function is a visible decision, not a silent recolouring.
+    func testTheFirstChoiceIsStableAcrossLaunches() {
+        XCTAssertEqual(HostColorPolicy.resolve([remote("ssh-devbox")])["ssh-devbox"], .orange)
+    }
 }
