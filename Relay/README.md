@@ -32,6 +32,13 @@ did the zooming.
 - **The host button** (top left) opens the list of hosts and their sessions. From there you can
   start a session, connect a host, answer what ssh is asking (a password, a host key), or add a
   host as `user@host` plus an optional port. Added hosts are saved to the server's `hosts.json`.
+  A host from that file has **Edit host…**, to change its destination, port or name, or remove it.
+  Changing where it points drops the old connection and connects the new one. The local host and
+  hosts from `~/.ssh/config` are changed where they come from.
+- **This server's ssh key** (in the hosts sheet, and under a host that failed to connect) shows the
+  public keys ssh on the server offers, with Copy and Download. That line, not your own device's
+  key, is what goes in each host's `~/.ssh/authorized_keys`. When the server has none, the sheet
+  offers to generate `~/.ssh/id_ed25519` with no passphrase. It never replaces an existing key.
 - **`⋯`** acts on what is on screen: split right or down, a new window, rename, close the pane,
   close the window, and the text size. Closing a window asks first when it would end what is
   running in it, with the same sentence the Mac app uses. A window that is also in another session
@@ -64,7 +71,10 @@ Requirements:
   lock, not the first.
 - **On the phone:** open the URL in Safari, then use Share → Add to Home Screen to get a
   full-screen app. The bar above the keyboard has the keys iOS lacks: Esc, a sticky Ctrl, Tab and
-  the arrows. The icon it lands under, and the tab's, are cut from the app's by
+  the arrows. **Long-press the terminal** to select: the screen and its scrollback open as plain
+  text, where iOS's own selection and Copy work, with a Paste button beside Done. Both are also
+  under `⋯`. Over plain HTTP a page cannot read the clipboard, so Paste opens a box to long-press and
+  paste into, sent to the pane on Send. The icon it lands under, and the tab's, are cut from the app's by
   `Scripts/make-icon.swift` and committed in `Relay/Web`; rerun it when the artwork changes.
 
 `--web <dir>` serves the page from somewhere other than `Relay/Web`. Pass it when the binary has

@@ -209,9 +209,44 @@ actor PaneBridge {
             } catch {
                 await notice("\(error)")
             }
+        case "editHost":
+            guard let id = message.host, let destination = message.destination else { return }
+            do {
+                let moved = try await hostBook.edit(id: id, destination: destination, port: message.port, name: message.name)
+                // Looking at it connects it again, now to where it points — the same as a tap.
+                if moved { await view(ViewRequest(host: id)) }
+            } catch {
+                await notice("\(error)")
+            }
+        case "removeHost":
+            guard let id = message.host else { return }
+            do {
+                try await hostBook.remove(id: id)
+            } catch {
+                await notice("\(error)")
+            }
+        case "publicKey":
+            await publicKeys(generate: message.generate == true)
         default:
             break
         }
+    }
+
+    /// The keys `ssh` offers from this server. Generating is only ever asked for by a page that was
+    /// just told there are none, and `RelayKey.generate` refuses to replace a file in any case.
+    private func publicKeys(generate: Bool) async {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        var keys = RelayKey.find(home: home)
+        var generated = false
+        if keys.isEmpty && generate {
+            do {
+                keys = [try RelayKey.generate(home: home, comment: "tetmux-relay@\(machineName())")]
+                generated = true
+            } catch {
+                await notice("\(error)")
+            }
+        }
+        await writer.text(Wire.encode(Wire.PublicKeys(keys: keys, generated: generated)))
     }
 
     /// F4.9 and F4.10, the Mac's rule: a window that lives on in another session is unlinked without
@@ -321,7 +356,7 @@ actor PaneBridge {
 
     private func apply(_ hosts: [HostState]) async {
         self.hosts = hosts
-        let topology = Wire.Topology(hosts)
+        let topology = Wire.Topology(hosts, editable: await hostBook.editableIds)
         if topology != lastTopology {
             lastTopology = topology
             await writer.text(Wire.encode(topology))

@@ -144,7 +144,7 @@ for config in configs {
     await service.addHost(config)
 }
 let registry = ViewRegistry(service: service)
-let hostBook = HostBook(store: store, service: service)
+let hostBook = HostBook(store: store, service: service, saved: stored)
 
 for config in startup {
     say("→ connecting to \(config.name) [\(config.id)]…")

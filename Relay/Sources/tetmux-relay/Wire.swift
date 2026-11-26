@@ -27,6 +27,9 @@ enum Wire {
     /// | `newSession` | `host`, `name` | the view follows it |
     /// | `answer`, `cancelPrompt` | `host`, `d` | what ssh is waiting on |
     /// | `addHost` | `destination`, `port`, `name` | saved to `hosts.json` |
+    /// | `editHost` | `host`, `destination`, `port`, `name` | a host whose `editable` is true |
+    /// | `removeHost` | `host` | the same hosts; their tmux sessions are left running |
+    /// | `publicKey` | `generate` | answered with `publicKeys`; `generate` makes one if there is none |
     struct Inbound: Decodable {
         let t: String
         let d: String?
@@ -43,6 +46,16 @@ enum Wire {
         let confirm: Bool?
         let destination: String?
         let port: Int?
+        let generate: Bool?
+    }
+
+    /// The relay's own ssh public keys — what a host's `authorized_keys` must list for the relay to
+    /// get in. Empty when it has none, which the page offers to fix with `publicKey` + `generate`.
+    struct PublicKeys: Encodable {
+        var t = "publicKeys"
+        let keys: [RelayKey.Key]
+        /// Whether the first key was made just now.
+        let generated: Bool
     }
 
     /// Something the relay refused or could not do, for the page to show and forget.
@@ -101,6 +114,11 @@ enum Wire {
             /// it is the Mac's. Resolved from the relay's own host list, so an automatic colour can
             /// differ from the Mac's when the two lists differ; a chosen one cannot.
             let color: String?
+            /// Whether the page may edit or remove it (`HostBook.editableIds`), and what its edit form
+            /// starts from: `user@host` and the port, as typed when it was added.
+            let editable: Bool
+            let destination: String?
+            let port: Int?
             let sessions: [Session]
         }
 
@@ -137,7 +155,7 @@ enum Wire {
             let label: String
         }
 
-        init(_ hosts: [HostState]) {
+        init(_ hosts: [HostState], editable: Set<String> = []) {
             let colors = HostColorPolicy.resolve(hosts.map(\.config))
             self.hosts = hosts.map { host in
                 Host(
@@ -150,6 +168,9 @@ enum Wire {
                         Failure(id: $0.id.uuidString, text: "\($0.action): \($0.message)")
                     },
                     color: colors[host.id]?.rawValue,
+                    editable: editable.contains(host.id),
+                    destination: Self.destination(host.config),
+                    port: host.config.port,
                     sessions: host.browsableSessions.map { session in
                         Session(id: session.id, name: session.name, windows: session.windows.map { window in
                             let outcome = ClosePolicy.outcome(
@@ -165,6 +186,12 @@ enum Wire {
                     }
                 )
             }
+        }
+
+        static func destination(_ config: HostConfig) -> String? {
+            guard !config.isLocal else { return nil }
+            let hostname = config.hostname ?? config.name
+            return config.user.map { "\($0)@\(hostname)" } ?? hostname
         }
 
         static func state(_ state: ConnectionState) -> String {

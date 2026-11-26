@@ -34,8 +34,10 @@ References point into current `main`. Line numbers drift; the symbol names besid
     at startup, attaching to whatever session exists, and the rest on first pick.
   - It sends the topology as a whole snapshot whenever it changes, and the browser picks with `view`.
   - The page:
-    - a hosts sheet: sessions, a new session, answering ssh's prompt, and adding a host, saved to
-      the server's `hosts.json` after a strict destination check
+    - a hosts sheet: sessions, a new session, answering ssh's prompt, and adding, editing and
+      removing a host in the server's `hosts.json` after a strict destination check
+    - the server's own ssh public key, shown for copying into a host's `authorized_keys`, and
+      generated (ed25519, no passphrase) when the server has none
     - the session's windows as the first row of tabs, with `+` for a new window
     - the shown window's panes as a second row
     - an actions sheet: split, rename, close pane, close window
@@ -51,7 +53,7 @@ References point into current `main`. Line numbers drift; the symbol names besid
   - **Zoom is shared.** It is a property of the tmux window, so a Mac showing the window the phone is
     on sees it zoomed too — the same trade as the window size, below. A Safari backgrounded and
     resumed unzooms and re-zooms, which a program in that pane sees as two resizes.
-  - **Not done:** removing or editing a host from the phone, renaming or killing a session, swiping
+  - **Not done:** renaming or killing a session, swiping
     between panes (it would compete with xterm.js's touch selection and scrolling).
   - **Geometry against the Mac.** Each socket claims its window's size (`claimWindowSize`), so a
     phone that connects resizes the tmux window under a Mac showing the same one, and the Mac takes

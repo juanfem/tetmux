@@ -154,7 +154,23 @@
 
   /* tmux owns the grid (§3.3). When another client owns the window's size the grid can be larger
      than the screen, and then it pans rather than reflowing. */
-  #term { flex: 1; min-height: 0; overflow: auto; padding: 4px; -webkit-overflow-scrolling: touch; }
+  #term { flex: 1; min-height: 0; overflow: auto; padding: 4px; -webkit-overflow-scrolling: touch;
+    -webkit-touch-callout: none; }
+  /* Selecting text on a phone. xterm.js has no touch selection, and its input is a hidden textarea
+     iOS cannot be long-pressed onto, so a long press puts the buffer here as plain text, where the
+     system's own selection, Copy and handles work. Laid over the terminal rather than replacing it:
+     a hidden terminal would measure as zero rows and ask tmux to shrink the window (§3.3). */
+  #main { position: relative; }
+  #pick { position: absolute; left: 0; right: 0; display: flex; flex-direction: column;
+    background: var(--bg); z-index: 5; }
+  #pick[hidden] { display: none; }
+  #pick .bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: var(--bar);
+    flex: none; }
+  #pick .bar span { flex: 1; color: var(--dim); font-size: 12px; }
+  #pick-text { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 4px; color: var(--fg);
+    font-family: Menlo, "SF Mono", ui-monospace, monospace; line-height: 1.2; white-space: pre-wrap;
+    word-break: break-all; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+    -webkit-overflow-scrolling: touch; }
   #keys { display: flex; gap: 6px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
     background: var(--bar); overflow-x: auto; flex: none; }
 
@@ -183,7 +199,10 @@
   .form input { flex: 1 1 140px; min-width: 0; background: var(--bg); padding: 10px; }
   .form input.short { flex: 0 1 80px; }
   .form button { background: var(--key-on); }
-  .hint { color: var(--dim); font-size: 12px; margin: 2px 4px 8px; }
+  .hint { color: var(--dim); font-size: 12px; margin: 2px 4px 8px; line-height: 1.4; }
+  .keytext { display: block; width: 100%; box-sizing: border-box; height: 7.5em; margin: 0 0 6px;
+    padding: 8px; border: 0; border-radius: 8px; resize: none; background: var(--bg); color: var(--fg);
+    font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
   .warn { margin: 4px 4px 10px; line-height: 1.4; }
   /* On a wide screen a sheet across the whole width reads as a mistake: centred, as a dialog. */
   @media (min-width: 760px) {
@@ -218,6 +237,11 @@
   <div id="windows" class="tabs" role="tablist" aria-label="Windows"></div>
   <div id="panes" class="tabs" role="tablist" aria-label="Panes" hidden></div>
   <div id="term"></div>
+  <div id="pick" hidden>
+    <div class="bar"><span>Long-press to select, then Copy</span>
+      <button id="pick-paste">Paste…</button><button id="pick-done" class="on">Done</button></div>
+    <pre id="pick-text"></pre>
+  </div>
   <div id="keys">
     <button data-key="esc">esc</button>
     <button data-key="ctrl" id="ctrl">ctrl</button>
@@ -624,11 +648,15 @@
           sheet.draw();
         });
         root.append(answer.node, row('Give up on this connection', () => send({ t: 'cancelPrompt', host: host.id }), 'danger'));
+        if (host.editable) root.append(editRow(host));
         continue;
       }
       if (!up) {
         root.append(row(host.state === 'connecting' ? 'Connecting…' : 'Connect',
           () => { view({ host: host.id }); closeSheet(); }));
+        // The usual reason a new host fails: its authorized_keys lists some other machine's key.
+        if (host.state === 'failed') root.append(row('This server\'s ssh key…', openKeys));
+        if (host.editable) root.append(editRow(host));
         continue;
       }
       for (const session of host.sessions) {
@@ -645,6 +673,7 @@
         sheet.typing = true;
         create.inputs[0].focus();
       }));
+      if (host.editable) root.append(editRow(host));
     }
 
     root.append(el('h2', {}, 'Add a host'));
@@ -659,7 +688,103 @@
     });
     root.append(add.node, el('div', { class: 'hint' },
       'Connects over ssh from the server, with the server\'s keys. Saved to its hosts.json.'));
+    root.append(row('This server\'s ssh key…', openKeys));
   });
+
+  // A saved host's destination, port and name; or taking it off the list. Only for hosts the relay's
+  // hosts.json owns (`editable`): the local host, and ones from ~/.ssh/config, are changed where they
+  // come from.
+  function editRow(host) {
+    const where = host.destination + (host.port ? ` -p ${host.port}` : '');
+    return row('Edit host…', (event) => {
+      const edit = form([
+        { placeholder: 'user@host', value: host.destination || '' },
+        { placeholder: 'port', short: true, mode: 'numeric', value: host.port ? String(host.port) : '' },
+        { placeholder: 'name (optional)', value: host.name },
+      ], 'Save', (destination, port, name) => {
+        if (!destination) return;
+        send({ t: 'editHost', host: host.id, destination, port: port ? Number(port) : undefined,
+          name: name || undefined });
+        closeSheet();
+      });
+      const remove = row('Remove host', (removeEvent) => {
+        const ask = el('div', {},
+          el('div', { class: 'warn' }, `Remove ${host.name} from the server's hosts.json? Its tmux `
+            + 'sessions keep running; the server just stops connecting to them.'),
+          el('div', { class: 'pair' },
+            row('Cancel', closeSheet),
+            row('Remove', () => { send({ t: 'removeHost', host: host.id }); closeSheet(); }, 'danger on')));
+        removeEvent.currentTarget.replaceWith(ask);
+      }, 'danger');
+      event.currentTarget.replaceWith(el('div', {}, edit.node, remove));
+      sheet.typing = true;
+      edit.inputs[0].focus();
+    }, '', where);
+  }
+
+  // The relay's own public key: what a host's authorized_keys has to list. Not the key of the device
+  // reading this page, nor the host's own — ssh runs on the server, and offers the server's keys.
+  // `null` while the relay has not answered.
+  let relayKeys = null;
+  function openKeys() {
+    relayKeys = null;
+    send({ t: 'publicKey' });
+    openSheet(drawKeys);
+    sheet.keys = true;
+  }
+  function drawKeys(root) {
+    root.append(el('h2', {}, 'This server\'s ssh key'));
+    if (relayKeys === null) {
+      root.append(el('div', { class: 'hint' }, 'Asking the server…'));
+    } else if (!relayKeys.keys.length) {
+      root.append(el('div', { class: 'warn' }, 'The server has no ssh key, so it can only reach hosts '
+        + 'that take a password. Generate one (ed25519, no passphrase, in the server\'s ~/.ssh) and '
+        + 'add it to each host.'));
+      root.append(row('Generate a key', () => {
+        relayKeys = null;
+        send({ t: 'publicKey', generate: true });
+        sheet.draw();
+      }, 'on'));
+    } else {
+      if (relayKeys.generated) root.append(el('div', { class: 'warn' }, 'Generated. Now add it to each host.'));
+      for (const { path, key } of relayKeys.keys) {
+        const area = el('textarea', { class: 'keytext', readOnly: true, value: key });
+        plain(area);
+        area.addEventListener('focus', () => area.select());
+        const copy = row('Copy', async () => {
+          copy.textContent = (await copyText(key, area)) ? 'Copied' : 'Selected — copy from the menu';
+          setTimeout(() => { copy.textContent = 'Copy'; }, 2000);
+        });
+        const name = `tetmux-relay-${path.split('/').pop()}`;
+        root.append(el('div', { class: 'hint' }, path), area,
+          el('div', { class: 'pair' }, copy, row('Download', () => download(name, key + '\n'))));
+      }
+      root.append(el('div', { class: 'hint' }, 'Append the line to ~/.ssh/authorized_keys on each host '
+        + 'the server connects to. A host whose ~/.ssh/config entry on the server names an IdentityFile '
+        + 'is offered that key instead.'));
+    }
+    root.append(row('Back to hosts', openHosts));
+  }
+
+  // The async clipboard only exists on a secure origin, and a relay over Tailscale is plain HTTP:
+  // then the old selection-and-execCommand route, and failing that the text is left selected.
+  async function copyText(text, area) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
+    area.focus();
+    area.setSelectionRange(0, text.length);
+    try { return document.execCommand('copy'); } catch { return false; }
+  }
+  function download(name, text) {
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    const link = el('a', { href: url, download: name });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 
   // What can be done to the pane and window on screen.
   $('more').addEventListener('click', () => openSheet((root) => {
@@ -702,6 +827,9 @@
         sheet.typing = true;
       }, 'danger'));
     }
+    root.append(el('div', { class: 'pair' },
+      row('Select text', () => { closeSheet(); openPick(); }),
+      row('Paste…', () => openPaste())));
     root.append(el('h2', {}, `Text size ${fontSize}`));
     root.append(el('div', { class: 'pair' },
       row('A−', () => { setFont(fontSize - 1); sheet.draw(); }),
@@ -772,6 +900,9 @@
         render();
       } else if (message.t === 'notice') {
         toast(message.text);
+      } else if (message.t === 'publicKeys') {
+        relayKeys = message;
+        if (sheet && sheet.keys) { sheet.typing = false; sheet.draw(); }
       }
     };
     ws.onclose = () => {
@@ -908,6 +1039,92 @@
       if (ctrl) { data = withCtrl(data); setCtrl(false); }
       send({ t: 'in', d: data });
       term.focus();
+    });
+  }
+
+  // ---- selecting and pasting by touch --------------------------------------------------------------
+
+  // The buffer as text: what is on screen and the scrollback above it — only what reached this page,
+  // not tmux's own history (copy mode is for that). A line the terminal wrapped is joined back into
+  // one, so a long command copies as one line; trailing blanks go only where a line really ends.
+  function bufferText() {
+    const buffer = term.buffer.active;
+    const lines = [];
+    for (let i = 0; i < buffer.length; i++) {
+      const line = buffer.getLine(i);
+      if (!line) continue;
+      const next = buffer.getLine(i + 1);
+      const text = line.translateToString(!(next && next.isWrapped));
+      if (line.isWrapped && lines.length) lines[lines.length - 1] += text;
+      else lines.push(text);
+    }
+    while (lines.length && lines[lines.length - 1] === '') lines.pop();
+    return lines.join('\n');
+  }
+
+  function openPick() {
+    const box = $('term');
+    const pick = $('pick');
+    const text = $('pick-text');
+    pick.style.top = `${box.offsetTop}px`;
+    pick.style.height = `${box.offsetHeight}px`;
+    text.style.fontSize = `${fontSize}px`;
+    text.textContent = bufferText();
+    pick.hidden = false;
+    // Where the terminal was scrolled to, near enough: the bottom, unless it had been scrolled back.
+    const buffer = term.buffer.active;
+    text.scrollTop = buffer.viewportY >= buffer.baseY ? text.scrollHeight
+      : text.scrollHeight * (buffer.viewportY / Math.max(1, buffer.length));
+    // The keyboard would cover half of what there is to select.
+    term.blur();
+    setTimeout(() => term.blur(), 50);
+  }
+  function closePick() {
+    $('pick').hidden = true;
+    $('pick-text').textContent = '';
+    if (window.getSelection) window.getSelection().removeAllRanges();
+    term.focus();
+  }
+  $('pick-done').addEventListener('click', closePick);
+  $('pick-paste').addEventListener('click', () => { $('pick').hidden = true; openPaste(); });
+
+  // A long press, with the finger held still: a moving one is scrolling, and two are a pinch.
+  let press = null;
+  const cancelPress = () => { if (press) clearTimeout(press.timer); press = null; };
+  $('term').addEventListener('touchstart', (event) => {
+    cancelPress();
+    if (event.touches.length !== 1) return;
+    const { clientX: x, clientY: y } = event.touches[0];
+    press = { x, y, timer: setTimeout(() => { press = null; openPick(); }, 550) };
+  }, { passive: true });
+  $('term').addEventListener('touchmove', (event) => {
+    if (!press) return;
+    const touch = event.touches[0];
+    if (event.touches.length !== 1 || Math.hypot(touch.clientX - press.x, touch.clientY - press.y) > 10) cancelPress();
+  }, { passive: true });
+  $('term').addEventListener('touchend', cancelPress);
+  $('term').addEventListener('touchcancel', cancelPress);
+
+  // Reading the clipboard from script needs a secure origin, which a relay over plain HTTP is not.
+  // There, a box to paste into with the system's own menu, sent as a paste (T5.4) on Send.
+  async function openPaste() {
+    if (window.isSecureContext && navigator.clipboard && navigator.clipboard.readText) {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) { send({ t: 'paste', d: text }); closeSheet(); return; }
+      } catch {}
+    }
+    openSheet((root) => {
+      root.append(el('h2', {}, 'Paste'));
+      const area = plain(el('textarea', { class: 'keytext', placeholder: 'Long-press here and choose Paste' }));
+      area.style.height = '10em';
+      const go = () => {
+        if (area.value) send({ t: 'paste', d: area.value });
+        closeSheet();
+      };
+      root.append(area, el('div', { class: 'pair' }, row('Cancel', closeSheet), row('Send', go, 'on')));
+      sheet.typing = true;
+      setTimeout(() => area.focus(), 0);
     });
   }
 
