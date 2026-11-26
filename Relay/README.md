@@ -71,7 +71,9 @@ Requirements:
   lock, not the first.
 - **On the phone:** open the URL in Safari, then use Share → Add to Home Screen to get a
   full-screen app. The bar above the keyboard has the keys iOS lacks: Esc, a sticky Ctrl, Tab and
-  the arrows. **Long-press the terminal** to select: the screen and its scrollback open as plain
+  the arrows. **Dragging** scrolls the way a mouse wheel would, and a flick keeps going: the
+  scrollback, or the program itself when it reads the mouse (Claude Code, vim with `mouse=a`), or
+  arrow keys in a full-screen program that does not (`less`). **Long-press the terminal** to select: the screen and its scrollback open as plain
   text, where iOS's own selection and Copy work, with a Paste button beside Done. Both are also
   under `⋯`. Over plain HTTP a page cannot read the clipboard, so Paste opens a box to long-press and
   paste into, sent to the pane on Send. The icon it lands under, and the tab's, are cut from the app's by

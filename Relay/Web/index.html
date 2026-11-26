@@ -1110,6 +1110,99 @@
   $('term').addEventListener('touchend', cancelPress);
   $('term').addEventListener('touchcancel', cancelPress);
 
+  // ---- scrolling by touch (F4.23) -----------------------------------------------------------------
+
+  // xterm.js scrolls by touch only when the program has not asked for the mouse, and then by the
+  // finger's travel with no momentum: a full-screen program that reads the mouse (Claude Code, vim
+  // with `mouse=a`) did not scroll at all, and the scrollback moved a few uneven lines per drag. So a
+  // vertical drag is taken here and turned into wheel events, one line each, sent to xterm's own
+  // wheel handling, which already does what F4.23 asks of a wheel: a mouse report when the program
+  // asked for one, arrow keys on an alternate screen without one, and the scrollback otherwise. A
+  // flick carries on after the finger lifts, decaying as iOS's own scrolling does.
+  //
+  // Line wheel events rather than pixel ones: xterm sends at most one mouse report per event and
+  // carries pixel remainders between events, so a pixel delta would mean a varying count per event.
+  const scroller = { axis: null, y: 0, x: 0, rest: 0, samples: [], frame: 0, velocity: 0 };
+  const rowHeight = () => {
+    const screen = term.element && term.element.querySelector('.xterm-screen');
+    return screen && term.rows ? screen.clientHeight / term.rows : fontSize * 1.2;
+  };
+  function wheelLines(lines, x, y) {
+    const screen = term.element.querySelector('.xterm-screen');
+    if (!screen || !lines) return;
+    const viewport = term.element.querySelector('.xterm-viewport');
+    const before = viewport ? viewport.scrollTop : 0;
+    const step = lines < 0 ? -1 : 1;
+    for (let i = 0; i < Math.abs(lines); i++) {
+      screen.dispatchEvent(new WheelEvent('wheel', { deltaY: step, deltaMode: WheelEvent.DOM_DELTA_LINE,
+        clientX: x, clientY: y, bubbles: true, cancelable: true }));
+    }
+    // At either end of the scrollback, a grid taller than the screen (§3.3: another client owns the
+    // size) pans instead, as it did when the browser was doing the scrolling.
+    const plain = term.buffer.active.type === 'normal' && term.modes.mouseTrackingMode === 'none';
+    if (plain && viewport && viewport.scrollTop === before) $('term').scrollTop += lines * rowHeight();
+  }
+  // Pixels of finger travel in, whole lines out, the remainder kept for the next move.
+  function scrollBy(pixels, x, y) {
+    scroller.rest += pixels;
+    const height = rowHeight();
+    const lines = Math.trunc(scroller.rest / height);
+    if (!lines) return;
+    scroller.rest -= lines * height;
+    wheelLines(lines, x, y);
+  }
+  function stopMomentum() {
+    cancelAnimationFrame(scroller.frame);
+    scroller.frame = 0;
+  }
+  $('term').addEventListener('touchstart', (event) => {
+    stopMomentum();
+    const touch = event.touches[0];
+    Object.assign(scroller, { axis: event.touches.length === 1 ? undefined : null,
+      x: touch.clientX, y: touch.clientY, startX: touch.clientX, startY: touch.clientY,
+      rest: 0, samples: [[event.timeStamp, touch.clientY]] });
+  }, { capture: true, passive: true });
+  // Capturing, so it runs before xterm.js's own touch handler further down, and stops it.
+  $('term').addEventListener('touchmove', (event) => {
+    if (scroller.axis === null || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    if (scroller.axis === undefined) {
+      const dx = touch.clientX - scroller.startX, dy = touch.clientY - scroller.startY;
+      if (Math.hypot(dx, dy) < 6) return;
+      // Sideways is the browser's: panning a grid wider than the screen.
+      scroller.axis = Math.abs(dy) >= Math.abs(dx) ? 'y' : 'x';
+      if (scroller.axis === 'y') cancelPress();
+    }
+    if (scroller.axis !== 'y') return;
+    event.preventDefault();
+    event.stopPropagation();
+    // A finger moving down pulls the text down, which is scrolling back: a negative wheel.
+    scrollBy(scroller.y - touch.clientY, touch.clientX, touch.clientY);
+    scroller.x = touch.clientX;
+    scroller.y = touch.clientY;
+    scroller.samples.push([event.timeStamp, touch.clientY]);
+    if (scroller.samples.length > 6) scroller.samples.shift();
+  }, { capture: true, passive: false });
+  $('term').addEventListener('touchend', (event) => {
+    if (scroller.axis !== 'y') return;
+    scroller.axis = null;
+    // The speed over the last ~100 ms of the drag; a finger that stopped before lifting has none.
+    const recent = scroller.samples.filter(([t]) => event.timeStamp - t < 100);
+    if (recent.length < 2) return;
+    const [t0, y0] = recent[0], [t1, y1] = recent[recent.length - 1];
+    let velocity = (y0 - y1) / Math.max(1, t1 - t0);  // px per ms, positive scrolls forward
+    if (Math.abs(velocity) < 0.3) return;
+    let last = performance.now();
+    const tick = (now) => {
+      const dt = Math.min(50, now - last);
+      last = now;
+      scrollBy(velocity * dt, scroller.x, scroller.y);
+      velocity *= Math.exp(-dt / 325);
+      scroller.frame = Math.abs(velocity) > 0.03 ? requestAnimationFrame(tick) : 0;
+    };
+    scroller.frame = requestAnimationFrame(tick);
+  }, { capture: true, passive: true });
+
   // Reading the clipboard from script needs a secure origin, which a relay over plain HTTP is not.
   // There, a box to paste into with the system's own menu, sent as a paste (T5.4) on Send.
   async function openPaste() {
