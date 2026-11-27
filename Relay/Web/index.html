@@ -1122,45 +1122,109 @@
   //
   // Line wheel events rather than pixel ones: xterm sends at most one mouse report per event and
   // carries pixel remainders between events, so a pixel delta would mean a varying count per event.
-  const scroller = { axis: null, y: 0, x: 0, rest: 0, samples: [], frame: 0, velocity: 0 };
+  //
+  // The scrollback itself scrolls by pixel, not by row. xterm draws whole rows, so the screen is
+  // shifted by what is left over (`rest`) and eases back onto a row when the scroll ends. Only there:
+  // a program scrolling itself redraws when its answer comes back from tmux, and shifting the screen
+  // ahead of that answer would only move the wrong text.
+  const scroller = { axis: null, y: 0, x: 0, rest: 0, samples: [], frame: 0, settle: 0 };
+  const screenEl = () => term.element && term.element.querySelector('.xterm-screen');
   const rowHeight = () => {
-    const screen = term.element && term.element.querySelector('.xterm-screen');
+    const screen = screenEl();
     return screen && term.rows ? screen.clientHeight / term.rows : fontSize * 1.2;
   };
+  const scrollsLocally = () => term.buffer.active.type === 'normal' && term.modes.mouseTrackingMode === 'none';
   function wheelLines(lines, x, y) {
-    const screen = term.element.querySelector('.xterm-screen');
+    const screen = screenEl();
     if (!screen || !lines) return;
-    const viewport = term.element.querySelector('.xterm-viewport');
-    const before = viewport ? viewport.scrollTop : 0;
+    if (scrollsLocally()) {
+      // Directly rather than as wheel events: `viewportY` is then current on return, which the
+      // ends below are measured against.
+      const before = term.buffer.active.viewportY;
+      term.scrollLines(lines);
+      // At either end of the scrollback, a grid taller than the screen (§3.3: another client owns
+      // the size) pans instead, as it did when the browser was doing the scrolling.
+      if (term.buffer.active.viewportY === before) $('term').scrollTop += lines * rowHeight();
+      return;
+    }
     const step = lines < 0 ? -1 : 1;
     for (let i = 0; i < Math.abs(lines); i++) {
       screen.dispatchEvent(new WheelEvent('wheel', { deltaY: step, deltaMode: WheelEvent.DOM_DELTA_LINE,
         clientX: x, clientY: y, bubbles: true, cancelable: true }));
     }
-    // At either end of the scrollback, a grid taller than the screen (§3.3: another client owns the
-    // size) pans instead, as it did when the browser was doing the scrolling.
-    const plain = term.buffer.active.type === 'normal' && term.modes.mouseTrackingMode === 'none';
-    if (plain && viewport && viewport.scrollTop === before) $('term').scrollTop += lines * rowHeight();
+  }
+  // Drawn in the next frame, which is the one xterm repaints the rows in, so the shift and the rows
+  // it belongs to reach the screen together rather than a frame apart.
+  let shiftFrame = 0;
+  function drawShift() {
+    if (shiftFrame) return;
+    shiftFrame = requestAnimationFrame(() => {
+      shiftFrame = 0;
+      const screen = screenEl();
+      if (!screen) return;
+      const px = scrollsLocally() ? scroller.rest : 0;
+      screen.style.transform = Math.abs(px) >= 0.5 ? `translateY(${(-px).toFixed(1)}px)` : '';
+    });
+  }
+  // Nothing to shift towards past either end: no rubber band, the text just stops.
+  function clampRest() {
+    const buffer = term.buffer.active;
+    if ((scroller.rest > 0 && buffer.viewportY >= buffer.baseY) || (scroller.rest < 0 && buffer.viewportY <= 0)) {
+      scroller.rest = 0;
+    }
   }
   // Pixels of finger travel in, whole lines out, the remainder kept for the next move.
   function scrollBy(pixels, x, y) {
     scroller.rest += pixels;
     const height = rowHeight();
     const lines = Math.trunc(scroller.rest / height);
-    if (!lines) return;
-    scroller.rest -= lines * height;
-    wheelLines(lines, x, y);
+    if (lines) {
+      scroller.rest -= lines * height;
+      wheelLines(lines, x, y);
+    }
+    if (scrollsLocally()) clampRest();
+    else scroller.rest = Math.max(-height, Math.min(height, scroller.rest));
+    drawShift();
+  }
+  // Onto the nearest row, eased: the short way, so the text never springs back more than half a row.
+  function settle() {
+    cancelAnimationFrame(scroller.settle);
+    if (!scrollsLocally()) { scroller.rest = 0; drawShift(); return; }
+    const height = rowHeight();
+    if (Math.abs(scroller.rest) > height / 2) {
+      const step = Math.sign(scroller.rest);
+      wheelLines(step, scroller.x, scroller.y);
+      scroller.rest -= step * height;
+      clampRest();
+    }
+    const from = scroller.rest, began = performance.now();
+    const tick = (now) => {
+      const t = Math.min(1, (now - began) / 140);
+      scroller.rest = from * (1 - t) * (1 - t);
+      drawShift();
+      scroller.settle = t < 1 ? requestAnimationFrame(tick) : 0;
+    };
+    scroller.settle = requestAnimationFrame(tick);
   }
   function stopMomentum() {
     cancelAnimationFrame(scroller.frame);
-    scroller.frame = 0;
+    cancelAnimationFrame(scroller.settle);
+    scroller.frame = scroller.settle = 0;
   }
+  // New output while the screen is shifted: the shift belonged to the rows that were there.
+  term.onWriteParsed(() => {
+    if (scroller.rest && !scroller.frame && !scroller.settle && scroller.axis !== 'y') {
+      scroller.rest = 0;
+      drawShift();
+    }
+  });
   $('term').addEventListener('touchstart', (event) => {
     stopMomentum();
     const touch = event.touches[0];
+    // `rest` is kept: a finger catching a flick picks the text up where it is, shift and all.
     Object.assign(scroller, { axis: event.touches.length === 1 ? undefined : null,
       x: touch.clientX, y: touch.clientY, startX: touch.clientX, startY: touch.clientY,
-      rest: 0, samples: [[event.timeStamp, touch.clientY]] });
+      samples: [[event.timeStamp, touch.clientY]] });
   }, { capture: true, passive: true });
   // Capturing, so it runs before xterm.js's own touch handler further down, and stops it.
   $('term').addEventListener('touchmove', (event) => {
@@ -1171,7 +1235,11 @@
       if (Math.hypot(dx, dy) < 6) return;
       // Sideways is the browser's: panning a grid wider than the screen.
       scroller.axis = Math.abs(dy) >= Math.abs(dx) ? 'y' : 'x';
-      if (scroller.axis === 'y') cancelPress();
+      if (scroller.axis === 'y') {
+        cancelPress();
+        // The 6 px it took to tell a scroll from a tap count, or the text lags the finger by them.
+        scroller.y = scroller.startY;
+      }
     }
     if (scroller.axis !== 'y') return;
     event.preventDefault();
@@ -1183,25 +1251,42 @@
     scroller.samples.push([event.timeStamp, touch.clientY]);
     if (scroller.samples.length > 6) scroller.samples.shift();
   }, { capture: true, passive: false });
-  $('term').addEventListener('touchend', (event) => {
-    if (scroller.axis !== 'y') return;
+  const endDrag = (event) => {
+    if (scroller.axis !== 'y') {
+      // A tap, or a sideways pan, on a screen left shifted by an interrupted flick.
+      if (scroller.rest && !scroller.frame) settle();
+      return;
+    }
     scroller.axis = null;
-    // The speed over the last ~100 ms of the drag; a finger that stopped before lifting has none.
-    const recent = scroller.samples.filter(([t]) => event.timeStamp - t < 100);
-    if (recent.length < 2) return;
+    // The speed over the last ~100 ms of movement — measured back from the last move rather than
+    // from the lift, which can trail it by a frame or more. A finger that stopped before lifting
+    // has none.
+    const [lastT] = scroller.samples[scroller.samples.length - 1];
+    const recent = scroller.samples.filter(([t]) => lastT - t <= 100);
     const [t0, y0] = recent[0], [t1, y1] = recent[recent.length - 1];
-    let velocity = (y0 - y1) / Math.max(1, t1 - t0);  // px per ms, positive scrolls forward
-    if (Math.abs(velocity) < 0.3) return;
+    const still = event.timeStamp - lastT > 100 || recent.length < 2;
+    let velocity = still ? 0 : (y0 - y1) / Math.max(1, t1 - t0);  // px/ms, + is forward
+    if (Math.abs(velocity) < 0.3) { settle(); return; }
     let last = performance.now();
     const tick = (now) => {
       const dt = Math.min(50, now - last);
       last = now;
       scrollBy(velocity * dt, scroller.x, scroller.y);
       velocity *= Math.exp(-dt / 325);
-      scroller.frame = Math.abs(velocity) > 0.03 ? requestAnimationFrame(tick) : 0;
+      const buffer = term.buffer.active;
+      const stuck = scrollsLocally() && !scroller.rest
+        && (velocity > 0 ? buffer.viewportY >= buffer.baseY : buffer.viewportY <= 0);
+      if (Math.abs(velocity) > 0.03 && !stuck) {
+        scroller.frame = requestAnimationFrame(tick);
+      } else {
+        scroller.frame = 0;
+        settle();
+      }
     };
     scroller.frame = requestAnimationFrame(tick);
-  }, { capture: true, passive: true });
+  };
+  $('term').addEventListener('touchend', endDrag, { capture: true, passive: true });
+  $('term').addEventListener('touchcancel', endDrag, { capture: true, passive: true });
 
   // Reading the clipboard from script needs a secure origin, which a relay over plain HTTP is not.
   // There, a box to paste into with the system's own menu, sent as a paste (T5.4) on Send.
